@@ -216,5 +216,13 @@ pub fn titlebar(shell: &Shell, name: &str, waiting: usize, sidebar_hidden: bool,
         .border_color(th.c("border.subtle"))
         .window_control_area(WindowControlArea::Drag)
         .child(div().absolute().left(th.px("titlebar.toggle_x")).top((th.px("titlebar.height") - th.px("titlebar.button")) / 2.).child(div().relative().child(toggle).children(badge)))
-        .child(text_font(th, div(), "body_strong").text_color(th.c("text.primary")).child(name.to_string()))
+        .child(text_font(th, div(), "body_strong").text_color(th.c("text.primary")).child(if shell.settings.is_some() { "配置".to_string() } else { name.to_string() }))
+        .child(div().flex_1())
+        .child(
+            div().pr(th.sp(2)).child(
+                icon_button(th, "settings-toggle", "settings", reduce)
+                    .tooltip(|window, cx| Tooltip::new("配置 ⌘,").build(window, cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx))),
+            ),
+        )
 }

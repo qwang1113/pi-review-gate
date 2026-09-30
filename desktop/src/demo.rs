@@ -38,7 +38,34 @@ pub struct Shot {
     pub popover: bool,
     /// A gate dialog another party answers first (`dialog.close`) right before the shot.
     pub abort: Option<(String, &'static str)>,
+    /// The config page in this state (§7); None = the page is closed.
+    pub settings: Option<crate::ui::settings::DemoState>,
 }
+
+/// The config page's fixture home (§7): the five files, written fresh, never the real ~/.pi.
+pub fn config_home() -> std::path::PathBuf {
+    let home = std::env::temp_dir().join(format!("pi-desktop-demo-config-{}", std::process::id()));
+    let files = [
+        (".pi/agent/settings.json", SETTINGS),
+        (".pi/agent/models.json", MODELS),
+        (".pi/review-gate.json", GATE),
+        ("proj/.pi/settings.json", "{\n  \"subagents\": {\n    \"enabled\": false\n  }\n}\n"),
+        ("proj/.pi/review-gate.json", GATE_PROJECT),
+    ];
+    if !home.exists() {
+        for (rel, text) in files {
+            let p = home.join(rel);
+            let _ = std::fs::create_dir_all(p.parent().unwrap());
+            let _ = std::fs::write(p, text);
+        }
+    }
+    home
+}
+
+const SETTINGS: &str = "{\n  \"defaultProvider\": \"anthropic\",\n  \"defaultModel\": \"claude-fable-5\",\n  \"defaultThinkingLevel\": \"max\",\n  \"theme\": \"dark\",\n  \"quietStartup\": false,\n  \"extensions\": [\"~/.pi/agent/extensions/review-gate\"]\n}\n";
+const MODELS: &str = "{\n  \"providers\": {\n    \"anthropic\": {\n      \"apiKey\": \"sk-ant-demo-0000\",\n      \"models\": [\n        { \"id\": \"claude-fable-5\", \"thinkingLevelMap\": { \"high\": \"high\", \"max\": \"max\" } },\n        { \"id\": \"claude-opus-5\" }\n      ]\n    }\n  }\n}\n";
+const GATE: &str = "{\n  \"copilotReview\": { \"enabled\": true },\n  \"agents\": {\n    \"reviewer\": { \"auto\": false, \"slots\": [\"anthropic/claude-fable-5:max\", \"anthropic/claude-opus-5\"] },\n    \"quality-auditor\": { \"auto\": false, \"slots\": [\"anthropic/claude-fable-5:max\"] },\n    \"worker\": { \"auto\": false, \"slots\": [\"anthropic/claude-opus-5\"], \"prompt\": \"只读调查\" }\n  }\n}\n";
+const GATE_PROJECT: &str = "{\n  \"maxRounds\": 8,\n  \"docSync\": true,\n  \"precommit\": {\n    \"lint\": null,\n    \"test\": { \"fast\": \"test:related\", \"full\": \"test\" }\n  }\n}\n";
 
 fn decorate(hub: &Hub, id: &str, state: PaneState, kind: Option<&str>) {
     let at = now_ms() / 1000 - 42;
@@ -78,7 +105,9 @@ pub fn shoot(shell: gpui_kit::Entity<crate::app::Shell>, window: gpui_kit::AnyWi
     let (root, rev, t1, t3, worker) = (id("main"), id("reviewer"), id("t1-ui-design"), id("t3-host-factory"), id("worker-1"));
     let (qa, acc, goal, adv) = (id("quality-auditor"), id("acceptance"), id("goal-auditor"), id("adviser"));
     let think = format!("{root}/1/0");
-    let shot = |name: &'static str, dark: bool, select: &str| Shot { name, dark, collapsed: false, overlay: false, select: select.to_string(), open: vec![], reason: None, popover: false, abort: None };
+    let shot = |name: &'static str, dark: bool, select: &str| Shot { name, dark, collapsed: false, overlay: false, select: select.to_string(), open: vec![], reason: None, popover: false, abort: None, settings: None };
+    use crate::ui::settings::DemoState as D;
+    let page = |name: &'static str, dark: bool, s: D| Shot { settings: Some(s), ..shot(name, dark, &root) };
     let reason = "状态条的明细应该由 prg 在 widget 里带上。\n客户端不该自己去跑 /gate-status。";
     let steps: Vec<Shot> = vec![
         shot("01-chat-dark", true, &root),
@@ -104,6 +133,16 @@ pub fn shoot(shell: gpui_kit::Entity<crate::app::Shell>, window: gpui_kit::AnyWi
         shot("21-drawer-long-confirm-light", false, &t3),
         Shot { collapsed: true, popover: true, ..shot("22-collapsed-popover-light", false, &root) },
         shot("23-status-ansi-light", false, &adv),
+        page("24-settings-form-dark", true, D::Form),
+        page("25-settings-dirty-field-error-dark", true, D::Dirty),
+        page("26-settings-json-dark", true, D::Json),
+        page("27-settings-json-syntax-error-dark", true, D::JsonSyntax),
+        page("28-settings-invalid-slot-dark", true, D::Invalid),
+        page("29-settings-saved-dark", true, D::Saved),
+        page("30-settings-leave-prompt-dark", true, D::Leave),
+        page("31-settings-conflict-prompt-dark", true, D::Conflict),
+        page("32-settings-form-light", false, D::Form),
+        page("33-settings-invalid-slot-light", false, D::Invalid),
     ];
     std::fs::create_dir_all(&dir).expect("shots dir");
     cx.spawn(async move |cx| {

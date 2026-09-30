@@ -10,7 +10,8 @@ description = "macOS desktop host for pi sessions (GPUI): pi RPC client + prg ho
 # together with gpui-component, whose Input/List/Scroll widgets t5 builds on.
 gpui-kit = "=0.7.0"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: the config page writes a file back in the key order it was read in (§7.3).
+serde_json = { version = "1", features = ["preserve_order"] }
 libc = "0.2"
 # Only for `--shots`: the same image crate GPUI already builds (png is on there).
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }

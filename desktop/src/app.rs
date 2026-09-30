@@ -12,6 +12,7 @@ use crate::ui::dialog_state::DialogUi;
 use crate::ui::drawer::{self, DrawerView};
 use crate::ui::motion::{StreamFade, Tween};
 use crate::ui::scroll::ScrollAnim;
+use crate::ui::settings::{Leave, SettingsPage};
 use crate::ui::sidebar::SelSlide;
 use crate::ui::sidebar_model::{self, Group, Inputs, Status};
 use crate::ui::sidebar_state::{self, SidebarState};
@@ -77,6 +78,9 @@ pub struct Shell {
     /// The dialog the selected session showed on the last tick.
     had_dialog: Option<String>,
     pub(crate) error: Option<String>,
+    /// The config page, while it replaces the main area (§7).
+    pub settings: Option<Entity<SettingsPage>>,
+    pub(crate) settings_sub: Option<Subscription>,
     seen: u64,
     _subs: Vec<Subscription>,
 }
@@ -104,6 +108,18 @@ impl Shell {
                 let _ = weak.update(cx, |this, cx| this.intercept(&ev.keystroke, window, cx));
             }),
         ];
+        // Closing the window with unsaved config edits asks first (§7.4).
+        let closing = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            let page = closing.upgrade().and_then(|s| s.read(cx).settings.clone());
+            match page.filter(|p| p.read(cx).any_dirty()) {
+                Some(p) => {
+                    p.update(cx, |p, cx| p.request_leave(Leave::Quit, cx));
+                    false
+                }
+                None => true,
+            }
+        });
         cx.spawn_in(window, async move |this, cx| {
             let mut ticks = 0u32;
             loop {
@@ -158,6 +174,8 @@ impl Shell {
             seen_selected: None,
             had_dialog: None,
             error: None,
+            settings: None,
+            settings_sub: None,
             seen: u64::MAX,
             _subs: subs,
         }
@@ -230,6 +248,10 @@ impl Shell {
         }
     }
 
+    pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
+    }
+
     pub fn selected(&self) -> Option<String> {
         self.hub.lock().focused.clone()
     }
@@ -252,6 +274,11 @@ impl Shell {
 
     pub fn select(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.close_sidebar_overlay(cx);
+        // Picking a session leaves the config page — through its unsaved-changes prompt (§7.4).
+        if let Some(page) = self.settings.clone() {
+            page.update(cx, |p, cx| p.request_leave(Leave::Select(id), cx));
+            return;
+        }
         if id == self.selected() {
             return;
         }
@@ -304,7 +331,17 @@ impl Shell {
         let dialog = sel.as_deref().and_then(|s| self.active_dialog(s)).map(|(k, _)| k);
         let composer_focused = self.composer.read(cx).focus_handle(cx).contains_focused(window, cx);
         let chat = self.chat_scroll.clone();
+        if let Some(page) = self.settings.clone() {
+            if page.update(cx, |p, cx| p.key(ks, window, cx)) {
+                cx.stop_propagation();
+                return;
+            }
+        }
         let handled = match (m.platform, m.shift, m.alt, ks.key.as_str()) {
+            (true, false, false, ",") => {
+                self.toggle_settings(window, cx);
+                true
+            }
             (true, false, false, "enter") => match dialog.clone().filter(|k| self.reason_focused(k, window, cx)) {
                 Some(k) => {
                     self.submit_reason(&k, window, cx);
@@ -422,7 +459,16 @@ impl Shell {
         self.sidebar.yielded = false;
         self.sidebar.slide = Tween::at_rest(0.0);
         self.toggled = shot.open.iter().map(|s| s.to_string()).collect();
+        // Selecting would ask the config page to leave: drop it outright between shots.
+        self.settings = None;
+        self.settings_sub = None;
         self.select(Some(shot.select.clone()), window, cx);
+        if let Some(state) = shot.settings {
+            self.toggle_settings(window, cx);
+            if let Some(page) = self.settings.clone() {
+                page.update(cx, |p, cx| p.demo(state, window, cx));
+            }
+        }
         // After selecting: picking a session closes the overlay.
         if shot.overlay {
             self.sidebar.narrow = true;
@@ -543,9 +589,18 @@ impl Render for Shell {
         let side = sidebar::render_sidebar(self, &groups, window, cx);
         let overlay = sidebar::render_overlay(self, &groups, window, cx);
         let main_w = win_w - self.sidebar.push.value(now).max(0.);
-        let (main, drawer_w) = match selected.clone() {
-            None => (self.empty_state(cx), 0.),
-            Some(sid) => self.session_view(&sid, &name, main_w, window, cx),
+        let (main, drawer_w) = match (self.settings.clone(), selected.clone()) {
+            (Some(page), _) => {
+                let reduce = self.reduce_motion;
+                page.update(cx, |p, _| {
+                    p.th = th;
+                    p.reduce = reduce;
+                });
+                let el = ui::anim::appear(div().size_full().child(page), "settings-page", th.ms("page_enter"), th.ease("smooth"), 0., if reduce { 0. } else { th.n("space.2") });
+                (el.into_any_element(), 0.)
+            }
+            (None, None) => (self.empty_state(cx), 0.),
+            (None, Some(sid)) => self.session_view(&sid, &name, main_w, window, cx),
         };
         let status = status::render_status(self, selected.as_deref(), win_w, cx);
         let popover = status::render_popover(self, selected.as_deref(), win, window, cx);

@@ -729,14 +729,15 @@ pi RPC 的 `extension_ui_request` 对话框没有「（推荐）」、decline �
 │   项目          │  │ worker          [slots 列表…]                  │  │
 │                 │  └────────────────────────────────────────────────┘  │
 │                 ├─────────────────────────────────────────────────────┤
-│                 │ 有未保存的修改 · 保存前备份到 ….bak  [放弃] [保存 ⌘S]│ ← 保存栏 56
+│                 │ 有未保存的修改 · 保存前备份到 ….bak-<时间> [放弃] [保存 ⌘S]│ ← 保存栏 56
 └─────────────────┴───────────────────────────────────────────────────────┘
 ```
 
 ### 7.1 导航与文件
 
-- 左导航宽 `settings.nav_width`，两组：**pi**（`~/.pi/agent/settings.json`）与**门禁**（全局 `~/.pi/review-gate.json`、
-  项目 `<repo>/.pi/review-gate.json`，项目层只在当前会话有 repo 时出现）。一项 = 一个文件；文件下按顶层键列出子项，
+- 左导航宽 `settings.nav_width`，两组：**pi**（`~/.pi/agent/settings.json`、`~/.pi/agent/models.json`、项目
+  `<repo>/.pi/settings.json`）与**门禁**（全局 `~/.pi/review-gate.json`、项目 `<repo>/.pi/review-gate.json`）；项目层两项
+  只在当前会话有 repo 时出现。一项 = 一个文件；文件下按顶层键列出子项，
   点子项滚到对应分区。导航项高 `settings.nav_item_height`，`font.small`，圆角 `lg`；选中底色是一块会滑的覆盖层
   （`motion.spring.gentle`，同 §4.3）。
 - 头部（`drawer.header_height` 高）：文件标题 + 完整路径（`font.code_small`、`text.muted`，带 `copy`）+ 右侧「表单 | JSON」分段控件。
@@ -767,19 +768,25 @@ pi RPC 的 `extension_ui_request` 对话框没有「（推荐）」、decline �
 
 ### 7.4 校验与保存
 
-- **客户端只校验语法与类型**（JSON 能解析、字段类型没变）。模型 spec 可否解析、角色是否齐全这类**语义**规则只在门禁
-  一处（启动硬检查），客户端不复制——保存成功的横幅里写「门禁会在下个会话启动时检查这份配置」。
+- **保存前经 prg 自己的校验器**（2026-09-30 修订，r4）：客户端把草稿全文交给 `node scripts/validate-config.ts <kind>`
+  （逻辑在 `lib/config-validate.ts`：门禁配置里本文件声明的每个 agent 角色用启动硬检查 `validateAgentsForStartup` 判
+  slot 能否解析、`precommit` 各步用 `parsePrecommitStep` 判；pi 配置判 JSON 与已知字段类型）。**Rust 里不复制任何规则**；
+  不过就不写盘，找得到对应行的 finding 标在那一行下（同表单字段错误的样式），找不到的列在正文顶部横条里；校验器跑不起来
+  = 不保存（fail-closed），原因写在保存栏。改动任一字段即清掉旧 finding（它说的是上一份文本）。保存成功的横幅写
+  「已保存 · 已通过 prg 校验」。可换 `PI_DESKTOP_NODE` / `PI_DESKTOP_PRG` 指定 node 与 prg 目录。
 - JSON 视图语法错误：输入停顿后即时标出，出错行底色 `diff.del.bg`、行号 `semantic.danger`，并出 §7.3 的错误横条。
 - 表单字段错误（数字框写了非数字等）：控件边框 `semantic.danger`，行下方展开一行说明（`font.small`、`semantic.danger`、
   `alert-circle`），高度 0→行高（`motion.duration.field_error` / `smooth`）把下面的行平滑推开。
 - **保存栏**：草稿 ≠ 磁盘内容时从底部升起（高 `settings.save_bar_height`，translateY 满高→0，`motion.duration.save_bar` /
-  `smooth`）：左侧「有未保存的修改 · 保存前会把原文件备份到 `<文件>.bak`」，右侧 secondary「放弃修改」+ primary
+  `smooth`）：左侧「有未保存的修改 · 保存前会把原文件备份到 `<文件>.bak-<时间>`」，右侧 secondary「放弃修改」+ primary
   「保存 ⌘S」。有错误时「保存」禁用并写「N 处错误」。导航里该文件项行尾出 `size.unread_dot` 大小的
   `semantic.warning` 点。
-- **备份**：写盘前先把磁盘上的原文件复制到同目录 `<文件>.bak`（覆盖上一份备份），再原子写入（写临时文件后 rename）。
+- **备份**：写盘前先把磁盘上的原文件复制到同目录 `<文件>.bak-YYYYMMDD-HHMMSS`（本地时间；同一秒再存加 `-2`、`-3`，
+  从不覆盖旧备份），再原子写入（写临时文件后 rename）。文件原本不存在则不备份、直接创建。
   备份失败 = 不保存。
 - **磁盘文件在打开后被别人改过**（修改时间变了）：保存前弹 §6 抽屉单选：「A. 用我的版本覆盖（磁盘版本会先备份）」
-  （推荐）/「B. 放弃我的修改，重新载入」，模板同门禁（含 ✎ 行）。
+  （推荐）/「B. 放弃我的修改，重新载入」；Esc = 暂不处理（草稿保留）。这两处是客户端自己的抽屉（同字母、同「（推荐）」标牌、
+  ↑↓ / Enter），**没有 ✎ 行**：答案不回传给任何人，原因无处可去。
 - **保存成功**：按钮图标换成 `check`（尺寸 10→14，`motion.spring.snappy`）、文字换成「已保存」、底色插值到
   `semantic.success`（`dot_color`），停 `motion.duration.save_hold` 后保存栏沉下；同时弹横幅「已保存 · 原文件备份在 <路径>」。
 - **保存失败**（写盘错误）：保存栏抖一下（`shake`），左侧文字换成错误原因（`semantic.danger`），草稿保留。

@@ -15,10 +15,11 @@ macro_rules! icons {
 }
 
 icons!(
-    "arrow-down", "arrow-left", "arrow-up", "badge-check", "bell", "bot", "brain", "check", "chevron-down", "chevron-right",
-    "circle", "circle-alert", "circle-check", "circle-dot", "circle-x", "copy", "crown", "file-check-corner",
-    "file-pen", "file-text", "git-branch", "layers", "loader-circle", "message-circle-question-mark", "panel-left",
-    "pencil", "plug", "refresh-cw", "shield-alert", "sparkles", "square", "square-check", "target", "terminal", "wrench", "x",
+    "arrow-down", "arrow-left", "arrow-up", "badge-check", "bell", "bot", "braces", "brain", "check", "chevron-down", "chevron-right",
+    "circle", "circle-alert", "circle-check", "circle-dot", "circle-x", "copy", "crown", "eye", "file-check-corner",
+    "file-pen", "file-text", "git-branch", "layers", "list", "loader-circle", "message-circle-question-mark", "panel-left",
+    "pencil", "plug", "plus", "refresh-cw", "settings", "shield-alert", "sparkles", "square", "square-check", "target", "terminal",
+    "trash-2", "wrench", "x",
 );
 
 const FONTS: &[&[u8]] = &[

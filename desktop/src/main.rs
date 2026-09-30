@@ -6,6 +6,7 @@
 //! `PI_DESKTOP_APPEARANCE=light|dark` pins the theme (default: follow macOS).
 
 mod app;
+mod config_store;
 mod demo;
 mod host_server;
 mod hub;

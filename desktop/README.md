@@ -14,6 +14,8 @@ scripts/bundle.sh                   # .app wrapper: needed for native notificati
 
 `PI_DESKTOP_PI` overrides the pi executable (default `pi` on `PATH`);
 `PI_DESKTOP_APPEARANCE=light|dark` pins the theme (default: follow macOS).
+The config page (⌘,) validates through prg: `PI_DESKTOP_NODE` (default `node`)
+and `PI_DESKTOP_PRG` (default: the checkout this binary was built from).
 
 The UI follows `docs/desktop/ui-design.md`; every colour, size, duration and
 easing comes from `design/tokens.json` (embedded at compile time, see
@@ -31,6 +33,7 @@ screen-recording permission.
 | `src/hub.rs` | shared state the socket and the window act through: processes, logs, dialogs, focus |
 | `src/host_server.rs` | 0600 unix socket, peer-uid check, `hello` binding, per-method dispatch |
 | `src/notify.rs` | `UNUserNotificationCenter`; click ⇒ `focus` |
+| `src/config_store.rs` | the config page's files: list, load, and the one save path — prg's checker (`scripts/validate-config.ts`), mtime conflict, timestamped backup, atomic write |
 | `src/app.rs` | the window shell: assembles the regions, global keys, clock ticks, view state |
 | `src/demo.rs` | `--demo` states and the `--shots` walker |
 | `src/ui/theme.rs` | tokens.json → colours / sizes / fonts / shadows / durations / easings / springs |
@@ -55,6 +58,9 @@ screen-recording permission.
 | `src/ui/sidebar.rs` | session list, status dots and their motion, sliding selection, collapse, overlay, resize |
 | `src/ui/status_model.rs` | prg's `review-gate-agents` widget → strip facts and unmet items — pure |
 | `src/ui/status.rs` | the bottom status strip (ANSI colour), the unmet popover |
+| `src/ui/settings_model.rs` | config page draft: form fields from the JSON value's types, JSON view, switching, dirtiness — pure |
+| `src/ui/settings.rs` | config page state and behaviour: files, drafts, text boxes, async save, leave / conflict prompts |
+| `src/ui/settings_view.rs` | config page painting: nav, header, segmented control, form rows, JSON editor, save bar, prompt |
 
 ## GPUI dependency
 
