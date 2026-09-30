@@ -5,7 +5,7 @@
  * lib/judge-submit-tool.ts (t8, 2026-09-26) so the tool body stays about the dispatch.
  */
 
-import { QUALITY_ROLE } from "./quality-round.ts";
+import { QUALITY_ROLE, QUALITY_RULES_PATH } from "./quality-round.ts";
 import { CANCELLED_NEXT_STEP } from "./round-cancel-ledger.ts";
 
 /**
@@ -128,13 +128,13 @@ export function acceptedReceipt(facts: {
             // was never started.
             ? [
                 "- 本轮**只**跑质量轮（功能审查环节已关闭，用户设定的环节开关）：质量轮审代码本身" +
-                  "（哲学/架构/正确性/性能，再看简洁可读可维护，判定表 `docs/code-quality-rules.md`），" +
+                  `（哲学/架构/正确性/性能，再看简洁可读可维护，判定表 \`${QUALITY_RULES_PATH}\`），` +
                   "外加按开关运行的 precommit。你不需要为这一轮再调 judge_submit；要恢复功能审查，" +
                   "让用户重开开关（`choose_loop_stages`）。",
               ]
             : [
                 "- 本轮**同时**跑两个 judge：质量轮（审代码本身：哲学/架构/正确性/性能，再看简洁可读可维护，" +
-                  "判定表 `docs/code-quality-rules.md`）与功能轮 reviewer（审需求符合度/测试覆盖/文档同步），" +
+                  `判定表 \`${QUALITY_RULES_PATH}\`）` + "与功能轮 reviewer（审需求符合度/测试覆盖/文档同步），" +
                   "外加与它们并行的全量 precommit。你不需要为这一轮再调 judge_submit。",
                 "- 谁先判不过由门禁收口：质量轮非 READY ⇒ 终止 reviewer 与 precommit；reviewer 非 READY ⇒ 终止质量轮与 precommit；" +
                   "precommit FAIL ⇒ 只终止 reviewer，质量轮继续。reviewer 先交卷 READY 而质量轮未交卷时，那份 READY 会被**扣下**，等质量轮结论落地再补记。",
