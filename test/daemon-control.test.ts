@@ -187,6 +187,10 @@ test("launchTask opens a window in the daemon's own scope with mode, station and
   const env = creation.find((entry) => entry.startsWith("RG_GATE_MODE="));
   assert.equal(env, "RG_GATE_MODE=loop");
   assert.ok(creation.some((entry) => entry === "RG_STATION_CAP=commit"));
+  // The daemon's own home rides along: `envCommand` strips every gate variable
+  // that is not passed, and a session that cannot see the daemon's home writes
+  // its questions where this daemon never looks (quality round P2, 2026-10-01).
+  assert.ok(creation.some((entry) => entry === `RG_DAEMON_HOME=${home}`), `unexpected env: ${creation.join(" ")}`);
   assert.ok(creation.includes("--session-id"));
   assert.ok(creation.includes("--name"));
   assert.equal(creation[creation.indexOf("--name") + 1], "panel-task");

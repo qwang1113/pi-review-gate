@@ -53,7 +53,7 @@ import { sessionInboxPath, sessionNameProblem, sessionRegistryRoot } from "../se
 import { STATION_CAP_ENV } from "../repo-pr-policy.ts";
 import type { DeliveryStation } from "../delivery-station.ts";
 import { GATE_MODE_ENV } from "../task-mode.ts";
-import { daemonHome } from "./paths.ts";
+import { daemonHome, DAEMON_HOME_ENV } from "./paths.ts";
 import { ensureDaemonIdentity } from "./state.ts";
 import type { SessionObserver } from "./sessions.ts";
 
@@ -299,7 +299,14 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
   // itself. Everything else tmux could name belongs to somebody else.
   const run: TmuxRunner = (argv, env, extra) =>
     deps.runTmux(argv, env, [...(scopeName === undefined ? [] : [scopeName]), ...(extra ?? [])]);
-  const env: Record<string, string> = { [GATE_MODE_ENV]: mode };
+  // THE SESSION READS THE SAME HOME THE DAEMON DOES (quality round P2,
+  // 2026-10-01). `envCommand` STRIPS every gate variable not passed here
+  // (`RG_DAEMON_HOME` is in `GATE_ENV_NAMES`, orchestrator-tmux.ts), so a
+  // session started from the panel would answer its dialogs into `$HOME` while
+  // this daemon looks under the override: the question would be invisible in
+  // the panel, and the session's own notification-suppression probe would look
+  // in the wrong home too. The daemon knows where it lives - it says so.
+  const env: Record<string, string> = { [GATE_MODE_ENV]: mode, [DAEMON_HOME_ENV]: deps.home };
   if (station !== "") env[STATION_CAP_ENV] = station;
   const opened = openScopeWindow(run, scope, {
     cwd: repo,
