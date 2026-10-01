@@ -556,7 +556,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 
 ---
 
-## 五、`lib/` 全量速查表（276 个模块）
+## 五、`lib/` 全量速查表（279 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -610,15 +610,18 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `copilot-review-state.ts` | L7 的状态机本体：状态、持久化形状、`arm` / `record` / `release` 三个转移、`copilotProblems`、sidecar 校验 `sanitizeCopilotState`；`CopilotReviewState.triage` 带用户自己的裁决，每个转移都带着它走 |
 | `copilot-probe-parse.ts` | L7 的 gh 输出纯解析：各 GraphQL query 常量、`parseCopilotProbe` / `parseCopilotTimeline` / `parseCopilotPayload` / `parsePrView` / `decidePrView`、可用性判定 `decideCopilotSupport`、`isCopilotAuthor`；认不出的形状一律是「没数据」，不抛不猜 |
 | `copilot-triage.ts` | L7 用户那半边的纯规则：轮次阈值（`COPILOT_TRIAGE_ASK_FROM_ROUND = 4` 起每条问题先问用户）、线程键（thread id + 最后一条评论 id）、「哪些还没表态」、四组裁决汇总、`triage` 块的 sanitize；无 IO/无时钟 |
-| `daemon/cli.ts` | `pi-gate daemon start|stop|status|install|uninstall`：start 幂等靠探测 + `start.lock`（`O_EXCL`，两个并发 start 不会各起一份，死主的锁可接管），stop 等进程真死再清记录，install/uninstall 是明确定位的占位（launchd 属 menubar-and-boot） |
+| `daemon-presence.ts` | **「daemon 在线吗」的唯一实现**（2026-10-01，menubar-and-boot；规则冻结在 `docs/daemon/api.md` §3：state 文件可解析且 schema 1 + pid 活 + 带 token 的 `127.0.0.1:<port>/api/health` 1s 内 200，三条全过才算在线）。同一份判定有两个入口：`probeDaemon`（异步 `fetch`，CLI `status`/`start`/`stop` 读的那个理由）与 `probeDaemonSync` / `daemonOnlineSync`（**同步**，用系统 curl 且把 url 与 `Authorization` 从 stdin 喂给它 —— token 绝不进 argv；给不能 await 的两处用：对话框弹横幅与进程 `exit` 钩子）。两者只差「怎么问端口」，判决都交给纯函数 `judgeDaemonPresence`；**探测失败 / 超时 / 读不到一律不在线**，所以终端通知在无法确认时照旧发 |
+| `daemon/autostart.ts` | **第三种启动方式**：`ensureDaemonRunning` = 探测 → 抢 `start.lock`（`O_EXCL`，死主的可接管）→ 锁下再探测一次 → 脱离父进程 spawn `daemon run`（日志 fd、`RG_DAEMON_HOME` 在这里，父进程用完就关掉自己那份 fd）→ 轮询到端口应答才算成功；返回 `online` / `started` / `busy` / `failed` 而**从不抛**。CLI 的 `start` 与门禁 `session_start`（`ensureDaemonInBackground`，仅 `sideEffectsEnabled` 的真交互会话）走同一份实现，所以「不起第二份」只有一个地方在管 |
+| `daemon/cli.ts` | `pi-gate daemon start|stop|status|install|uninstall`：start 幂等靠探测 + 委托 `daemon/autostart.ts`（锁与 spawn 都在那里），`run` 绑端口前先探测（已在线就以 0 退出 —— launchd 下重起才不会是停不下来的失败循环），stop 等进程真死再清记录，install/uninstall 写/删 `~/Library/LaunchAgents/<label>.plist` 并 bootstrap/bootout（`daemon/service-launchd.ts`） |
 | `daemon/config.ts` | 四个配置文件的读（**敏感键整棵子树掩码**，非字符串也掩）/写（白名单 + `validateSlots` + 时间戳备份 + 原子写 + 保留 10 份）；配置路径与字段清单也在这里 |
 | `daemon/control.ts` | 写 inbox（与 `session-message-tools.ts` 逐字段一致，含溢出 side file）、`POST /api/tasks` 起会话（复用 `openScopeWindow` 与专属 session 派生，env 传 `RG_GATE_MODE`/`RG_STATION_CAP`）、候选仓库列表、daemon 自己的 tmux runner（只寻址自己派生的那个 session） |
 | `daemon/events.ts` | SSE hub + 会话 watcher（session/output/notification 事件）+ 通知去重存储（**判定调门禁自己的 `decideNotify`**、标题与 key 用 `buildUserNotifyMessage`/`notifyKey`，不另立一套；存储是每 key 一个 claim 文件 `link(2)` + 追加式 `history.jsonl`，写入与裁剪是本模块的 append+prune）；`prime` 只在没有游标时建，**永不移动已有游标** |
 | `daemon/paths.ts` | daemon 的全部路径与常量（state / token / questions / notifications / identity / 日志）+ sessionId 作路径段的安全校验 |
 | `daemon/questions.ts` | 待答问题文件协议的实现（列待答、写答案）：身份 = (目录 sessionId, 文件名 requestId)，且必须与文件里的字段一致；答案用 `O_EXCL` 创建 ⇒ **先答者生效**；归一复用 `resolveAnswer` |
 | `daemon/server.ts` | 路由表 + 鉴权（0600 token、常量时间比较）+ SSE 帧格式 + 静态接线；**无策略**，每个 endpoint 只把请求转给上面某个模块 |
+| `daemon/service-launchd.ts` | **登录自启的实现**（2026-10-01）：`buildLaunchdPlist` 从事实（node 路径、入口、端口、home）拼出 LaunchAgent（`RunAtLoad` + `KeepAlive.SuccessfulExit=false` —— 崩溃重起、`daemon stop` 的干净退出不重起；`ThrottleInterval` 30s）、`installDaemonService`（bootout 旧的 → bootstrap 新的）与 `uninstallDaemonService`（bootout → 删 plist，没装过如实报 `removed:false`）；launchctl runner 可注入，测试绝不碰真实的 `~/Library/LaunchAgents` 与用户会话 |
 | `daemon/sessions.ts` | 三源合并（rg-sessions 注册表 + tmux `@rg_*` + 转写）→ `DaemonSession`：状态词表复用 `CHILD_STATES`、存活复用 `classifyEntry`、未满足项复用 `unmetRequirements`；带 1s 采集 / 5s 索引 / 按 (path,size) 的 state 缓存，且每轮 collect 收尾按本轮触达的键回收（常驻进程不得无上限增长） |
-| `daemon/state.ts` | state 文件（0600，含 pid/port/startedAt/workspaceRoots，**不含 token**）、token（独立 0600 文件、常量时间比较）、**在线判定唯一实现** `probeDaemon`（state 可解析 + pid 活 + 带 token 的 `/api/health` 1s 内 200） |
+| `daemon/state.ts` | state 文件（0600，含 pid/port/startedAt/workspaceRoots，**不含 token**）、token（独立 0600 文件、常量时间比较）、daemon 身份（`ensureDaemonIdentity`）与人类可读的一行 `describeDaemonState`；**在线判定不在这里** —— 2026-10-01 起是 `lib/daemon-presence.ts`，两个入口共用一条规则 |
 | `daemon/static.ts` | 静态托管：SPA fallback、路径穿越拒绝、产物缺失时返回说明页（200 而非 500）；`DEFAULT_WEB_DIR` 的解析（`fileURLToPath`，含空格/非 ASCII 的路径也认）在这里 |
 | `daemon/transcript.ts` | 会话 JSONL 的读取（head / tail / 按偏移的 tailer / 输出条目解析 / 门禁 state 抽取）：只读所需字节；offset 一律取「这次读自己的结束位置」，不重新 stat（重 stat 会把两次之间落盘的行既漏掉回放又跳过增量） |
 | `delivery-station.ts` | 交付站点（`precommit` / `commit` / `pr`）：类型、解析与缺省（缺失或非法一律读成 `precommit`）、严格度排序、「某站点放行哪些 `ShipCommandKind`」的纯判定与超站拦截文案（`stationShipProblem` / `STATION_SHIP_NEXT_STEPS`，只给用户能走的两条路、不给申诉假出路），以及 `declare_done` 的「到站」判定（`stationArrivalProblems`：`commit` 要工作区干净，`pr` 要三条证据之一 —— 门禁**亲眼看到**成功的 `gh pr create`（`GateState.shippedKinds`）、Copilot 周期已解析出的 PR 号，或**门禁自己查到的、当前分支上开着的 PR**（`lib/station-pr-evidence.ts`）—— **且本地 HEAD 已在它的 upstream 上**（`prEvidencePresent` / `prArrivalProven` 是唯一的两条谓词，扩展也调前者决定要不要发网络查询；「挂着旧 PR、本轮提交还在本地」——包括门禁自己在 PR 开着之后落的 checkpoint——一律判未到站）；无 fs、无时钟，goal 侧、plan 侧与 ship 门禁共用同一份枚举 |

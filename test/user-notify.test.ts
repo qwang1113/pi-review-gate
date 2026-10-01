@@ -307,8 +307,43 @@ test("the watching check is asked LAZILY, and only on the path that would send",
   assert.equal(watched, 1, "the one that sends asks exactly once");
 });
 
-test("one banner per session: the group is what removes the previous one", () => {
-  assert.deepEqual(buildNotifierArgv({ title: "T", body: "B", group: "sess-1" }), [
+// ---------------------------------------------------------------------------
+// ONE SENDER AT A TIME (2026-10-01)
+// ---------------------------------------------------------------------------
+
+test("while the daemon is online the menu bar sends and this side stays silent", () => {
+  const control = plan();
+  assert.equal(control.status, "send", "without a daemon this side is the sender");
+
+  const suppressed = plan({ daemonOnline: () => true });
+  assert.equal(suppressed.status, "skipped");
+  if (suppressed.status === "skipped") assert.match(suppressed.reason, /daemon 在线/);
+
+  // EVERY kind, not just the question: one fact, one sender.
+  for (const kind of ["finished", "failed", "needs-user"] as const) {
+    assert.equal(plan({ kind, daemonOnline: () => true }).status, "skipped");
+  }
+  // …and an offline daemon changes nothing about the old behaviour.
+  assert.equal(plan({ daemonOnline: () => false }).status, "send");
+});
+
+test("the daemon probe is asked LAZILY, and a suppressed banner spends no throttle slot", () => {
+  let asked = 0;
+  const daemonOnline = () => { asked += 1; return true; };
+  assert.equal(plan({ daemonOnline, stateVariant: "t1-x" }).status, "skipped");
+  assert.equal(plan({ daemonOnline, interactive: false }).status, "skipped");
+  assert.equal(plan({ daemonOnline, notifierPath: undefined }).status, "missing");
+  assert.equal(asked, 0, "none of those three reaches a probe at all");
+
+  const history = recordNotify(emptyNotifyHistory(), notifyKey("任务完成 · pi-review-gate", "本轮完成"), T0);
+  assert.equal(plan({ daemonOnline, history, now: T0 + 1 }).status, "throttled");
+  assert.equal(asked, 0, "a throttled banner asks nothing");
+
+  assert.equal(plan({ daemonOnline }).status, "skipped");
+  assert.equal(asked, 1, "the banner that would have gone out asks exactly once");
+});
+
+test("one banner per session: the group is what removes the previous one", () => {  assert.deepEqual(buildNotifierArgv({ title: "T", body: "B", group: "sess-1" }), [
     NOTIFIER_BINARY, "-title", "T", "-message", "B", "-group", "sess-1",
   ], "`-group` is what makes Notification Center keep ONE banner for the session");
   assert.ok(!buildNotifierArgv({ title: "T", body: "B" }).includes("-group"),

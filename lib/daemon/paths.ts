@@ -35,6 +35,21 @@ export const DAEMON_HOST = "127.0.0.1";
 /** How long the online probe waits for `/api/health` before calling it offline. */
 export const DAEMON_PROBE_TIMEOUT_MS = 1_000;
 
+/**
+ * The agent-home override: `RG_DAEMON_HOME` beats `$HOME`.
+ *
+ * It exists for the tests (one scratch home per daemon) and for a user who
+ * keeps their agent files outside `$HOME` — and it has to be ONE name, read in
+ * one place: the CLI resolves it, the detached child inherits it, and the
+ * notification probe must look at the same home the CLI just started.
+ */
+export const DAEMON_HOME_ENV = "RG_DAEMON_HOME";
+
+/** The agent home every daemon path below is derived from. */
+export function daemonUserHome(env: NodeJS.ProcessEnv = process.env): string {
+  return env[DAEMON_HOME_ENV] ?? homedir();
+}
+
 /** A session id used as a path segment must not be able to leave its directory. */
 const SAFE_ID = /^(?!.*\.\.)[A-Za-z0-9._-]{1,128}$/;
 

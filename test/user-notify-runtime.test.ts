@@ -44,6 +44,8 @@ function harness(over: {
   frontBundleId?: string | undefined | (() => string | undefined);
   /** Make every tmux call throw — the other half of the same fail-open rule. */
   tmuxThrows?: boolean;
+  /** Is the daemon online (⇒ the menu bar app is the sender, not this side)? */
+  daemonOnline?: boolean | (() => boolean);
 } = {}): Harness {
   const state = emptyState("sess-1", 10);
   if (over.taskMode) state.taskMode = over.taskMode;
@@ -94,6 +96,10 @@ function harness(over: {
       spawnDetached: (argv) => { sent.push([...argv]); },
       spawnBlocking: (argv) => { blocking.push([...argv]); },
       resolveNotifier: () => ("notifier" in over ? over.notifier : "/opt/homebrew/bin/terminal-notifier"),
+      // THE OTHER SENDER: injected, so no test probes a real daemon. Default
+      // false = "cannot confirm online" = this side sends, which is the
+      // behaviour every other test in this file is about.
+      daemonOnline: () => (typeof over.daemonOnline === "function" ? over.daemonOnline() : (over.daemonOnline ?? false)),
     });
     runtime.armExitHandler();
   } finally {
@@ -157,6 +163,27 @@ test("nothing is spawned when the session may not send, and tmux is not even ask
   assert.deepEqual(h.sent, []);
   assert.deepEqual(h.tmuxCalls, [], "a child session must not pay for a tmux round trip");
   assert.equal(h.state.notify, undefined);
+});
+
+test("an online daemon means the menu bar sends: nothing is spawned and no throttle slot is spent", () => {
+  const h = harness({ taskMode: "loop", daemonOnline: true });
+  const outcome = h.notify({ kind: "needs-user", detail: "选哪个方案？" });
+  assert.equal(outcome.status, "skipped");
+  if (outcome.status === "skipped") assert.match(outcome.note, /daemon 在线/);
+  assert.deepEqual(h.sent, [], "the menu bar is the sender while the daemon answers");
+  assert.deepEqual(h.tmuxCalls, [], "suppression costs no tmux round trip");
+  assert.equal(h.state.notify, undefined, "nothing was sent, so nothing is recorded");
+  assert.equal(h.persists, 0, "…and the sidecar is not rewritten either");
+
+  // THE EXIT BANNER TOO: it is the same channel, and one fact has one sender.
+  h.exit();
+  assert.deepEqual(h.blocking, []);
+});
+
+test("a probe that throws is 'cannot confirm' — the banner still goes out (fail open)", () => {
+  const h = harness({ taskMode: "loop", daemonOnline: () => { throw new Error("probe exploded"); } });
+  assert.equal(h.notify({ kind: "finished", detail: "x" }).status, "sent");
+  assert.equal(h.sent.length, 1);
 });
 
 test("a user looking at this session's own pane is not interrupted (user decision, 2026-09-18)", () => {

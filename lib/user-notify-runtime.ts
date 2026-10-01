@@ -24,6 +24,7 @@
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 
+import { daemonOnlineSync } from "./daemon-presence.ts";
 import type { GateState } from "./gate-state.ts";
 import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 // The pane-id shape has ONE implementation (quality round P2, 2026-09-18):
@@ -75,6 +76,16 @@ export interface UserNotifyRuntimeDeps {
   /** This session's tmux pane, or undefined outside tmux. */
   runTmux: TmuxRunner;
   now?(): number;
+  /**
+   * Is the daemon online ({@link daemonOnlineSync}) — i.e. is the menu bar app
+   * the sender?
+   *
+   * Injected so a test never probes a real daemon; the DEFAULT is the real sync
+   * probe (`lib/daemon-presence.ts`), because the terminal side has to know
+   * this without the extension having to wire anything: every gate dialog's
+   * banner and the exit handler ask it.
+   */
+  daemonOnline?(): boolean;
   /** Injected so a test can count spawns instead of making them. */
   spawnDetached?(argv: readonly string[]): void;
   /** Injected so a test can count the blocking one. */
@@ -322,6 +333,22 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
         // a client sweep plus two `lsappinfo` calls, and a session that can
         // never send (a child, a judge pane) must not pay for it either.
         watching: () => userIsWatching(ownAddress()?.paneId, sessionBundle),
+        // ONE SENDER AT A TIME: while the daemon answers, the menu bar app
+        // raises the banner and this side stays silent (user decision; see
+        // lib/user-notify.ts `planUserNotify`). A probe that cannot confirm it
+        // says "offline" and the banner goes out here — the direction that
+        // ends with somebody being told.
+        daemonOnline: () => {
+          try {
+            return deps.daemonOnline ? deps.daemonOnline() : daemonOnlineSync();
+          } catch {
+            // A probe that THROWS is "cannot confirm", never "online": the
+            // other reading would let an error in the evidence-gathering
+            // silence the channel (the same fail-open rule the "is the user
+            // looking" path follows).
+            return false;
+          }
+        },
         // ONE BANNER PER SESSION: the notifier REMOVES an older banner with the
         // same group, so a four-question interview leaves one banner in
         // Notification Center instead of four (user report, 2026-09-18).

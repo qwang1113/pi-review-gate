@@ -1,6 +1,5 @@
 /**
- * THE DAEMON'S OWN IDENTITY — its state file, its token, and the ONE rule that
- * answers "is the daemon online".
+ * THE DAEMON'S OWN IDENTITY — its state file and its token.
  *
  * ── WHY THE TOKEN IS NOT IN THE STATE FILE ──
  *
@@ -11,16 +10,13 @@
  * screen) also reads the secret, so it lives in its own 0600 file and only a
  * caller that already knows where to look can read it.
  *
- * ── AND THE ONE ONLINE RULE (frozen in docs/daemon/api.md) ──
+ * ── AND THE ONE ONLINE RULE ──
  *
- *   state file parses (§schema 1)  AND  its pid is alive  AND
- *   `GET /api/health` answers 200 within {@link DAEMON_PROBE_TIMEOUT_MS}
- *
- * All three, or "not online". A timeout or a connection refusal means exactly
- * one thing — *the daemon cannot be confirmed online* — and it never means "the
- * process is dead": that is why nothing here kills a pid or deletes a state
- * file. The terminal notifier keeps sending while a menu-bar sender holds back,
- * so a probe that says "offline" must stay the conservative reading.
+ * It no longer lives here (menubar-and-boot, 2026-10-01): the record's SHAPE is
+ * this module's business, the QUESTION "is it online" is
+ * `lib/daemon-presence.ts`'s, and it is answered there twice (async for the
+ * CLI, synchronous for the notification path) by ONE rule. Nothing in this
+ * file probes anything.
  */
 
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -30,7 +26,6 @@ import { dirname } from "node:path";
 import { pidAlive } from "../session-registry.ts";
 import {
   DAEMON_HOST,
-  DAEMON_PROBE_TIMEOUT_MS,
   DAEMON_SCHEMA,
   daemonBaseUrl,
   daemonIdentityPath,
@@ -215,49 +210,11 @@ export function ensureDaemonIdentity(home?: string): string {
   return id;
 }
 
-export interface DaemonProbe {
-  online: boolean;
-  state?: DaemonState;
-  /** Always filled: why the answer is what it is (read by `status` and by a log). */
-  reason: string;
-}
-
-/**
- * The one online rule (see the module header). Never throws, never kills.
- */
-export async function probeDaemon(opts: {
-  home?: string;
-  timeoutMs?: number;
-  fetchImpl?: typeof fetch;
-} = {}): Promise<DaemonProbe> {
-  const state = readDaemonState(opts.home);
-  if (state === undefined) return { online: false, reason: "state 文件缺失或不是合法的 rg-daemon.json" };
-  if (!pidAlive(state.pid)) return { online: false, state, reason: `state 里的 pid ${state.pid} 已不在` };
-  const token = readDaemonToken(opts.home);
-  if (token === undefined) return { online: false, state, reason: "token 文件缺失或读不出来" };
-  const doFetch = opts.fetchImpl ?? fetch;
-  try {
-    // THE ADDRESS IS OURS, NOT THE FILE'S (reviewer P1, 2026-10-01). `baseUrl`
-    // is read out of a file, and this call carries the TOKEN: a tampered or
-    // corrupt record pointing at another host would hand the secret to whatever
-    // answers there. The daemon only ever listens on loopback, so the rule is
-    // computed here — 127.0.0.1 + the recorded port — and the field is treated
-    // as a description of where it was started, never as an instruction.
-    const url = `${daemonBaseUrl(state.port)}/api/health`;
-    const response = await doFetch(url, {
-      headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(opts.timeoutMs ?? DAEMON_PROBE_TIMEOUT_MS),
-    });
-    if (!response.ok) return { online: false, state, reason: `健康检查返回 HTTP ${response.status}` };
-    return { online: true, state, reason: `在线：pid ${state.pid}，端口 ${state.port}` };
-  } catch (error) {
-    return {
-      online: false,
-      state,
-      reason: `端口探测失败（${error instanceof Error ? error.message : String(error)}）—— 不能断定在线`,
-    };
-  }
-}
+// THE ONLINE PROBE USED TO LIVE HERE. It is `lib/daemon-presence.ts` since
+// 2026-10-01 (menubar-and-boot): the record's shape is this file's business,
+// the question "is it online" is answered there — twice (async for the CLI,
+// synchronous for the notification path) by ONE rule, so the terminal notifier
+// and `pi-gate daemon status` can never disagree about what online means.
 
 /** A human-readable one-liner for `status` and for a consumer's log. */
 export function describeDaemonState(state: DaemonState): string {

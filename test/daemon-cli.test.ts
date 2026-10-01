@@ -11,8 +11,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { DAEMON_HOME_ENV, claimStartLock, runDaemonCli, type CliIo } from "../lib/daemon/cli.ts";
-import { probeDaemon, readDaemonState } from "../lib/daemon/state.ts";
+import { DAEMON_HOME_ENV, runDaemonCli, type CliIo } from "../lib/daemon/cli.ts";
+import { claimStartLock } from "../lib/daemon/autostart.ts";
+import { probeDaemon } from "../lib/daemon-presence.ts";
+import { readDaemonState } from "../lib/daemon/state.ts";
 import { daemonStatePath, daemonTokenPath } from "../lib/daemon/paths.ts";
 import { freePort, scratchHome } from "./daemon-helpers.ts";
 
@@ -52,14 +54,54 @@ test("stop and status are honest when nothing is running", async () => {
   assert.match(status.out, /state 文件缺失/);
 });
 
-test("install and uninstall are explicit placeholders", async () => {
+test("install writes a launchd agent and uninstall removes it (never the real one)", async () => {
   const home = scratchHome();
-  for (const command of ["install", "uninstall"]) {
-    const result = await cli(home, ["daemon", command]);
-    assert.equal(result.code, 0);
-    assert.match(result.out, /没有实装 launchd/);
-    assert.match(result.out, /menubar-and-boot/);
-  }
+  // The launchctl RUNNER is injected: a test must not load an agent into the
+  // user's own GUI domain. The plist path follows the same scratch home, so
+  // nothing here touches ~/Library/LaunchAgents either.
+  const calls: string[][] = [];
+  const io = (lines: string[], errors: string[]): CliIo => ({
+    out: (line) => lines.push(line),
+    err: (line) => errors.push(line),
+    home,
+    launchd: { runLaunchctl: (argv) => { calls.push([...argv]); return { ok: true, code: 0, stdout: "", stderr: "" }; }, platform: "darwin", uid: 501 },
+  });
+  const run = async (argv: string[]): Promise<{ code: number; out: string; err: string }> => {
+    const lines: string[] = [];
+    const errors: string[] = [];
+    const code = await runDaemonCli(argv, io(lines, errors));
+    return { code, out: lines.join("\n"), err: errors.join("\n") };
+  };
+
+  const installed = await run(["daemon", "install", "--port", "4600"]);
+  assert.equal(installed.code, 0, installed.err);
+  const plist = join(home, "Library", "LaunchAgents", "com.pi.review-gate.daemon.plist");
+  assert.equal(existsSync(plist), true, "the agent file is where launchd looks for it");
+  const body = readFileSync(plist, "utf8");
+  assert.match(body, /<string>4600<\/string>/);
+  assert.match(body, /<key>RunAtLoad<\/key>\s*<true\/>/);
+  assert.match(body, new RegExp(`<string>${home}<\/string>`.replace(/[/\\]/g, "\\$&")), "RG_DAEMON_HOME rides in the environment");
+  assert.deepEqual(calls.map((argv) => argv[0]), ["bootout", "bootstrap"]);
+
+  const removed = await run(["daemon", "uninstall"]);
+  assert.equal(removed.code, 0, removed.err);
+  assert.equal(existsSync(plist), false);
+  assert.match(removed.out, /已卸载/);
+});
+
+test("install refuses honestly on a machine without launchd", async () => {
+  const home = scratchHome();
+  const lines: string[] = [];
+  const errors: string[] = [];
+  const code = await runDaemonCli(["daemon", "install"], {
+    out: (line) => lines.push(line),
+    err: (line) => errors.push(line),
+    home,
+    launchd: { platform: "linux" },
+  });
+  assert.equal(code, 1);
+  assert.match(errors.join("\n"), /launchd 只在 macOS/);
+  assert.equal(existsSync(join(home, "Library")), false, "nothing is written when it cannot work");
 });
 
 test("unknown flags are refused before anything is spawned", async () => {

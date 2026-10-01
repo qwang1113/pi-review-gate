@@ -47,6 +47,12 @@ node_modules
 # never touched the panel).
 web/dist/
 
+# The menu bar app's bundle: `bash menubar/build.sh` writes it here, and the
+# SOURCES are what is versioned (`menubar/Sources/*.swift`) — same reasoning as
+# web/dist above: a build artifact in `git status` dirties a round that never
+# touched it, and a binary is not repository history.
+menubar/build/
+
 # AGENTS.md is excluded by the global gitignore (sd0x-dev-flow keeps it
 # personal/local by default) — this repo wants it tracked, so re-include it.
 !AGENTS.md

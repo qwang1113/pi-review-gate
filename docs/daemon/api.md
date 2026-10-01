@@ -585,13 +585,21 @@ data: <JSON>
 pi-gate daemon start [--port <n>] [--foreground] [--workspace-root <path>]…
 pi-gate daemon stop
 pi-gate daemon status
-pi-gate daemon install      # 占位：launchd 实装由 menubar-and-boot 提供
-pi-gate daemon uninstall    # 同上
+pi-gate daemon install [--port <n>] [--workspace-root <path>]…
+pi-gate daemon uninstall
 ```
 
 - `start` 先探测：**已在线就打印它、退 0，不启第二份**；离线才 spawn 后台进程，
   并在**探测成功之后**才报「已启动」（10 s 预算，超时报错并指向日志）。
+  并发保护是 `start.lock`（`O_EXCL`，死主的锁可接管）—— 与门禁会话自动拉起
+  （`lib/daemon/autostart.ts`）**同一份实现**。
 - `stop` 先做**带 token 的健康检查**确认那个 pid 仍是 daemon（pid 会被复用，杀错进程是这条命令唯一的破坏性动作）；
   健康检查没确认且 pid 还活着 ⇒ **拒绝发 SIGTERM**并说明原因。确认后才 SIGTERM，等它真的退出（≤8 s），
   然后清掉自己那条 state 记录；不强杀。
 - `status` 打印 state 与在线判定理由，在线退 0、离线退 1。
+- `install` 写 `~/Library/LaunchAgents/com.pi.review-gate.daemon.plist` 并 `launchctl bootstrap`：登录自启、
+  **崩溃才重起**（`KeepAlive.SuccessfulExit=false` —— `stop` 的干净退出不会把它拉回来），
+  `ThrottleInterval` 30 s。`uninstall` 做 `launchctl bootout` 并删 plist（没装过时如实报「没有安装过」，不谎称已删）。
+  两者都只在 macOS 上有意义，其他平台会直接拒绝并说明。
+- `run` 是 launchd 与 `start` 共同用的前台进程；它**绑端口前先探测**：已有一份在答就以 0 退出，
+  而不是报「地址被占用」以 1 退出 —— 后者在 launchd 的 `SuccessfulExit=false` 下会变成每 30 s 重起一次的失败循环。

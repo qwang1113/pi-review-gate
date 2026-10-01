@@ -12,13 +12,13 @@ import {
   clearDaemonState,
   ensureDaemonIdentity,
   ensureDaemonToken,
-  probeDaemon,
   readDaemonState,
   readDaemonToken,
   tokenMatches,
   writeDaemonState,
   writePrivateFile,
 } from "../lib/daemon/state.ts";
+import { probeDaemon } from "../lib/daemon-presence.ts";
 import { daemonStatePath, daemonTokenPath } from "../lib/daemon/paths.ts";
 import { createRuntime } from "../lib/daemon/server.ts";
 import { paneRunner, scratchHome } from "./daemon-helpers.ts";
