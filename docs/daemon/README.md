@@ -70,7 +70,47 @@ http://127.0.0.1:<port>/sessions/<sessionId>
 
 ---
 
-## 3. macOS 菜单栏 app
+## 3. 定时任务
+
+daemon 自己带一个调度器：**到点起一个普通 loop 会话**去执行那个任务，并把这次运行记进台账。
+表在 `~/.pi/agent/rg-daemon/schedules.json`，台账在 `~/.pi/agent/rg-daemon/schedule-runs.jsonl`
+（每个字段、每个 endpoint 见 `docs/daemon/api.md` §13）。
+
+**怎么配**（两个入口，都不用你手写文件）：
+
+- **面板**：「新建定时任务」填 name / repo / cron / 需求 → 面板调 `POST /api/schedules/author`，
+daemon 起一个 authoring 会话跟你谈；
+- **会话**：在任何 pi 会话里直接说「每天 9 点跑一次 X」，agent 调 `schedule_task` 工具。
+
+两条路是同一条：**先反述需求 → 你确认 → goal 审计 → 你批准 goal → 契约落表**。
+面板只能改 `name` / `cron` / `enabled`（改名、改周期、启停）；**改需求或换 repo 一律回到
+ authoring 会话重谈** —— 契约绑着你批准过的那两段文本的 hash，一个文本框悄悄改掉需求，
+这个定时任务就不再是你批准的那个了。
+
+运行起来的会话里，`RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN` 标着是哪个任务的哪一次运行，
+契约文本由门禁在 `session_start` 从 `.pi/loop-goal.md` 继承；干完活照常走门禁
+（有代码改动就要过 reviewer）—— 台账里**只有记录过 READY** 的那次才算 `passed`。
+
+**两条不会变的行为**：
+
+- **错过的时间点不补跑**。daemon 关了一周再打开，那个任务只跑一次（下一次 tick），然后按
+  下一个时间点走 —— 不会把七天的槽位一次性补齐。
+- **同一个 repo 同时只有一个运行**。上一个运行还没结算时，同一 repo 的下一个任务不启动，
+  台账里记一条 `run-skipped` 并写明是谁占着（两个写者进同一个 checkout 会互相覆盖）。
+
+**排障**：
+
+| 症状 | 看哪里 |
+| --- | --- |
+| 到点没动静 | `GET /api/schedules` 的 `nextRunAt`：落在**过去**说明欠着（下一个 tick 就处理）；`enabled:false` 则根本没有下一次 |
+| 没跑起来 | `GET /api/schedules/:id/runs`：`run-skipped` 的 `reason` 说清为什么（repo 被占、起会话失败） |
+| 会话起来了但不干活 | 面板打开那个会话（`GET /api/sessions` 里找 `RG_SCHEDULE_RUN` 对应的那条）—— 它就是一个普通会话，等回答 / 卡住都照旧显示 |
+| outcome 看不懂 | `passed` 只来自 READY；`gone` = 读不到门禁 state 或会话异常消失；`failed` = 结束了但结论不是 READY/BLOCKED |
+| 表坏了 | daemon **不会**把损坏的表当成空表：`GET /api/schedules` 报 500、`daemon.log` 里有原因；修好之前调度停摆（这是故意的） |
+
+---
+
+## 4. macOS 菜单栏 app
 
 源码在 `menubar/Sources/*.swift`，用本机 `swiftc` 直接编成一个小 `.app`（**没有 Xcode 工程、
 没有 Electron、没有 Rust/Tauri**）：
@@ -95,7 +135,7 @@ open menubar/build/PiGate.app
 
 ---
 
-## 4. 通知：同一时刻只有一个发送者
+## 5. 通知：同一时刻只有一个发送者
 
 规则只有一条（用户决定，`docs/daemon/api.md` §8.1）：
 
@@ -128,7 +168,7 @@ open menubar/build/PiGate.app
 
 ---
 
-## 5. 文件与排障
+## 6. 文件与排障
 
 | 路径 | 是什么 |
 | --- | --- |
@@ -138,6 +178,8 @@ open menubar/build/PiGate.app
 | `~/.pi/agent/rg-daemon/questions/…` | 待答问题协议（生产者是门禁，见 api.md §7） |
 | `~/.pi/agent/rg-daemon/menubar.json` | 菜单栏 app 的心跳（`{schema,pid,at,canPost}`，每 5 秒重写；终端侧靠它决定要不要抑制，api.md §8.1） |
 | `~/.pi/agent/rg-daemon/notifications/` | 通知台账（每 key 一个 claim + 追加式 history） |
+| `~/.pi/agent/rg-daemon/schedules.json` | 定时任务表（0600，原子写；上面 §3） |
+| `~/.pi/agent/rg-daemon/schedule-runs.jsonl` | 定时运行的台账（0600，只追加；上面 §3） |
 | `~/Library/LaunchAgents/com.pi.review-gate.daemon.plist` | launchd 登录项（`install` 写、`uninstall` 删） |
 | `menubar/build/PiGate.app` | 菜单栏 app 的构建产物（`menubar/build.sh`） |
 

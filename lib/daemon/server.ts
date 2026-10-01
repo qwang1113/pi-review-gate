@@ -35,9 +35,23 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { createSessionObserver, SESSION_LIST_LIMIT, type DaemonSession, type SessionObserver } from "./sessions.ts";
 import { createNotificationStore, createSessionWatcher, createSseHub, type DaemonEvent } from "./events.ts";
+import { createScheduler, dueDecision, LAST_RUNS_SHOWN } from "./scheduler.ts";
 import { listPendingQuestions, submitAnswer } from "./questions.ts";
 import { readConfig, writeConfig, type ConfigTargetName } from "./config.ts";
 import { createDaemonTmuxRunner, launchTask, listCandidateRepos, sendSessionMessage } from "./control.ts";
+import {
+  applyScheduleEdit,
+  findScheduledTask,
+  readScheduleRuns,
+  readSchedules,
+  removeScheduledTask,
+  scheduleNameProblem,
+  scheduleRepoProblem,
+  updateScheduledTask,
+  type ScheduleEditPatch,
+  type ScheduledTask,
+} from "../schedule-store.ts";
+import { describeCron, parseCron } from "../cron-schedule.ts";
 import { readRecentEntries, readRecentEntriesWithOffset } from "./transcript.ts";
 import { tokenMatches } from "./state.ts";
 import { DAEMON_SCHEMA, daemonPackageVersion, notificationStorePath } from "./paths.ts";
@@ -46,6 +60,13 @@ import type { TmuxRunner } from "../orchestrator-tmux.ts";
 
 /** Bodies are configuration and messages: small, and never a file upload. */
 export const MAX_BODY_BYTES = 512 * 1024;
+
+/** `GET /api/schedules/:id/runs` — the ledger window the panel asks for by default. */
+export const DEFAULT_RUNS_LIMIT = 50;
+export const MAX_RUNS_LIMIT = 500;
+
+/** A patch a panel may send to `PUT /api/schedules/:id`. */
+const PANEL_SCHEDULE_FIELDS: readonly string[] = Object.freeze(["cron", "enabled", "name"]);
 
 /** How many output entries a fresh subscription replays unless it asks otherwise. */
 export const DEFAULT_REPLAY = 30;
@@ -64,6 +85,8 @@ export interface RuntimeOptions {
   /** Injected for tests, so an HTTP test never touches the real tmux. */
   runTmux?: TmuxRunner;
   now?: () => number;
+  /** How often the scheduler looks for due tasks; injected so a test controls the clock. */
+  schedulerIntervalMs?: number;
   log?: (message: string) => void;
 }
 
@@ -138,6 +161,17 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
   const hub = createSseHub();
   const store = createNotificationStore(notificationStorePath(opts.home), { now });
   const watcher = createSessionWatcher({ observer, hub, ...(opts.now === undefined ? {} : { now: opts.now }), onError: log });
+  // THE SCHEDULER LIVES WITH THE RUNTIME, not with a route: a schedule must
+  // fire whether or not anyone has the panel open, which is the whole point of
+  // a resident daemon (lib/daemon/scheduler.ts).
+  const scheduler = createScheduler({
+    home: opts.home,
+    runTmux,
+    observer,
+    ...(opts.now === undefined ? {} : { now: opts.now }),
+    ...(opts.schedulerIntervalMs === undefined ? {} : { intervalMs: opts.schedulerIntervalMs }),
+    log,
+  });
 
   function findSession(id: string): DaemonSession | undefined {
     // `@名字` and `名字` are the same address (the rule lib/session-message-tools.ts
@@ -252,6 +286,136 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
           windowId: outcome.windowId,
           paneId: outcome.paneId,
           windowName: outcome.windowName,
+        });
+      },
+    },
+    {
+      method: "GET",
+      pattern: segments("/api/schedules"),
+      handler: (): Reply => {
+        const at = new Date(now());
+        const read = readSchedules(opts.home);
+        if (!read.ok) return bad(500, read.problem);
+        const records = readScheduleRuns(opts.home);
+        const byTask = new Map<string, typeof records>();
+        for (const record of records) {
+          const bucket = byTask.get(record.taskId);
+          if (bucket === undefined) byTask.set(record.taskId, [record]);
+          else bucket.push(record);
+        }
+        const tasks = read.file.tasks.map((task) => ({
+          ...task,
+          // THE SAME JUDGEMENT THE SCHEDULER MAKES, so the panel and the tick
+          // cannot disagree about what is coming: it is the slot this task is
+          // COUNTING TOWARDS (`lastFiredAt`'s next one, or the first one after
+          // it was authored), which lands in the past — delayed, about to run —
+          // rather than one whole period ahead when a run was missed.
+          nextRunAt: dueDecision({ task, now: at, openRun: false }).scheduledAt?.toISOString() ?? null,
+          describe: describeCron(task.cron),
+          // `run-started` is not a RESULT: the panel shows what happened, not
+          // that something is (or was) happening.
+          lastRuns: (byTask.get(task.id) ?? [])
+            .filter((record) => record.kind !== "run-started")
+            .slice(-LAST_RUNS_SHOWN),
+        }));
+        return ok({ schema: DAEMON_SCHEMA, now: at.toISOString(), tasks });
+      },
+    },
+    {
+      method: "POST",
+      pattern: segments("/api/schedules/author"),
+      handler: (ctx): Reply => {
+        const body = asObject(ctx.body);
+        const action = body.action;
+        if (action !== "create" && action !== "update") {
+          return bad(400, `action 只能是 create / update（收到 ${JSON.stringify(action)}）`);
+        }
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        const nameProblem = scheduleNameProblem(name);
+        if (nameProblem !== undefined) return bad(400, nameProblem);
+        if (action === "create") {
+          const taken = findScheduledTask(opts.home, name);
+          if (taken !== undefined) return bad(400, `名字 ${name} 已经被调度任务 ${taken.id} 占用（id 与 name 共用一个命名空间）`);
+        }
+        const repo = typeof body.repo === "string" ? body.repo.trim() : "";
+        const repoProblem = scheduleRepoProblem(repo);
+        if (repoProblem !== undefined) return bad(400, repoProblem);
+        const cron = typeof body.cron === "string" ? body.cron.trim() : "";
+        const parsed = parseCron(cron);
+        if (!parsed.ok) return bad(400, `cron 不合法：${parsed.problem}`);
+        const requirement = typeof body.requirement === "string" ? body.requirement.trim() : "";
+        if (requirement === "") return bad(400, "requirement 不能为空 —— authoring 会话要拿它去谈需求反述");
+        const id = typeof body.id === "string" ? body.id.trim() : "";
+        if (action === "update") {
+          if (id === "") return bad(400, "action=update 必须带 id");
+          const found = taskById(opts.home, id);
+          if ("reply" in found) return found.reply;
+        }
+        // THIS ENDPOINT WRITES NO TABLE: the contract is written by the gate's
+        // own tool, after the user approved it in the authoring session.
+        const outcome = launchTask({ home: opts.home, runTmux, now }, {
+          repo,
+          task: authoringTaskText({ action, id, name, repo, cron, requirement }),
+          mode: "loop",
+        });
+        if (!outcome.ok) return bad(400, outcome.problem ?? "启动 authoring 会话失败");
+        return ok({
+          ok: true,
+          sessionId: outcome.sessionId,
+          scopeSession: outcome.scopeSession,
+          windowId: outcome.windowId,
+          paneId: outcome.paneId,
+        });
+      },
+    },
+    {
+      method: "PUT",
+      pattern: segments("/api/schedules/:id"),
+      handler: (ctx): Reply => {
+        const found = taskById(opts.home, ctx.params.id!);
+        if ("reply" in found) return found.reply;
+        const body = asObject(ctx.body);
+        const patch: ScheduleEditPatch = {};
+        if (Object.hasOwn(body, "cron")) patch.cron = body.cron as string;
+        if (Object.hasOwn(body, "enabled")) patch.enabled = body.enabled as boolean;
+        if (Object.hasOwn(body, "name")) patch.name = body.name as string;
+        const extra = Object.keys(body).filter((key) => !PANEL_SCHEDULE_FIELDS.includes(key));
+        if (extra.length > 0) {
+          // THE AUTHORING RULE IS NOT RESTATED HERE: the whole body goes to the
+          // one implementation, which names the authoring path for a contract
+          // field and lists the fields a panel may touch for anything else.
+          const verdict = applyScheduleEdit({ from: "panel", patch: body as ScheduleEditPatch });
+          return bad(400, verdict.ok
+            ? `面板只能改 ${PANEL_SCHEDULE_FIELDS.join(" / ")}（收到 ${extra.join("、")}）—— 需求、repo 与契约请走 POST /api/schedules/author`
+            : verdict.problem);
+        }
+        const outcome = updateScheduledTask(opts.home, found.task.id, patch, { from: "panel" });
+        if (!outcome.ok) return bad(400, outcome.problem);
+        return ok({ ok: true, task: outcome.value, version: outcome.version });
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: segments("/api/schedules/:id"),
+      handler: (ctx): Reply => {
+        const found = taskById(opts.home, ctx.params.id!);
+        if ("reply" in found) return found.reply;
+        const removed = removeScheduledTask(opts.home, found.task.id);
+        if (!removed.ok) return bad(400, removed.problem);
+        return ok({ ok: true, task: removed.value, version: removed.version });
+      },
+    },
+    {
+      method: "GET",
+      pattern: segments("/api/schedules/:id/runs"),
+      handler: (ctx): Reply => {
+        const found = taskById(opts.home, ctx.params.id!);
+        if ("reply" in found) return found.reply;
+        const limit = Math.min(Math.max(numberParam(ctx.query.get("limit")) ?? DEFAULT_RUNS_LIMIT, 1), MAX_RUNS_LIMIT);
+        return ok({
+          schema: DAEMON_SCHEMA,
+          taskId: found.task.id,
+          runs: readScheduleRuns(opts.home, { taskId: found.task.id, limit }),
         });
       },
     },
@@ -539,12 +703,14 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
           const address = instance.address();
           boundPort = typeof address === "object" && address !== null ? address.port : opts.port;
           watcher.start();
+          scheduler.start();
           resolvePromise(boundPort);
         });
       });
     },
     stop(): Promise<void> {
       watcher.stop();
+      scheduler.stop();
       const instance = server;
       if (instance === undefined) return Promise.resolve();
       return new Promise((resolvePromise) => {
@@ -558,6 +724,55 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
 
 function isTarget(value: string): value is ConfigTargetName {
   return value === "settings" || value === "models" || value === "gate-global" || value === "gate-project";
+}
+
+/**
+ * The task with this EXACT id, or the reply a caller must send instead.
+ *
+ * By id and not by name: `id` is the address the write endpoints are given,
+ * and `findScheduledTask`'s name alias belongs to the read side (the panel
+ * quotes an id back, and a name that happens to be another task's id must not
+ * make a `PUT` land on the wrong row).
+ */
+function taskById(home: string, id: string): { task: ScheduledTask } | { reply: Reply } {
+  const read = readSchedules(home);
+  if (!read.ok) return { reply: bad(500, read.problem) };
+  const task = read.file.tasks.find((candidate) => candidate.id === id);
+  if (task === undefined) return { reply: bad(404, `没有这个调度任务：${id}`) };
+  return { task };
+}
+
+/**
+ * What an authoring session is asked to do, in one message.
+ *
+ * It names `schedule_task` and NOT `propose_restatement` / `propose_loop_goal`:
+ * that tool runs both itself (restatement dialog → goal audit → approval) and
+ * writes the approved contract into the table in the same breath. Asking for
+ * them separately would open two dialogs for one contract, and neither of them
+ * knows how to write the table.
+ */
+function authoringTaskText(input: {
+  action: "create" | "update";
+  id: string;
+  name: string;
+  repo: string;
+  cron: string;
+  requirement: string;
+}): string {
+  const call = [
+    `action:${JSON.stringify(input.action)}`,
+    ...(input.action === "update" ? [`id:${JSON.stringify(input.id)}`] : []),
+    `name:${JSON.stringify(input.name)}`,
+    `repo:${JSON.stringify(input.repo)}`,
+    `cron:${JSON.stringify(input.cron)}`,
+    `requirement:${JSON.stringify(input.requirement)}`,
+  ].join(", ");
+  return [
+    `用 \`schedule_task({${call}})\` 把这份定时任务的契约谈定 —— 它会先弹需求反述、跑 goal 审计，再请你批准 goal。`,
+    "**不要**另外调 `propose_restatement` / `propose_loop_goal`：`schedule_task` 会把它们走完，并把批准的契约同时记为本会话的 loop goal。",
+    "",
+    "本次会话只负责把契约谈定并写进调度表：不要改代码、不要 commit。",
+  ].join("\n");
 }
 
 function bearer(req: IncomingMessage): string | undefined {

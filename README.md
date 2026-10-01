@@ -1048,6 +1048,14 @@ what tells the terminal side that somebody else is there to raise the banner. No
 claimed from the daemon's ledger before they are posted, so the same fact is never announced twice;
 a denied notification permission degrades silently.
 
+**Scheduled tasks** are the daemon's own clock (`lib/daemon/scheduler.ts`): a due cron task starts a
+normal loop session, and the run is settled from what that session's gate recorded — only a recorded
+READY counts as `passed`. The contract behind every task is the one the USER approved through an
+authoring session, so the panel may only rename a task, re-time it or switch it off; changing what it
+DOES goes back through the approval flow. A missed slot is never replayed, and one repository runs
+one scheduled session at a time. Guide: `docs/daemon/README.md` §3; contract:
+`docs/daemon/api.md` §13.
+
 ## Usage
 
 Work normally. The moment the model edits a code or doc file:

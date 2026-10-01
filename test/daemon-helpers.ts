@@ -14,6 +14,52 @@ import { join } from "node:path";
 
 import { serializeRegistryEntry, type SessionRegistryEntry } from "../lib/session-registry.ts";
 import type { TmuxRunner, TmuxRunResult } from "../lib/orchestrator-tmux.ts";
+import type { NewScheduledTask, ScheduleContract } from "../lib/schedule-store.ts";
+import { goalTextHash, normalizeGoalText } from "../lib/loop-goal.ts";
+import { restatementHash } from "../lib/restatement.ts";
+
+/** A directory a scheduled task can point at: an absolute path that exists. */
+export function scratchRepo(): string {
+  return mkdtempSync(join(tmpdir(), "rg-schedule-repo-"));
+}
+
+/**
+ * A contract whose two hashes really are the hashes of its texts.
+ *
+ * Built through the same functions the store validates with, because that is
+ * the rule being tested: a fixture with a made-up hash would pass the store
+ * only by accident (or fail it for the wrong reason).
+ */
+export function scheduleContract(over: Partial<ScheduleContract> = {}): ScheduleContract {
+  const restatementText =
+    "## 需求反述\n1. 这件事是什么：每天自动跑一次审计\n2. 例子：每天 09:00 发起一次\n" +
+    "3. 改之前：手动敲命令\n4. 改之后：由调度器发起";
+  const goalText = "# 定时审计\n意图：让审计按天自动发起";
+  return {
+    restatement: {
+      text: restatementText,
+      hash: restatementHash(restatementText),
+      station: "commit",
+      at: "2026-10-01T00:00:00.000Z",
+    },
+    goal: { text: goalText, hash: goalTextHash(normalizeGoalText(goalText)), at: "2026-10-01T00:00:00.000Z" },
+    approvedAt: "2026-10-01T00:00:00.000Z",
+    ...over,
+  };
+}
+
+/** A schedulable task input, with `from: "gate"` (creation IS an authoring act). */
+export function scheduleTaskInput(repo: string, over: Partial<NewScheduledTask> = {}): NewScheduledTask {
+  return {
+    name: "daily-audit",
+    repo,
+    cron: "0 9 * * *",
+    requirement: "每天 09:00 跑一次审计",
+    contract: scheduleContract(),
+    from: "gate",
+    ...over,
+  };
+}
 
 /** A throwaway `$HOME` with the agent directory already in place. */
 export function scratchHome(): string {

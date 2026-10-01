@@ -81,6 +81,7 @@ export interface ScheduledTask {
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
+  /** The last slot the daemon dealt with (started, skipped, failed to start) — lib/daemon/scheduler.ts. */
   lastFiredAt: string | null;
 }
 
@@ -107,7 +108,11 @@ export interface ScheduleEditPatch {
   name?: string;
   cron?: string;
   enabled?: boolean;
-  /** Runtime bookkeeping (the daemon stamps it when a run starts), not authoring. */
+  /**
+   * Runtime bookkeeping, never authoring: the daemon stamps it every time it
+   * DEALS with a slot — a run started, a skip recorded, a launch that failed.
+   * The rule that reads it (what is due next) is lib/daemon/scheduler.ts.
+   */
   lastFiredAt?: string | null;
   requirement?: string;
   repo?: string;
@@ -283,8 +288,8 @@ export function scheduleAuthoringRefusal(problem: string): string {
     why: "需求/repo/契约的修改必须走 authoring 会话或 `schedule_task` 工具（需求反述 + goal 批准）—— " +
       "面板是一张文本表单，它改得动的那三个字段（name / cron / enabled）都不改变这份任务「是什么」。",
     by: "agent",
-    next: "面板只改 name / cron / enabled；要改需求、repo 或契约，请用一个 loop 会话走 `schedule_task` 重新协商" +
-      "（需求反述 → goal 批准 → 写入契约）。",
+    next: "面板只改 name / cron / enabled；要改需求、repo 或契约的入口有两个，都走重新协商" +
+      "（需求反述 → goal 批准 → 写入契约）：面板用 `POST /api/schedules/author`，会话用 `schedule_task` 工具。",
   });
 }
 
@@ -578,6 +583,14 @@ export function removeScheduledTask(
  * already happened is not a candidate again, so after a pause this can land in
  * the past), else from `now`. A disabled task, an illegal cron and an
  * impossible date all answer `null` rather than throwing.
+ *
+ * NOT THE SCHEDULER'S CLOCK (t2-daemon). The daemon fires on the slot it is
+ * counting towards — `lastFiredAt ?? createdAt` (lib/daemon/scheduler.ts
+ * `dueDecision`) — because counted from `now` a never-fired task's first slot
+ * is always one period away, so it would never arrive. This one answers the
+ * different question "when is the next slot after this instant", and is what
+ * the panel wants for a task that is merely WAITING: due slots are the
+ * scheduler's to name.
  */
 export function nextRunAtFor(task: ScheduledTask, now: Date): Date | null {
   if (!task || task.enabled !== true) return null;

@@ -165,6 +165,15 @@ export interface LaunchTaskInput {
   mode?: string;
   station?: string;
   name?: string;
+  /**
+   * Extra environment for the new session.
+   *
+   * The scheduler's run identity (`RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`) rides
+   * this: it is the one channel a session's own prompt cannot forge, and the
+   * two keys this module owns (`RG_GATE_MODE`, `RG_DAEMON_HOME`) are written
+   * AFTER it, so a caller cannot claim to be a mode or a home it is not.
+   */
+  env?: Record<string, string>;
 }
 
 export interface LaunchTaskOutcome {
@@ -306,7 +315,7 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
   // this daemon looks under the override: the question would be invisible in
   // the panel, and the session's own notification-suppression probe would look
   // in the wrong home too. The daemon knows where it lives - it says so.
-  const env: Record<string, string> = { [GATE_MODE_ENV]: mode, [DAEMON_HOME_ENV]: deps.home };
+  const env: Record<string, string> = { ...input.env, [GATE_MODE_ENV]: mode, [DAEMON_HOME_ENV]: deps.home };
   if (station !== "") env[STATION_CAP_ENV] = station;
   const opened = openScopeWindow(run, scope, {
     cwd: repo,

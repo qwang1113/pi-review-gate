@@ -104,6 +104,11 @@ CLI `pi-gate daemon status` 打印同一判定的结果与理由（在线返回�
 | GET | `/api/notifications` | 通知历史（`?since=`、`?limit=`） |
 | POST | `/api/notifications/claim` | 通知去重声明 |
 | GET | `/api/events` | SSE 事件流（`?sessionId=`、`?replay=`） |
+| GET | `/api/schedules` | 定时任务表，含派生字段（§13） |
+| POST | `/api/schedules/author` | 起一个 authoring 会话谈契约（本 endpoint 不写表） |
+| PUT | `/api/schedules/:id` | 面板只改 `cron` / `enabled` / `name` |
+| DELETE | `/api/schedules/:id` | 删除一个定时任务，返回被删的那一条 |
+| GET | `/api/schedules/:id/runs` | 该任务的运行台账（`?limit=`） |
 
 ---
 
@@ -595,6 +600,8 @@ data: <JSON>
 | `~/.pi/agent/rg-daemon/questions/…` | — | 待答问题协议（§7） |
 | `~/.pi/agent/rg-daemon/notifications/claims/<hash>.json` | 0600 | 每个通知 key 的 claim 记录（§8.3） |
 | `~/.pi/agent/rg-daemon/notifications/history.jsonl` | 0600 | 速率限制用的追加式历史（§8.3） |
+| `~/.pi/agent/rg-daemon/schedules.json` | 0600 | 定时任务表（§13） |
+| `~/.pi/agent/rg-daemon/schedule-runs.jsonl` | 0600 | 定时运行的台账（§13） |
 | `~/.pi/agent/rg-daemon/start.lock` | 0600 | `daemon start` 期间持有、结束即删；超过 30 s 可被接管（§12） |
 
 默认端口 **4597**（`--port` 可改）。`RG_DAEMON_HOME` 可覆盖 agent home（默认 `$HOME`），
@@ -624,3 +631,100 @@ pi-gate daemon uninstall
   两者都只在 macOS 上有意义，其他平台会直接拒绝并说明。
 - `run` 是 launchd 与 `start` 共同用的前台进程；它**绑端口前先探测**：已有一份在答就以 0 退出，
   而不是报「地址被占用」以 1 退出 —— 后者在 launchd 的 `SuccessfulExit=false` 下会变成每 30 s 重起一次的失败循环。
+
+---
+
+## 13. 定时任务（scheduled tasks）
+
+调度器是 daemon 自己的一部分（`lib/daemon/scheduler.ts`，纯判定 + IO 在 seam 后面）：
+每 **20 s** 一次 tick，到点就起一个**普通 loop 会话**去干活，并把这一次运行记进台账。
+契约（需求反述 + goal 批准）**只由用户在与 authoring 会话的对话框里**定，
+面板永远不直接写契约 —— 那是 `schedule_task`（门禁工具）存在的理由。
+
+**两个文件，两种真相**（§11 也列了）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `~/.pi/agent/rg-daemon/schedules.json` | `{schema, version, tasks[]}`：**该跑什么**。原子写、0600、每次写入 version +1 |
+| `~/.pi/agent/rg-daemon/schedule-runs.jsonl` | 追加式台账：**实际跑过什么**。0600，三个进程都写、没人重写；末尾的半行会被跳过 |
+
+### 13.1 `ScheduledTask`（`GET /api/schedules` 里每个任务的字段）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | string | `sch-<8 位 hex>`，由 store 生成；**写入端点寻址用的就是它** |
+| `name` | string | kebab-case 2–32；与 `id` **共用一个命名空间**（重名 = 歧义） |
+| `repo` | string | 绝对路径，创建时必须存在 |
+| `cron` | string | 5 段 `分 时 日 月 周`，本地时间 |
+| `requirement` | string | 用户写的那句需求（原始描述） |
+| `contract` | object | `{restatement:{text,hash,station,at}, goal:{text,hash,at}, approvedAt}`：**用户实际批准过的东西**，两段文本各绑自己的 hash |
+| `enabled` | boolean | 关了就不触发 |
+| `createdAt` / `updatedAt` | string | ISO |
+| `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、跳过、起不来都算）—— 下一个时间点从这里数 |
+| `nextRunAt` | string \| null | **派生**：调度器正要处理的**那一个** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**落在过去 = 已经欠着**（下一个 tick 就处理），不是「今天不跑了」；`enabled:false` 或 cron 非法时是 `null` |
+| `describe` | string | **派生**：`describeCron` 的一行人话，如 `每天 09:00` |
+| `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-started` 不是结果，不列） |
+
+### 13.2 `GET /api/schedules`
+
+`200`：`{ schema: 1, now, tasks: [{ …ScheduledTask, nextRunAt, describe, lastRuns }] }`。
+
+`500`：调度表读不了（损坏、权限、形状不对）。**不当作「没有任务」** —— 那会让一次人工修复
+变成一次静默停摆（store 的读侧同一条规则）。
+
+### 13.3 `POST /api/schedules/author`
+
+请求：`{ "action": "create" | "update", "id"?, "name", "repo", "cron", "requirement" }`
+
+成功 `200`：`{ ok: true, sessionId, scopeSession, windowId, paneId }`（与 §5.7 同形）。
+
+**这个 endpoint 自己不写调度表**：它按 §5.7 的同一套 tmux 机制起一个 loop 会话，首条消息要求它用
+`schedule_task({action:"create", …})` 把契约谈定 —— 那个工具会先弹需求反述、跑 goal 审计、
+再请用户批准 goal，批准之后才把契约写进 `schedules.json`。**契约只在用户批准之后才存在**，
+所以 `create` 与 `update` 走的是同一条路。
+
+`400`：`action` 不是 `create`/`update`；`name` 不是 kebab-case 2–32、或（`create` 时）已被占用；
+`repo` 不是存在的绝对目录；`cron` 解析失败；`requirement` 为空；`update` 缺 `id`。
+`404`：`update` 的 `id` 不存在（`id` 精确匹配，不按 `name` 别名）。
+
+### 13.4 `PUT /api/schedules/:id`
+
+请求：**只接受 `cron` / `enabled` / `name`** 的任意子集。成功 `200`：`{ ok: true, task, version }`。
+
+- body 里出现 `requirement` / `repo` / `contract` ⇒ **`400`**，文案指向 `POST /api/schedules/author`
+  （判定是 store 的 `applyScheduleEdit({from:"panel"})`，server 不复写这条规则）。
+- 其它字段（含 `lastFiredAt`）⇒ `400`，文案列出面板能改的三个字段。
+- 未知 `id` ⇒ `404`；值不合法（cron 解析失败、name 形状或重名）⇒ `400`。
+
+### 13.5 `DELETE /api/schedules/:id`
+
+成功 `200`：`{ ok: true, task, version }`（`task` 是被删的那一条）。未知 `id` ⇒ `404`。
+删除**不动台账**：它名下未结算的运行仍会按 §13.7 结算（否则那个 repo 会被永远占着）。
+
+### 13.6 `GET /api/schedules/:id/runs?limit=`
+
+`200`：`{ schema: 1, taskId, runs: [ … ] }` —— 该任务的台账，旧→新；
+`limit` 默认 **50**、下限 1、上限 **500**。未知 `id` ⇒ `404`。
+
+| `kind` | 字段 |
+| --- | --- |
+| `run-started` | `runId`, `taskId`, `sessionId`, `at` |
+| `run-settled` | `runId`, `taskId`, `at`, `outcome`, `verdict`, `unmet` |
+| `run-skipped` | `taskId`, `at`, `reason` |
+
+`outcome` 的四个值：`passed`（会话**记录过 READY**）/ `blocked`（BLOCKED）/ `failed`（会话结束但结论不是这两个）/
+`gone`（读不到门禁 state，或会话异常消失）。**没有 READY 不记 passed** —— 这是「一次定时运行要过 reviewer」
+的机械落点。`verdict` 是 `rounds.lastVerdict`，`unmet` 原样带上。
+
+### 13.7 调度器的行为（不在 HTTP 面上，但同属契约）
+
+- **到点才跑**：`enabled`、下一个 cron 时刻 ≤ now、且该任务没有未结算的运行。
+  **同一个时间点只处理一次** —— daemon 重启、tick 抖动都不重复跑（`lastFiredAt` 写在文件里，
+  不是内存里）。错过的时间点**不补跑**：离线一周的任务上线后只跑一次，然后按下一个时间点走。
+- **一个 repo 同时只有一个运行**：该 repo 上还有未结算运行时本次不启动，写一条 `run-skipped`，
+  `reason` 点名占着它的 `runId`（两个写者进同一个 checkout 会互相覆盖）。
+- **运行就是普通 loop 会话**：`RG_GATE_MODE=loop`、`RG_STATION_CAP=<契约里的 station>`、
+  `RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`（本次运行的标识）；契约文本由门禁在 `session_start`
+  从 `.pi/loop-goal.md` 继承。
+- **结算**：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒ 写 `run-settled`。
+  刚起的会话在观测里要过一会儿才出现，这段宽限期内「没看见」不算消失。
