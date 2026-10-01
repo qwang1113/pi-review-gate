@@ -17,6 +17,7 @@ import {
   parseOutputLine,
   readFileHead,
   readRecentEntries,
+  readRecentEntriesWithOffset,
   TranscriptTailer,
 } from "../lib/daemon/transcript.ts";
 import { createSessionObserver, SESSION_LIST_LIMIT } from "../lib/daemon/sessions.ts";
@@ -114,6 +115,45 @@ test("the tailer follows the file from its END, and restarts when it shrinks", (
   assert.deepEqual(tailer.read(path).map((entry) => entry.text), ["fresh"]);
 });
 
+test("prime bookmarks a file nobody follows, and never moves a cursor that exists", () => {
+  const home = scratchHome();
+  const path = writeTranscript(home, { sessionId: "s1", cwd: "/x", records: [assistantRecord("one")] });
+  const tailer = new TranscriptTailer();
+  tailer.prime(path);
+  appendFileSync(path, `${JSON.stringify(assistantRecord("two"))}\n`);
+  assert.deepEqual(tailer.read(path).map((entry) => entry.text), ["two"]);
+
+  // A SECOND subscriber primes the same file: the shared cursor must not move,
+  // or the first subscriber would lose the bytes in between.
+  appendFileSync(path, `${JSON.stringify(assistantRecord("three"))}\n`);
+  tailer.prime(path);
+  assert.deepEqual(tailer.read(path).map((entry) => entry.text), ["three"]);
+});
+
+test("prime with an explicit offset resumes exactly where a replay stopped", () => {
+  const home = scratchHome();
+  const path = writeTranscript(home, { sessionId: "s1", cwd: "/x", records: [assistantRecord("seen")] });
+  const { entries, offset } = readRecentEntriesWithOffset(path, 5);
+  assert.deepEqual(entries.map((entry) => entry.text), ["seen"]);
+  assert.equal(typeof offset, "number");
+
+  const tailer = new TranscriptTailer();
+  tailer.prime(path, offset);
+  appendFileSync(path, `${JSON.stringify(assistantRecord("new"))}\n`);
+  assert.deepEqual(tailer.read(path).map((entry) => entry.text), ["new"], "the replayed bytes are not sent twice");
+});
+
+test("without a gate-state record the reading is marked unknown, not 'nothing pending'", () => {
+  const home = scratchHome();
+  writeTranscript(home, { sessionId: "nogate", cwd: "/x", records: [assistantRecord("just output")] });
+  const observer = createSessionObserver({ home, runTmux: paneRunner([]) });
+  const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "nogate");
+  assert.ok(session);
+  assert.equal(session.gateStateFound, false);
+  assert.deepEqual(session.unmet, [], "no state means no findings, and the flag is what says so");
+  assert.equal(session.rounds.sent, 0);
+});
+
 test("sessions merge the pane, the registry and the transcript", () => {
   const home = scratchHome();
   writeRegistry(home, registryEntry({
@@ -135,7 +175,10 @@ test("sessions merge the pane, the registry and the transcript", () => {
         review: { verdict: "READY", fingerprint: "tree-1" },
         precommit: { verdict: "PASS", fingerprint: "tree-1" },
         rounds: [{ verdict: "READY" }],
-        roundsSentThisSession: 3,
+        // The field the gate ACTUALLY writes (lib/gate-state.ts `sentReviewRounds`):
+        // the rounds sent out — not the same number as the rounds recorded, and a
+        // fixture that invents its own name is how the P1 this pins got in.
+        sentReviewRounds: 3,
       }),
       assistantRecord("working on it"),
     ],
@@ -169,6 +212,7 @@ test("sessions merge the pane, the registry and the transcript", () => {
   assert.equal(session.rounds.sent, 3);
   assert.equal(session.rounds.recorded, 1);
   assert.equal(session.rounds.lastVerdict, "READY");
+  assert.equal(session.gateStateFound, true, "the fixture's gate state was found in the transcript tail");
   assert.ok(session.transcript?.endsWith(".jsonl"));
   assert.ok(observer.outputFor("abc123", 5).some((entry) => entry.text === "working on it"));
 });

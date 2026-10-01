@@ -12,7 +12,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { createNotificationStore, createSessionWatcher, createSseHub, notificationKindFor, type DaemonEvent } from "../lib/daemon/events.ts";
-import { createSessionObserver } from "../lib/daemon/sessions.ts";
+import { createSessionObserver, type DaemonSession } from "../lib/daemon/sessions.ts";
 import { buildUserNotifyMessage, notifyKey } from "../lib/user-notify.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import { paneLine, paneRunner, registryEntry, scratchHome, writeRegistry, writeTranscript } from "./daemon-helpers.ts";
@@ -179,6 +179,54 @@ test("a child session's transition is not raised as a notification (its manager 
   assert.equal(events.filter((event) => event.event === "notification").length, 0, "a child asks its manager, not the human");
   watcher.tick();
   watcher.stop();
+});
+
+test("a session that disappears notifies — but only when the gate would have (same predicate)", () => {
+  const session = (over: Partial<DaemonSession> = {}): DaemonSession => ({
+    sessionId: "s-1",
+    name: "t1-work",
+    kind: "loop",
+    repo: "/Users/me/project",
+    cwd: "/Users/me/project",
+    branch: null,
+    mode: "loop",
+    state: "working",
+    stateAt: null,
+    stateSource: "pane",
+    alive: true,
+    tmux: null,
+    pid: null,
+    transcript: null,
+    lastActivityAt: null,
+    rounds: { sent: 0, recorded: 0, lastVerdict: null },
+    gateStateFound: false,
+    unmet: [],
+    registeredAt: null,
+    heartbeatAt: null,
+    ...over,
+  });
+
+  for (const [kind, expected] of [["loop", 1], ["child", 0]] as const) {
+    let live: DaemonSession[] = [session({ kind })];
+    const observer = {
+      collect: () => ({ now: new Date().toISOString(), tmuxReadable: true, sessions: live, problems: [] }),
+      transcriptFor: () => undefined,
+      outputFor: () => [],
+    };
+    const events: DaemonEvent[] = [];
+    const hub = createSseHub();
+    hub.add((event) => events.push(event), null);
+    const watcher = createSessionWatcher({ observer, hub, intervalMs: 60_000 });
+    watcher.tick();
+    live = [];
+    watcher.tick();
+    const notifications = events.filter((event) => event.event === "notification");
+    assert.equal(notifications.length, expected, `${kind} session: ${expected} notification(s)`);
+    if (expected > 0) {
+      assert.equal((notifications[0]!.data as { kind: string }).kind, "exited");
+    }
+    watcher.stop();
+  }
 });
 
 test("the watcher does not read a transcript nobody is watching", async () => {

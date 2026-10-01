@@ -366,6 +366,78 @@ test("SSE: a subscription replays recent output and then pushes new entries", as
   }
 });
 
+test("a session is addressable as `名字` and as `@名字` (one address, two spellings)", async () => {
+  const h = await harness();
+  try {
+    for (const key of ["t1-work", "@t1-work"]) {
+      const found = await h.json<{ session: { sessionId: string } }>(`/api/sessions/${key}`);
+      assert.equal(found.session.sessionId, "abc123", `${key} must resolve to the same session`);
+    }
+    const sent = await h.json<{ ok: boolean }>("/api/sessions/@t1-work/messages", {
+      method: "POST",
+      body: JSON.stringify({ text: "从 @ 形式发来的" }),
+    });
+    assert.equal(sent.ok, true);
+  } finally {
+    await h.runtime.stop();
+  }
+});
+
+test("a path segment that is not valid percent-encoding is a 404, never a 500", async () => {
+  const h = await harness();
+  try {
+    const raw = await h.call("/api/sessions/%");
+    assert.equal(raw.status, 404, `expected 404, got ${raw.status}`);
+    const malformed = await h.call("/api/sessions/%zz");
+    assert.equal(malformed.status, 404);
+  } finally {
+    await h.runtime.stop();
+  }
+});
+
+test("SSE: a subscription with replay=0 still tails from the moment it subscribes", async () => {
+  const h = await harness();
+  const controller = new AbortController();
+  try {
+    const response = await fetch(`http://127.0.0.1:${h.port}/api/events?sessionId=abc123&replay=0&token=${h.token}`, {
+      signal: controller.signal,
+    });
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const frames: { event: string; data: Record<string, unknown> }[] = [];
+    const pump = async (budgetMs: number, predicate: () => boolean): Promise<void> => {
+      const deadline = Date.now() + budgetMs;
+      while (!predicate() && Date.now() < deadline) {
+        const chunk = await reader.read();
+        if (chunk.done) return;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        let index: number;
+        while ((index = buffer.indexOf("\n\n")) >= 0) {
+          const raw = buffer.slice(0, index);
+          buffer = buffer.slice(index + 2);
+          const event = /^event: (.+)$/m.exec(raw)?.[1] ?? "";
+          const data = /^data: (.+)$/m.exec(raw)?.[1];
+          frames.push({ event, data: data === undefined ? {} : JSON.parse(data) });
+        }
+      }
+    };
+    await pump(2_000, () => frames.some((frame) => frame.event === "hello"));
+    assert.equal(frames.some((frame) => frame.data.replay === true), false, "replay=0 sent no history");
+
+    const { appendFileSync } = await import("node:fs");
+    appendFileSync(join(h.home, ".pi", "agent", "sessions", "--repo--", "2026-01-01T00-00-00-000Z_abc123.jsonl"),
+      `${JSON.stringify(assistantRecord("written after subscribing"))}\n`);
+    await pump(4_000, () => frames.some((frame) => frame.event === "output"));
+    const output = frames.filter((frame) => frame.event === "output").pop();
+    assert.ok(output, "an appended line reaches a replay=0 subscriber");
+    assert.ok((output.data.entries as { text: string }[]).some((entry) => entry.text === "written after subscribing"));
+  } finally {
+    controller.abort();
+    await h.runtime.stop();
+  }
+});
+
 test("static: the panel is served, an unknown route falls back to index.html", async () => {
   const h = await harness();
   try {

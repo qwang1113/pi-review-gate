@@ -204,11 +204,25 @@ export function readFileTail(path: string, maxBytes: number = TAIL_BYTES): { tex
 
 /** The last `count` output entries, oldest first. */
 export function readRecentEntries(path: string, count: number): OutputEntry[] {
+  return readRecentEntriesWithOffset(path, count).entries;
+}
+
+/**
+ * The same read, WITH the byte offset it stopped at.
+ *
+ * A subscriber that wants the recent past and then the live tail needs both
+ * halves from ONE read: replaying and then bookmarking separately leaves a
+ * window in which an append is neither replayed nor tailed.
+ */
+export function readRecentEntriesWithOffset(path: string, count: number): { entries: OutputEntry[]; offset: number | undefined } {
   const tail = readFileTail(path);
-  if (tail === undefined) return [];
+  if (tail === undefined) return { entries: [], offset: undefined };
   const entries: OutputEntry[] = [];
   for (const line of tail.text.split("\n")) entries.push(...parseOutputLine(line));
-  return count > 0 ? entries.slice(-count) : entries;
+  return {
+    entries: count > 0 ? entries.slice(-count) : entries,
+    offset: transcriptSize(path),
+  };
 }
 
 /**
@@ -255,16 +269,21 @@ export class TranscriptTailer {
   }
 
   /**
-   * Put the bookmark at the file's CURRENT end.
+   * Bookmark a file nobody is following yet.
    *
-   * A watcher that starts following a file it has never seen has no honest
-   * "since" to read from, and starting at the beginning would replay a whole
-   * session. Priming is called by whoever is ABOUT to subscribe — before it
-   * reads its own replay — so the tail covers exactly what the replay does not:
-   * everything appended from that moment on.
+   * `offset` is where a subscriber's own replay stopped (so the tail resumes
+   * exactly where the replay ended — no gap, no duplicate); absent, the
+   * bookmark goes to the CURRENT end.
+   *
+   * AN EXISTING BOOKMARK IS NEVER MOVED (2026-10-01, quality round): two
+   * subscribers share one tailer, and letting the second one's replay jump the
+   * cursor forward would skip the bytes the first one is still waiting for. A
+   * newcomer may therefore see a few entries twice (its replay plus the tail
+   * from before it joined) — duplication is the recoverable end, loss is not.
    */
-  prime(path: string): void {
-    const size = transcriptSize(path);
-    if (size !== undefined) this.offsets.set(path, size);
+  prime(path: string, offset?: number): void {
+    if (this.offsets.has(path)) return;
+    const from = offset ?? transcriptSize(path);
+    if (from !== undefined) this.offsets.set(path, from);
   }
 }

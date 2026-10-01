@@ -228,6 +228,23 @@ export function createNotificationStore(path: string, deps: { now?: () => number
 // Watcher
 // ---------------------------------------------------------------------------
 
+/**
+ * MAY A TRANSITION IN THIS SESSION RAISE A BANNER AT ALL?
+ *
+ * One reading of one rule (`mayNotifyUser`, lib/user-notify.ts): a child asks
+ * its manager, and a judge or a worker is nobody's news. It lives here as a
+ * function because THREE transitions ask it — entering `waiting-input`, reaching
+ * `done`, and the session disappearing — and a second, hand-rolled reading for
+ * the last one would be a second answer to "who may notify the human"
+ * (2026-10-01, quality round).
+ */
+function notifiableFor(session: { mode: string; kind: string | null }): boolean {
+  return mayNotifyUser({
+    taskMode: session.mode as TaskMode,
+    stateVariant: session.kind === "child" ? "child" : undefined,
+  });
+}
+
 /** The event kind a state transition deserves, or none. */
 export function notificationKindFor(state: ChildState): UserNotifyKind | undefined {
   if (state === "waiting-input") return "needs-user";
@@ -248,15 +265,15 @@ export interface SessionWatcher {
   start(): void;
   stop(): void;
   /**
-   * Start following a session's transcript from ITS CURRENT END.
+   * Start following a session's transcript, if nobody is following it yet.
    *
-   * Called by the SSE endpoint just before it registers a subscriber, so the
-   * tail picks up exactly what the subscriber's own replay did not — without
-   * it, an append landing between "subscribe" and the watcher's next tick was
-   * read by nobody (the tailer's first sight of a file bookmarks it at its
-   * end, which is by then already past the new bytes).
+   * Called by the SSE endpoint for EVERY subscription — `replay=0` means "do not
+   * send me the past", not "do not bookmark anything": without a bookmark, an
+   * append landing between the subscription and the watcher's next tick was read
+   * by nobody (2026-10-01, quality round). `offset` is where the subscriber's own
+   * replay stopped, so the tail resumes exactly there.
    */
-  prime(sessionId: string): void;
+  prime(sessionId: string, offset?: number): void;
 }
 
 /** The transient facts the next poll compares against. */
@@ -326,10 +343,7 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
       // gate itself would raise a banner for: a child, a judge or a worker asks
       // its manager, not the human (lib/user-notify.ts `mayNotifyUser` — the
       // same predicate, not a second reading of it).
-      const notifiable = mayNotifyUser({
-        taskMode: session.mode as TaskMode,
-        stateVariant: session.kind === "child" ? "child" : undefined,
-      });
+      const notifiable = notifiableFor(session);
       if (previous === undefined) {
         seen.set(session.sessionId, known);
         if (session.alive) opts.hub.emit({ event: "session", data: { kind: "added", session } }, session.sessionId);
@@ -360,7 +374,7 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
       if (present.has(sessionId)) continue;
       seen.delete(sessionId);
       opts.hub.emit({ event: "session", data: { kind: "removed", sessionId } }, sessionId);
-      if (previous.alive && previous.state !== "done") {
+      if (previous.alive && previous.state !== "done" && notifiableFor(previous)) {
         notify(
           { sessionId, name: previous.name, repo: previous.repo },
           "failed",
@@ -372,9 +386,9 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
 
   return {
     tick,
-    prime(sessionId: string) {
+    prime(sessionId: string, offset?: number) {
       const path = opts.observer.transcriptFor(sessionId);
-      if (path !== undefined) tailer.prime(path);
+      if (path !== undefined) tailer.prime(path, offset);
     },
     start() {
       if (timer !== undefined) return;

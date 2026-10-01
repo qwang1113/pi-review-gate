@@ -42,7 +42,7 @@ import {
   readDaemonState,
   writeDaemonState,
 } from "./state.ts";
-import { DAEMON_DEFAULT_PORT, daemonHome, daemonLogPath, daemonTokenPath } from "./paths.ts";
+import { DAEMON_DEFAULT_PORT, daemonHome, daemonLogPath, daemonStatePath, daemonTokenPath } from "./paths.ts";
 import { pidAlive } from "../session-registry.ts";
 
 export interface CliIo {
@@ -164,8 +164,7 @@ async function start(args: Args, io: CliIo, home: string): Promise<number> {
   }
   if (args.foreground) return runForeground(args, io, home);
 
-  mkdirSync(daemonHome(home), { recursive: true });
-  const logFd = openSync(daemonLogPath(home), "a", 0o600);
+  mkdirSync(daemonHome(home), { recursive: true });  const logFd = openSync(daemonLogPath(home), "a", 0o600);
   const reexec = io.reexec ?? [process.execPath, fileURLToPath(import.meta.url)];
   const child = spawn(
     reexec[0]!,
@@ -233,7 +232,7 @@ async function status(io: CliIo, home: string): Promise<number> {
   const probe = await probeDaemon({ home });
   const state = probe.state ?? readDaemonState(home);
   if (state !== undefined) io.out(`state：${describeDaemonState(state)}`);
-  else io.out(`state：${daemonHome(home)} 下没有可读的 rg-daemon.json`);
+  else io.out(`state：${daemonStatePath(home)} 不存在或读不出来`);
   io.out(`在线：${probe.online ? "是" : "否"} —— ${probe.reason}`);
   io.out(`面板地址：http://127.0.0.1:${state?.port ?? DAEMON_DEFAULT_PORT}/（静态目录 ${DEFAULT_WEB_DIR}）`);
   return probe.online ? 0 : 1;

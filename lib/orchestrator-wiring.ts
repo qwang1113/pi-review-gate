@@ -33,6 +33,7 @@ import { gitRootOfDir } from "./repo-resolve.ts";
 import { gitOrNull } from "./git-exec.ts";
 import { readJsonIfExists } from "./json-file.ts";
 import { assertSafeTmuxArgv, type SafeTmuxOptions, type TmuxRunResult } from "./orchestrator-tmux.ts";
+import { runTmuxArgv } from "./tmux-exec.ts";
 import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state-io.ts";
@@ -62,23 +63,9 @@ export function runTmux(
   env: NodeJS.ProcessEnv = process.env,
   guard: SafeTmuxOptions = {},
 ): TmuxRunResult {
-  try {
-    assertSafeTmuxArgv(argv, guard);
-  } catch (error) {
-    return { ok: false, stdout: "", stderr: (error as Error).message };
-  }
-  try {
-    const stdout = execFileSync("tmux", [...argv], {
-      encoding: "utf8",
-      env,
-      timeout: 10_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return { ok: true, stdout: String(stdout ?? ""), stderr: "" };
-  } catch (error) {
-    const err = error as { stderr?: Buffer | string; message?: string };
-    return { ok: false, stdout: "", stderr: String(err.stderr ?? err.message ?? "tmux failed") };
-  }
+  // The exec half lives in lib/tmux-exec.ts, shared with the standalone daemon
+  // (2026-10-01): one copy of "run tmux under the door", not two that can drift.
+  return runTmuxArgv(argv, env, guard);
 }
 
 /** Read + validate `.pi/orchestrator-plan.json`. Absent ⇒ no plan, no problems. */

@@ -128,10 +128,22 @@ test("pid liveness lives in EXACTLY ONE place, and it is the weakest of three fa
   const { readdirSync, readFileSync } = await import("node:fs");
   const libDir = new URL("../lib/", import.meta.url);
   const offenders: string[] = [];
-  for (const name of readdirSync(libDir)) {
-    if (!name.endsWith(".ts")) continue;
+  // RECURSIVE since 2026-10-01: `lib/` gained a subdirectory (lib/daemon/), and
+  // a flat scan would have kept this prohibition from covering the daemon's own
+  // liveness reads — exactly the second implementation it exists to catch.
+  const walk = (dir: URL): URL[] => {
+    const found: URL[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const child = new URL(entry.name + (entry.isDirectory() ? "/" : ""), dir);
+      if (entry.isDirectory()) found.push(...walk(child));
+      else if (entry.name.endsWith(".ts")) found.push(child);
+    }
+    return found;
+  };
+  for (const file of walk(libDir)) {
+    const name = file.pathname.split("/").slice(-1)[0]!;
     if (name === "session-registry.ts") continue; // the one home, argued in its header
-    const src = readFileSync(new URL(name, libDir), "utf8");
+    const src = readFileSync(file, "utf8");
     // CODE only. blocked-marker.ts's own header argues AGAINST pid probing by
     // naming the call, and a test that cannot tell the warning from the deed
     // would forbid documenting the decision at all.

@@ -14,10 +14,10 @@ import {
   createDaemonTmuxRunner,
   launchTask,
   listCandidateRepos,
-  runTmuxArgv,
   safeWindowName,
   sendSessionMessage,
 } from "../lib/daemon/control.ts";
+import { runTmuxArgv } from "../lib/tmux-exec.ts";
 import { createSessionObserver } from "../lib/daemon/sessions.ts";
 import { inboxPayloadPath, parseInboxRecord, SESSION_MESSAGE_KIND } from "../lib/session-message-tools.ts";
 import { sessionInboxPath, sessionNameProblem, sessionRegistryRoot } from "../lib/session-registry.ts";
@@ -113,10 +113,10 @@ test("a body too long for one line spills to a side file the record points at", 
 });
 
 test("the daemon's tmux runner refuses anything outside its own declared session", () => {
-  const refused = runTmuxArgv(["kill-session", "-t", "rg-somebody-else"], process.env, ["rg-mine-abcdef"]);
+  const refused = runTmuxArgv(["kill-session", "-t", "rg-somebody-else"], process.env, { ownSessions: ["rg-mine-abcdef"] });
   assert.equal(refused.ok, false);
   assert.match(refused.stderr, /必须是本会话自己的 session/);
-  const killServer = runTmuxArgv(["kill-server"], process.env, ["rg-mine-abcdef"]);
+  const killServer = runTmuxArgv(["kill-server"], process.env, { ownSessions: ["rg-mine-abcdef"] });
   assert.equal(killServer.ok, false);
   assert.match(killServer.stderr, /kill-server/);
   assert.equal(typeof createDaemonTmuxRunner(), "function");

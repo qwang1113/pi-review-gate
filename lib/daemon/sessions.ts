@@ -48,7 +48,7 @@ import type { TmuxRunner } from "../orchestrator-tmux.ts";
 import { gitRawOrNull } from "../git-exec.ts";
 import { unmetRequirements } from "../gate-state-requirements.ts";
 import type { GateState } from "../gate-state.ts";
-import { extractGateState, readFileHead, readFileTail, readRecentEntries, type OutputEntry } from "./transcript.ts";
+import { extractGateState, readFileHead, readFileTail, readRecentEntries, transcriptSize, type OutputEntry } from "./transcript.ts";
 import { daemonAgentHome } from "./paths.ts";
 
 const STATE_WORDS: ReadonlySet<string> = new Set(CHILD_STATES);
@@ -87,6 +87,15 @@ export interface DaemonSession {
   transcript: string | null;
   lastActivityAt: string | null;
   rounds: { sent: number; recorded: number; lastVerdict: string | null };
+  /**
+   * Did the transcript tail carry a gate-state record at all?
+   *
+   * FALSE means the daemon could not read what this session's gate last said
+   * about itself (`rounds` and `unmet` are then placeholder values, not
+   * findings) — a consumer must render that as unknown, because an empty
+   * `unmet` would otherwise read as "nothing is pending".
+   */
+  gateStateFound: boolean;
   unmet: string[];
   registeredAt: string | null;
   heartbeatAt: string | null;
@@ -172,15 +181,29 @@ function scanTranscripts(sessionsRoot: string): Map<string, TranscriptRef> {
   return found;
 }
 
+/**
+ * How far back the last gate-state record is searched for.
+ *
+ * The record we want is the NEWEST one, so reading the tail is the right shape —
+ * but the window is a real limit, and it is why {@link DaemonSession.gateStateFound}
+ * exists: a single huge tool result can push the last record further back than
+ * this, and "no record in the window" MUST NOT be readable as "nothing is
+ * pending" (an empty `unmet` is the dangerous direction of that mistake).
+ */
+const GATE_STATE_WINDOW_BYTES = 256 * 1024;
+
 /** The gate state a session recorded about itself, read from its transcript tail. */
 function readGateState(path: string): Record<string, unknown> | undefined {
-  const tail = readFileTail(path, 256 * 1024);
+  const tail = readFileTail(path, GATE_STATE_WINDOW_BYTES);
   return tail === undefined ? undefined : extractGateState(tail.text);
 }
 
 function readRounds(state: Record<string, unknown> | undefined): DaemonSession["rounds"] {
   if (state === undefined) return { sent: 0, recorded: 0, lastVerdict: null };
-  const sent = typeof state.roundsSentThisSession === "number" ? state.roundsSentThisSession : undefined;
+  // `sentReviewRounds` is the field the gate actually writes (lib/gate-state.ts):
+  // the rounds this session has SENT OUT, which is not the same number as the
+  // rounds it has recorded — an in-flight round is sent and not yet recorded.
+  const sent = typeof state.sentReviewRounds === "number" ? state.sentReviewRounds : undefined;
   const rounds = Array.isArray(state.rounds) ? state.rounds : [];
   let lastVerdict: string | null = null;
   const last = rounds[rounds.length - 1];
@@ -223,6 +246,10 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
   let indexAt = 0;
   let index = new Map<string, TranscriptRef>();
   const branches = new Map<string, { at: number; value: string | null }>();
+  // ONE gate-state read per transcript VERSION: the last record lives at the end
+  // of the file, so a session that produced no new output since the last tick
+  // would otherwise cost another 256 KiB read every second.
+  const gateStates = new Map<string, { size: number; gate: Record<string, unknown> | undefined }>();
   // ONE collection per second serves every reader (the watcher, an HTTP list,
   // an SSE subscription): the sources are the file system and tmux, and three
   // callers asking in the same tick must not cost three scans.
@@ -238,8 +265,16 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
     return index;
   }
 
-  function branch(cwd: string): string | null {
-    const cached = branches.get(cwd);
+  function gateStateFor(path: string): Record<string, unknown> | undefined {
+    const size = transcriptSize(path);
+    const cached = gateStates.get(path);
+    if (cached !== undefined && size !== undefined && cached.size === size) return cached.gate;
+    const gate = readGateState(path);
+    gateStates.set(path, { size: size ?? -1, gate });
+    return gate;
+  }
+
+  function branch(cwd: string): string | null {    const cached = branches.get(cwd);
     const at = now();
     if (cached !== undefined && at - cached.at < BRANCH_TTL_MS) return cached.value;
     let value: string | null = null;
@@ -334,6 +369,7 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
           transcript: null,
           lastActivityAt: null,
           rounds: { sent: 0, recorded: 0, lastVerdict: null },
+          gateStateFound: false,
           unmet: [],
           registeredAt: null,
           heartbeatAt: null,
@@ -436,18 +472,14 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
       }
 
       const sessions: DaemonSession[] = [];
-      const gateCache = new Map<string, Record<string, unknown> | undefined>();
       for (const session of byId.values()) {
         if (!session.alive && session.name === null && session.transcript === null) continue;
         const path = session.transcript ?? transcriptsNow.get(session.sessionId)?.path;
         if (path !== undefined) {
           session.transcript = path;
-          // ONE read of the transcript tail serves both the gate state and the
-          // cwd, and a session whose tail is unreadable reports no rounds rather
-          // than a guess.
-          if (!gateCache.has(session.sessionId)) gateCache.set(session.sessionId, readGateState(path));
-          const gate = gateCache.get(session.sessionId);
+          const gate = gateStateFor(path);
           session.rounds = readRounds(gate);
+          session.gateStateFound = gate !== undefined;
           session.unmet = readUnmet(gate);
           if (session.cwd === "") {
             const head = readFileHead(path, 64 * 1024);

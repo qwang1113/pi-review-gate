@@ -38,7 +38,7 @@ import { createNotificationStore, createSessionWatcher, createSseHub, type Daemo
 import { listPendingQuestions, submitAnswer } from "./questions.ts";
 import { readConfig, writeConfig, type ConfigTargetName } from "./config.ts";
 import { createDaemonTmuxRunner, launchTask, listCandidateRepos, sendSessionMessage } from "./control.ts";
-import { readRecentEntries } from "./transcript.ts";
+import { readRecentEntries, readRecentEntriesWithOffset } from "./transcript.ts";
 import { tokenMatches } from "./state.ts";
 import { DAEMON_SCHEMA, daemonPackageVersion, notificationStorePath } from "./paths.ts";
 import { DEFAULT_WEB_DIR, servePanel, type StaticReply } from "./static.ts";
@@ -107,7 +107,15 @@ function match(pattern: string[], pathname: string): Record<string, string> | un
   const params: Record<string, string> = {};
   for (let index = 0; index < pattern.length; index += 1) {
     const expected = pattern[index]!;
-    const actual = decodeURIComponent(parts[index]!);
+    let actual: string;
+    try {
+      actual = decodeURIComponent(parts[index]!);
+    } catch {
+      // A segment that is not valid percent-encoding (`%`, `%zz`) is a segment
+      // that matches nothing: the router must answer 404, never throw a
+      // URIError out of the request handler where it reads as a 500.
+      return undefined;
+    }
     if (expected.startsWith(":")) params[expected.slice(1)] = actual;
     else if (expected !== actual) return undefined;
   }
@@ -132,8 +140,11 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
   const watcher = createSessionWatcher({ observer, hub, ...(opts.now === undefined ? {} : { now: opts.now }), onError: log });
 
   function findSession(id: string): DaemonSession | undefined {
+    // `@名字` and `名字` are the same address (the rule lib/session-message-tools.ts
+    // applies to a recipient) — the panel quoting a name back must not 404.
+    const key = id.trim().replace(/^@/, "");
     const collection = observer.collect({ includeRecentMs: 7 * 24 * 60 * 60 * 1_000, limit: SESSION_LIST_LIMIT });
-    return collection.sessions.find((session) => session.sessionId === id || session.name === id);
+    return collection.sessions.find((session) => session.sessionId === key || session.name === key);
   }
 
   const routes: Route[] = [
@@ -375,7 +386,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
 
   function handleSse(req: IncomingMessage, res: ServerResponse, query: URLSearchParams): void {
     const sessionId = query.get("sessionId");
-    const replay = Math.min(Math.max(numberParam(query.get("replay")) ?? DEFAULT_REPLAY, 0), MAX_REPLAY);
+    const replayCount = Math.min(Math.max(numberParam(query.get("replay")) ?? DEFAULT_REPLAY, 0), MAX_REPLAY);
     res.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-store",
@@ -389,12 +400,18 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
     };
     write({ event: "hello", data: { schema: DAEMON_SCHEMA, now: new Date(now()).toISOString(), sessionId: sessionId ?? null } });
     if (sessionId !== null) {
-      // PRIME BEFORE REPLAYING (see SessionWatcher.prime): the tail then covers
-      // exactly the window the replay cannot, with no gap in between.
-      if (replay > 0) watcher.prime(sessionId);
+      // PRIME BEFORE REPLAYING, ALWAYS — even when the subscriber asked for no
+      // replay: the bookmark is what makes "the first output after subscribing"
+      // reachable, and `replay=0` means "do not send me the past", not "skip the
+      // window between now and my first tick". The replay's own end offset is
+      // the bookmark, so the tail picks up exactly what the replay did not.
       const path = observer.transcriptFor(sessionId);
-      if (path !== undefined && replay > 0) {
-        write({ event: "output", data: { sessionId, entries: readRecentEntries(path, replay), replay: true } });
+      if (path !== undefined) {
+        const replay = replayCount === 0 ? { entries: [], offset: undefined } : readRecentEntriesWithOffset(path, replayCount);
+        watcher.prime(sessionId, replay.offset);
+        if (replay.entries.length > 0) {
+          write({ event: "output", data: { sessionId, entries: replay.entries, replay: true } });
+        }
       }
     }
     const unsubscribe = hub.add(write, sessionId);

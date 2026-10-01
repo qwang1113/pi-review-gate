@@ -23,9 +23,10 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** The web workspace's build output, relative to the package root. */
-export const DEFAULT_WEB_DIR = resolve(new URL("../../web/dist", import.meta.url).pathname);
+export const DEFAULT_WEB_DIR = resolve(fileURLToPath(new URL("../../web/dist", import.meta.url)));
 
 export interface StaticReply {
   status: number;

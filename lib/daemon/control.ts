@@ -34,14 +34,14 @@
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
 
 import { writeFileAtomic } from "../atomic-write.ts";
 import { MAX_INLINE_RECORD_BYTES, newChannelId } from "../channel-io.ts";
 import { openScopeWindow, type TmuxScope, type TmuxScopeRecord } from "../session-tmux-scope.ts";
 import { ownSessionName } from "../session-tmux-scope.ts";
-import { assertSafeTmuxArgv, type TmuxRunResult, type TmuxRunner } from "../orchestrator-tmux.ts";
+import type { TmuxRunner } from "../orchestrator-tmux.ts";
+import { runTmuxArgv } from "../tmux-exec.ts";
 import { liveSessionNames } from "../session-name-tools.ts";
 import {
   SESSION_MESSAGE_KIND,
@@ -63,40 +63,13 @@ export const MESSAGE_PREVIEW = 160;
 /**
  * THE DAEMON'S OWN TMUX RUNNER.
  *
- * Same safety door as the gate's (`assertSafeTmuxArgv`, lib/orchestrator-tmux.ts)
- * and a deliberately narrower declaration: the daemon may address only the one
- * dedicated session it derives for itself. A second copy of the door would be a
- * second answer to "which tmux commands are allowed"; what is NOT shared is
- * lib/orchestrator-wiring.ts's runner, which belongs to a pi session that also
- * owns judges, children and a plan.
+ * Same safety door and the SAME EXEC WRAPPER as the gate's
+ * ({@link runTmuxArgv}, lib/tmux-exec.ts — one copy, 2026-10-01), with a
+ * deliberately narrower declaration: the daemon may address only the one
+ * dedicated session it derives for itself.
  */
-export function runTmuxArgv(
-  argv: readonly string[],
-  env: NodeJS.ProcessEnv = process.env,
-  ownSessions: readonly string[] = [],
-): TmuxRunResult {
-  try {
-    assertSafeTmuxArgv(argv, { ownSessions });
-  } catch (error) {
-    return { ok: false, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
-  }
-  try {
-    const stdout = execFileSync("tmux", [...argv], {
-      encoding: "utf8",
-      env,
-      timeout: 10_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return { ok: true, stdout: String(stdout ?? ""), stderr: "" };
-  } catch (error) {
-    const failure = error as { stderr?: Buffer | string; message?: string };
-    return { ok: false, stdout: "", stderr: String(failure.stderr ?? failure.message ?? "tmux failed") };
-  }
-}
-
-/** The base runner: no session of its own is declared here — callers add theirs. */
 export function createDaemonTmuxRunner(): TmuxRunner {
-  return (argv, env, ownSessions) => runTmuxArgv(argv, env ?? process.env, ownSessions ?? []);
+  return (argv, env, ownSessions) => runTmuxArgv(argv, env ?? process.env, { ownSessions: [...(ownSessions ?? [])] });
 }
 
 export interface SendMessageOutcome {

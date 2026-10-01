@@ -86,7 +86,7 @@ CLI `pi-gate daemon status` 打印同一判定的结果与理由（在线返回�
 | --- | --- | --- |
 | GET | `/api/health` | daemon 自己的事实（在线探测用） |
 | GET | `/api/sessions` | 会话列表（`?includeRecentMs=`、`?limit=`） |
-| GET | `/api/sessions/:id` | 单个会话详情（`:id` 可以是 sessionId 或 `@名字`） |
+| GET | `/api/sessions/:id` | 单个会话详情（`:id` 可以是 sessionId，或 `名字` / `@名字`） |
 | GET | `/api/sessions/:id/output` | 最近输出（`?tail=N`，默认 50，上限 500） |
 | POST | `/api/sessions/:id/messages` | 给该会话写 inbox 消息 |
 | GET | `/api/repos` | 候选仓库列表 |
@@ -154,7 +154,8 @@ pane 判定整体跳过，注册表与转写照常上报。
 | `pid` | number \| null | 注册表里的 pid |
 | `transcript` | string \| null | 转写文件绝对路径 |
 | `lastActivityAt` | string \| null | 转写 mtime 与心跳取较晚者（ISO） |
-| `rounds` | `{sent,recorded,lastVerdict}` | 轮次：本轮发出的、已记录的、最后一条裁决 |
+| `rounds` | `{sent,recorded,lastVerdict}` | 轮次：`sent` 读会话写下的 `sentReviewRounds`（本轮**发出**的）、`recorded` 是已落库条数、`lastVerdict` 是最后一条裁决 |
+| `gateStateFound` | boolean | 转写尾部是否读到了门禁 state。**false ⇒ `rounds`/`unmet` 是占位值，不是结论**（面板必须显示「未知」而不是「无未满足项」） |
 | `unmet` | string[] | 该会话门禁自己算的未满足项（`unmetRequirements`，基于会话写进转写的 state） |
 | `registeredAt` / `heartbeatAt` | string \| null | 注册时间 / 最近心跳（ISO） |
 
@@ -163,6 +164,11 @@ pane 判定整体跳过，注册表与转写照常上报。
 
 **注意**：`unmet` 不重算工作区指纹（那是每次都要 hash 一棵树的成本），它基于会话自己最后
 写下的指纹；读不出来时如实给空数组，不猜。
+
+**门禁 state 的读取窗口**：`rounds`/`unmet` 来自转写里**最后一条** `review-gate-state` 记录，
+而 daemon 只读文件尾部的 **256 KiB**（`GATE_STATE_WINDOW_BYTES`：要找的就是最后一条，所以从尾部
+找是正确形状）。一条巨大的工具结果可以把最后一条记录挤出这个窗口 —— 那时 **`gateStateFound`
+为 false**，消费方必须把它读作「未知」，不能读作「没有未满足项」。
 
 ### 5.3 `GET /api/sessions/:id` → `{"session": DaemonSession}`；未知 → `404`
 
@@ -234,6 +240,11 @@ pi --session-id <uuid> [--name <name>] -- <任务描述> [+ 起名提示]
 
 拒绝（`400`，附具体原因）：repo 不是存在的目录 / 任务描述为空 / mode 或 station 不认识 /
 名字不合法（kebab-case，2–32）/ 名字已被活会话或生死不明者占用 / tmux 读不到。
+
+**`repo` 的边界（明写）**：它可以是本机上的**任意**绝对目录 —— daemon 不把它限制在
+`GET /api/repos` 给出的候选里。理由：持有 token 的调用方就是这台机器的同一个用户，它本来
+就能在任意目录里起 pi；限制反而是假的边界（候选列表只是为了方便浏览器选）。同一句话适用于
+`PUT /api/config` 带 `repo` 的 `gate-project` 目标（会在该目录下创建 `.pi/review-gate.json`）。
 
 ---
 
@@ -492,8 +503,13 @@ data: <JSON>
 | `notification` | §8.2 的 payload |
 | `ping` | `{ "at": "ISO" }`，每 15 s 一次保活 |
 
-**回放与增量无缝**：订阅时 daemon 先把转写文件的读取位置定在当前末尾，再回放最近 N 条，
-随后推出的都是这之后的新条目——订阅后的第一个输出不会丢。
+**回放与增量无缝**：订阅时 daemon 先回放最近 N 条，并把**尾部读取位置定在回放结束的那个字节**，
+随后推出的都是这之后的新条目 —— 订阅后的第一个输出不会丢。`replay=0` 表示「不要给我历史」，
+**不等于不建游标**。
+
+**重复与丢失的取舍**：两个订阅者共用同一个尾部游标，第二个订阅者**不会**让游标前移（那会让
+第一个订阅者丢掉还没读到的字节）。因此第二个订阅者可能把某几条既在回放里、又在增量里看到
+两次 —— 重复是可恢复的，丢失不是。
 
 订阅不限制数量；客户端断开（`close`）时自动注销。
 
@@ -502,6 +518,8 @@ data: <JSON>
 ## 10. 静态托管（web 面板）
 
 - 目录：`<包根>/web/dist`（web 工作区的构建输出；`npm run build:web` 生成）。
+- 发布包里也带上它（`package.json` 的 `files` 含 `web/dist/`），否则装出来的包永远只有说明页。
+  构建产物由 web-panel 任务产生：**发布前必须先 `npm run build:web`**。
 - `GET /` 与任何**非 `/api/*`** 路径都从这里取文件（按扩展名给 `Content-Type`）。
 - **SPA fallback**：路径在磁盘上不存在时回 `index.html`（前端路由刷新不 404）。
 - 路径穿越（`../`、绝对路径、NUL）一律解析不出去，落回 fallback。

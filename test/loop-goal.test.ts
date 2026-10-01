@@ -10,6 +10,15 @@ import { LOOP_GOAL_MISSING_DIRECTIVE, buildLoopGoalDirective, parseGoalCriteria,
 import { GOAL_CONFIRM_TITLE, buildGoalTranscriptMessage, buildGoalConfirmMessage } from "../lib/goal-confirm-copy.ts";
 import { formatGoalPrereviewCarryover, buildGoalAuditTask, diffDraftLines } from "../lib/goal-audit-task.ts";
 import { UNTRUSTED_DATA_HEADER, UNTRUSTED_DATA_RULE } from "../lib/untrusted-data.ts";
+import { neutraliseGateEnv } from "./helpers/gate-env.ts";
+
+// HERMETIC GATE ENV: `buildGoalForceNegotiateDirective` picks its CHILD wording
+// from `isOrchestrationChildEnv()`, which reads the RG_* variables that leak in
+// from the session running the suite. Inside an orchestration child this file
+// then asserted the parent wording against child text — the exact
+// environment-dependent failure `neutraliseGateEnv` exists for (26 other files
+// already call it).
+neutraliseGateEnv();
 
 function repoWithGoal(content?: string, mtimeMs?: number): string {
   const root = mkdtempSync(join(tmpdir(), "loop-goal-"));

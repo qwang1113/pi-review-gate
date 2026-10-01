@@ -2,7 +2,7 @@ import { test, after, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
-  mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync,
+  mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, cpSync,
   copyFileSync, readdirSync, existsSync, readFileSync, symlinkSync,
 } from "node:fs";
 import { join, resolve, dirname } from "node:path";
@@ -63,9 +63,11 @@ before(() => {
   mkdirSync(join(INSTALL, "extensions"), { recursive: true });
   mkdirSync(join(INSTALL, "lib"), { recursive: true });
   copyFileSync(join(ROOT, "extensions", "review-gate.ts"), join(INSTALL, "extensions", "review-gate.ts"));
-  for (const f of readdirSync(join(ROOT, "lib"))) {
-    copyFileSync(join(ROOT, "lib", f), join(INSTALL, "lib", f));
-  }
+  // RECURSIVE on purpose: `lib/` holds SUBDIRECTORIES too (lib/daemon/), and a
+  // flat copy loop stopped at the first one with EISDIR — everything sorted
+  // after it never reached the fixture, which surfaced much later as an
+  // unresolvable `lib/…` import while this file loaded the extension.
+  cpSync(join(ROOT, "lib"), join(INSTALL, "lib"), { recursive: true });
   mkdirSync(join(INSTALL, "node_modules"), { recursive: true });
   symlinkSync(join(ROOT, "node_modules", "typebox"), join(INSTALL, "node_modules", "typebox"));
 });
@@ -91,9 +93,7 @@ before(() => {
   mkdirSync(join(INSTALL_WITH_AGENTS, "lib"), { recursive: true });
   mkdirSync(join(INSTALL_WITH_AGENTS, "agents"), { recursive: true });
   copyFileSync(join(ROOT, "extensions", "review-gate.ts"), join(INSTALL_WITH_AGENTS, "extensions", "review-gate.ts"));
-  for (const f of readdirSync(join(ROOT, "lib"))) {
-    copyFileSync(join(ROOT, "lib", f), join(INSTALL_WITH_AGENTS, "lib", f));
-  }
+  cpSync(join(ROOT, "lib"), join(INSTALL_WITH_AGENTS, "lib"), { recursive: true });
   for (const f of readdirSync(join(ROOT, "agents"))) {
     copyFileSync(join(ROOT, "agents", f), join(INSTALL_WITH_AGENTS, "agents", f));
   }
