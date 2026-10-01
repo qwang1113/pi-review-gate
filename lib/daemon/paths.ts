@@ -16,7 +16,8 @@
  *
  * Everything else lives under `~/.pi/agent/rg-daemon/`: the log, the daemon's
  * own persistent identity (used to derive its tmux scope session), the answered
- * question protocol directory and the notification store.
+ * question protocol directory, the notification store, and the scheduled-task
+ * table + its run ledger (`schedulesPath` / `scheduleRunsPath`).
  */
 
 import { readFileSync } from "node:fs";
@@ -133,6 +134,30 @@ export function questionAnswerPath(home: string, sessionId: string, requestId: s
  */
 export function notificationStorePath(home: string = homedir()): string {
   return join(daemonHome(home), "notifications");
+}
+
+/**
+ * The scheduled-task table (0600): what the scheduler should run.
+ *
+ * One JSON document — `{schema, version, tasks}` — read and rewritten by the
+ * daemon, by a gate session's `schedule_task` tool and by the panel, so its
+ * shape and its version rule live in one module (`lib/schedule-store.ts`);
+ * this path is here because every daemon-owned file is named in one place.
+ */
+export function schedulesPath(home: string = homedir()): string {
+  return join(daemonHome(home), "schedules.json");
+}
+
+/**
+ * The scheduled-run ledger (0600, append-only JSONL): what actually ran.
+ *
+ * Separate from the table on purpose — three processes append to it and none
+ * of them rewrites it, so a run that started while another one settled cannot
+ * lose an entry. The record shapes are `ScheduleRunRecord` in
+ * `lib/schedule-store.ts`.
+ */
+export function scheduleRunsPath(home: string = homedir()): string {
+  return join(daemonHome(home), "schedule-runs.jsonl");
 }
 
 export function daemonBaseUrl(port: number, host: string = DAEMON_HOST): string {

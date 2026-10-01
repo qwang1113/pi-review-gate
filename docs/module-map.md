@@ -558,7 +558,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 
 ---
 
-## 五、`lib/` 全量速查表（279 个模块）
+## 五、`lib/` 全量速查表（281 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -612,6 +612,8 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `copilot-review-state.ts` | L7 的状态机本体：状态、持久化形状、`arm` / `record` / `release` 三个转移、`copilotProblems`、sidecar 校验 `sanitizeCopilotState`；`CopilotReviewState.triage` 带用户自己的裁决，每个转移都带着它走 |
 | `copilot-probe-parse.ts` | L7 的 gh 输出纯解析：各 GraphQL query 常量、`parseCopilotProbe` / `parseCopilotTimeline` / `parseCopilotPayload` / `parsePrView` / `decidePrView`、可用性判定 `decideCopilotSupport`、`isCopilotAuthor`；认不出的形状一律是「没数据」，不抛不猜 |
 | `copilot-triage.ts` | L7 用户那半边的纯规则：轮次阈值（`COPILOT_TRIAGE_ASK_FROM_ROUND = 4` 起每条问题先问用户）、线程键（thread id + 最后一条评论 id）、「哪些还没表态」、四组裁决汇总、`triage` 块的 sanitize；无 IO/无时钟 |
+| `cron-schedule.ts` | **调度内核的纯规则半边**（2026-10-01，t1-kernel）：5 段 cron（分 时 日 月 周）的 `parseCron`（支持 `*` / `a,b` / `a-b` / `*/n` / `a-b/n`；非法时**点名第几段与原因**，不是一句「invalid cron」）、`nextRunAfter`（严格大于给定时刻的**本地**下一次：先走日、再走当天时刻；`2 月 30 日` 这类无解返回 `null`，搜索上界 `MAX_SEARCH_DAYS` 覆盖「闰年 2 月 29 跨过非闰的整百年」）、`describeCron`（面板那一行人话，归纳不了就原样返回表达式）。无 IO / 无时钟 / 无定时器 —— 「到点了做什么」属 `lib/daemon/`。日与周**都受限制**时按经典 cron 的 OR 语义（`0 9 1 * 1` = 每月 1 号 + 每周一），`0` 与 `7` 都读成周日 |
+| `schedule-store.ts` | **机器级调度记录**（2026-10-01，t1-kernel）：`~/.pi/agent/rg-daemon/schedules.json`（`{schema:1, version, tasks}`，**0600 + `writeFileAtomic`**，每次写 `version+1`，`expectedVersion` 不匹配就回「有人同时改过，请重读」；**读不出来的表是拒绝而不是空表** —— 读成空表会让下一笔写入覆盖掉还在盘上的任务）与追加式台账 `schedule-runs.jsonl`（`run-started` / `run-settled` / `run-skipped`，坏行跳过不致命）。`applyScheduleEdit` 是**写入资格规则的唯一实现**：`from:"panel"` 碰到 `requirement` / `repo` / `contract` 整条拒绝并点名 authoring 路径，`from:"gate"` 才允许带契约，而 `updateScheduledTask` 自己也走它（省略 `from` 一律读成 panel，fail-closed）；契约的两个 hash 复用 `restatementHash` 与 `goalTextHash(normalizeGoalText(...))`，不另写一套规则。`SCHEDULE_ID_ENV` / `SCHEDULE_RUN_ENV` 与 `GATE_ENV_NAMES` 同一轮同步 |
 | `daemon-presence.ts` | **两个「谁发通知」事实的唯一实现**（2026-10-01，menubar-and-boot；质量轮 P1 后补第二个）。① **「daemon 在线吗」**（规则冻结在 `docs/daemon/api.md` §3：state 文件可解析且 schema 1 + pid 活 + 带 token 的 `127.0.0.1:<port>/api/health` 1s 内 200，三条全过才算在线）：同一份判定有两个入口：`probeDaemon`（异步 `fetch`，CLI `status`/`start`/`stop` 读的那个理由）与 `probeDaemonSync`（**同步**，用系统 curl 且把 url 与 `Authorization` 从 stdin 喂给它 —— token 绝不进 argv）。两者只差「怎么问端口」，判决都交给纯函数 `judgeDaemonPresence`。② **「发送者在场吗」**：`bannerSenderPresence` 读菜单栏 app 自己写的心跳（`~/.pi/agent/rg-daemon/menubar.json`，5s 一次、20s 算新鲜、pid 必须是正整数且活、`canPost` 必须为 true），`bannerSenderOnline` 把两个事实合起来 —— **终端侧只在它们全成立时才抑制**（daemon 会被每个会话自动拉起、app 不会，只看在线会得到「两边都不发」；app 在跑但通知权限被拒也一样）。任一条不确定 ⇒ 不在线 / 不抑制，终端照旧发（fail-open） |
 | `daemon/autostart.ts` | **第三种启动方式**：`ensureDaemonRunning` = 探测 → 抢 `start.lock`（`O_EXCL`，死主的可接管）→ 锁下再探测一次 → 脱离父进程 spawn `daemon run`（日志 fd、`RG_DAEMON_HOME` 在这里，父进程用完就关掉自己那份 fd）→ 轮询到端口应答才算成功；返回 `online` / `started` / `busy` / `failed` 而**从不抛**。CLI 的 `start` 与门禁 `session_start`（`ensureDaemonInBackground`，仅 `sideEffectsEnabled` 的真交互会话）走同一份实现，所以「不起第二份」只有一个地方在管 |
 | `daemon/cli.ts` | `pi-gate daemon start|stop|status|install|uninstall`：start 幂等靠探测 + 委托 `daemon/autostart.ts`（锁与 spawn 都在那里），`run` 绑端口前先探测（已在线就以 0 退出 —— launchd 下重起才不会是停不下来的失败循环），stop 等进程真死再清记录，install/uninstall 写/删 `~/Library/LaunchAgents/<label>.plist` 并 bootstrap/bootout（`daemon/service-launchd.ts`） |
