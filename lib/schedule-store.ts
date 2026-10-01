@@ -11,26 +11,23 @@
  *
  * The table is one JSON document with a `version` that increments on every
  * write, and `update` / `remove` refuse an `expectedVersion` that does not
- * match what is on disk. The ledger is append-only: three processes (the
- * daemon's tick, a gate session, the panel) can add a line without any of them
- * reading the others, and a torn final line is skipped rather than fatal.
- *
- * Every path is derived from an explicit `home` (the convention
- * `lib/daemon/paths.ts` uses), so a test points the whole store at a scratch
- * directory and never touches the real agent home.
+ * match what is on disk; a missing file is an empty table, an unreadable one is
+ * a refusal. The ledger is append-only: three processes (the daemon's tick, a
+ * gate session, the panel) can add a line without reading the others', and a
+ * torn final line is skipped rather than fatal. Every path comes from an
+ * explicit `home` (the convention `lib/daemon/paths.ts` uses), so a test points
+ * the whole store at a scratch directory.
  *
  * ── THE AUTHORING RULE ──
  *
  * A scheduled task carries a NEGOTIATED contract: a confirmed requirement
- * restatement and an approved loop goal, each bound to a hash. A panel with a
- * text field must not be able to rewrite either of those — that is how a
- * "scheduled task" would silently become a different task than the one the
- * user agreed to. `applyScheduleEdit` is the ONE implementation of that rule:
- * `from: "panel"` may touch `name` / `cron` / `enabled`, and any patch that
- * touches `requirement` / `repo` / `contract` is refused whole (with the
- * authoring path named); `from: "gate"` may carry the contract.
- * `updateScheduledTask` routes through it too, so the store's write path
- * cannot be used to skip the rule.
+ * restatement and an approved loop goal, each bound to a hash. A panel text
+ * field must not rewrite either — that is how a scheduled task would silently
+ * become a different task than the one the user agreed to. `applyScheduleEdit`
+ * is the ONE implementation of that rule: `from: "panel"` may touch `name` /
+ * `cron` / `enabled`, and any patch touching `requirement` / `repo` / `contract`
+ * is refused whole (the authoring path is named in the copy); `from: "gate"`
+ * may carry the contract. `updateScheduledTask` routes through it too.
  */
 
 import { randomBytes } from "node:crypto";
@@ -174,27 +171,16 @@ const isTimestamp = (value: unknown): value is string => isText(value) && Number
 function isStoredTask(value: unknown): value is ScheduledTask {
   if (!isRecord(value)) return false;
   const contract = value.contract;
+  if (!isRecord(contract) || !isRecord(contract.restatement) || !isRecord(contract.goal)) return false;
+  const { restatement, goal } = contract;
   return (
-    isText(value.id) &&
-    isText(value.name) &&
-    isText(value.repo) &&
-    isText(value.cron) &&
-    isText(value.requirement) &&
-    typeof value.enabled === "boolean" &&
-    isText(value.createdAt) &&
-    isText(value.updatedAt) &&
+    isText(value.id) && isText(value.name) && isText(value.repo) && isText(value.cron) &&
+    isText(value.requirement) && typeof value.enabled === "boolean" &&
+    isText(value.createdAt) && isText(value.updatedAt) &&
     (value.lastFiredAt === null || isTimestamp(value.lastFiredAt)) &&
-    isRecord(contract) &&
-    isRecord(contract.restatement) &&
-    isText(contract.restatement.text) &&
-    isText(contract.restatement.hash) &&
-    isText(contract.restatement.at) &&
-    isDeliveryStation(contract.restatement.station) &&
-    isRecord(contract.goal) &&
-    isText(contract.goal.text) &&
-    isText(contract.goal.hash) &&
-    isText(contract.goal.at) &&
-    isText(contract.approvedAt)
+    isText(restatement.text) && isText(restatement.hash) && isText(restatement.at) &&
+    isDeliveryStation(restatement.station) &&
+    isText(goal.text) && isText(goal.hash) && isText(goal.at) && isText(contract.approvedAt)
   );
 }
 
@@ -382,15 +368,6 @@ function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, current?: S
   if (has(patch, "repo")) {
     const problem = scheduleRepoProblem(patch.repo);
     if (problem) return problem;
-    // `repo` is authoring-only AND no hash binds it: moving a task to another
-    // checkout would silently re-point a task the user agreed to in one
-    // repository, so the move has to bring a NEW contract in the same patch.
-    // The comparison is against the CURRENT repo, not the key's presence: a
-    // caller that submits the whole task back unchanged is not moving it.
-    if (patch.repo !== current?.repo && !has(patch, "contract")) {
-      return "改 repo 必须和一份新的 contract 一起提交（需求反述 + goal 批准）：契约的两个 hash 绑不住 repo，" +
-        "而「这份反述 / goal 是在哪个仓库上批准的」正是换 repo 会默默改掉的东西";
-    }
   }
   if (has(patch, "cron")) {
     const parsed = parseCron(String(patch.cron));
@@ -407,7 +384,26 @@ function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, current?: S
     const problem = scheduleContractProblem(patch.contract);
     if (problem) return problem;
   }
+  // `repo` is authoring-only AND no hash binds it: moving a task to another
+  // checkout would silently re-point a task the user agreed to in one
+  // repository. So a move must carry a NEW contract in the same patch —
+  // compared against the CURRENT repo (an unchanged resubmit is not a move)
+  // and by hashes (re-sending the old contract is not a re-negotiation).
+  if (has(patch, "repo") && patch.repo !== current?.repo) {
+    if (!has(patch, "contract")) {
+      return "改 repo 必须和一份新的 contract 一起提交（需求反述 + goal 批准）：契约的两个 hash 绑不住 repo";
+    }
+    if (current !== undefined && sameContractApproval(patch.contract, current.contract)) {
+      return "改 repo 时带回的 contract 与现值相同（两个 hash 都没变）—— 这不算重新协商：" +
+        "换仓库要在新仓库上重新反述需求并重新批准 goal";
+    }
+  }
   return undefined;
+}
+
+/** Do two contracts carry the SAME approval? The hashes are its identity. */
+function sameContractApproval(a: ScheduleContract | undefined, b: ScheduleContract): boolean {
+  return a?.restatement.hash === b.restatement.hash && a?.goal.hash === b.goal.hash;
 }
 
 function newScheduleId(taken: ReadonlySet<string>): string {
@@ -542,7 +538,8 @@ export function nextRunAtFor(task: ScheduledTask, now: Date): Date | null {
 /**
  * Append one line to `schedule-runs.jsonl` (0600). Append-only on purpose: the
  * file three processes write and nobody rewrites, so there is no
- * read-modify-write window to lose an entry in.
+ * read-modify-write window to lose an entry in. It throws on an unreadable
+ * home or an unknown record kind — both are call-site bugs, not states.
  */
 export function appendScheduleRun(home: string, record: ScheduleRunRecord): void {
   if (!isRecord(record) || !RUN_KINDS.includes(String(record.kind))) {
