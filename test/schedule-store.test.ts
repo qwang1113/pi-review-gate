@@ -416,17 +416,17 @@ test("moving a task to another repo has to bring a new contract with it", () => 
   if (bare.ok) return;
   assert.match(bare.problem, /新的 contract/);
 
-  // …and the contract it brings has to BE new: re-sending the old one next to a
-  // new repo is not a re-negotiation (round-3 reviewer P2).
-  const sameContract = updateScheduledTask(
+  // …and the contract it brings has to be a NEWER approval: re-sending the old
+  // one next to a new repo is not a re-negotiation (round-3 reviewer P2).
+  const oldApproval = updateScheduledTask(
     home,
     added.value.id,
     { repo: other, contract: makeContract() },
     { from: "gate", expectedVersion: 1 },
   );
-  assert.equal(sameContract.ok, false);
-  if (sameContract.ok) return;
-  assert.match(sameContract.problem, /两个 hash 都没变/);
+  assert.equal(oldApproval.ok, false);
+  if (oldApproval.ok) return;
+  assert.match(oldApproval.problem, /approvedAt/);
 
   // Submitting the whole task back UNCHANGED is not a move: the rule compares
   // against the current repo, not against the presence of the key.
@@ -438,19 +438,22 @@ test("moving a task to another repo has to bring a new contract with it", () => 
   );
   assert.equal(unchanged.ok, true);
 
-  const fresh = makeContract();
-  fresh.goal.text = "# 定时审计（新仓库）\n意图：在另一个 checkout 上跑";
-  fresh.goal.hash = goalTextHash(normalizeGoalText(fresh.goal.text));
+  // An honest re-negotiation of the SAME requirement produces the same text —
+  // so the approval's TIME is what makes it a re-negotiation, not the wording
+  // (round-4 quality P2: judging the text refused the honest case and waved a
+  // one-word edit through).
+  const renegotiated = makeContract();
+  renegotiated.approvedAt = "2026-10-02T00:00:00.000Z";
   const moved = updateScheduledTask(
     home,
     added.value.id,
-    { repo: other, contract: fresh },
+    { repo: other, contract: renegotiated },
     { from: "gate", expectedVersion: 2 },
   );
   assert.equal(moved.ok, true);
   if (!moved.ok) return;
   assert.equal(moved.value.repo, other);
-  assert.deepEqual(moved.value.contract, fresh);
+  assert.deepEqual(moved.value.contract, renegotiated);
 });
 
 test("an unparseable lastFiredAt is refused on both sides — it would mean「never again」", () => {

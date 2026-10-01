@@ -4,10 +4,8 @@
  *
  * ── TWO FILES, TWO KINDS OF TRUTH ──
  *
- *   ~/.pi/agent/rg-daemon/schedules.json      0600  WHAT should run: one task per
- *                                                   contract + the cron + the repo
- *   ~/.pi/agent/rg-daemon/schedule-runs.jsonl 0600  WHAT DID run: an append-only
- *                                                   ledger, one JSON line per event
+ *   ~/.pi/agent/rg-daemon/schedules.json      0600  WHAT should run
+ *   ~/.pi/agent/rg-daemon/schedule-runs.jsonl 0600  WHAT DID run (append-only)
  *
  * The table is one JSON document with a `version` that increments on every
  * write, and `update` / `remove` refuse an `expectedVersion` that does not
@@ -161,9 +159,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
 /**
- * A timestamp `new Date(...)` can read: `lastFiredAt` is what `nextRunAtFor`
- * counts from, so an unparseable value means "never again" — refused on the
- * write side AND the read side.
+ * A timestamp `new Date(...)` can read — the one date field held to a parse on
+ * BOTH sides: it is what `nextRunAtFor` counts from, so an unparseable value
+ * means "never again".
  */
 const isTimestamp = (value: unknown): value is string => isText(value) && Number.isFinite(Date.parse(value));
 
@@ -393,17 +391,20 @@ function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, current?: S
     if (!has(patch, "contract")) {
       return "改 repo 必须和一份新的 contract 一起提交（需求反述 + goal 批准）：契约的两个 hash 绑不住 repo";
     }
-    if (current !== undefined && sameContractApproval(patch.contract, current.contract)) {
-      return "改 repo 时带回的 contract 与现值相同（两个 hash 都没变）—— 这不算重新协商：" +
-        "换仓库要在新仓库上重新反述需求并重新批准 goal";
+    // The identity of an approval is WHEN it was given, not what it says: an
+    // honest re-negotiation of the same requirement produces the same text
+    // (judging the text would refuse it while a one-word edit passed), and a
+    // re-submitted old contract carries its old timestamp.
+    if (current !== undefined) {
+      const before = Date.parse(current.contract.approvedAt);
+      const after = Date.parse(patch.contract?.approvedAt ?? "");
+      if (!(Number.isFinite(before) && Number.isFinite(after) && after > before)) {
+        return "换 repo 带回的 contract 的 approvedAt 不比现值新 —— 这不算重新协商：" +
+          "换仓库要在新仓库上重新反述需求、重新批准 goal，并落一份新的批准时间";
+      }
     }
   }
   return undefined;
-}
-
-/** Do two contracts carry the SAME approval? The hashes are its identity. */
-function sameContractApproval(a: ScheduleContract | undefined, b: ScheduleContract): boolean {
-  return a?.restatement.hash === b.restatement.hash && a?.goal.hash === b.goal.hash;
 }
 
 function newScheduleId(taken: ReadonlySet<string>): string {
@@ -520,9 +521,10 @@ export function removeScheduledTask(
 }
 
 /**
- * When this task fires next — from `lastFiredAt` if it has fired, else from
- * `now`. A disabled task, an illegal cron and an impossible date all answer
- * `null` rather than throwing at a caller that is only drawing a panel row.
+ * When this task fires next — from `lastFiredAt` if it has fired (a run that
+ * already happened is not a candidate again, so after a pause this can land in
+ * the past), else from `now`. A disabled task, an illegal cron and an
+ * impossible date all answer `null` rather than throwing.
  */
 export function nextRunAtFor(task: ScheduledTask, now: Date): Date | null {
   if (!task || task.enabled !== true) return null;
