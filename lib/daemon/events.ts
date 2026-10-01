@@ -144,7 +144,7 @@ export interface NotificationClaim {
   status: "claimed" | "duplicate" | "throttled";
   firstSeenAt: string;
   count: number;
-  /** Present when the answer is `claimed: false`. */
+  /** Why the answer is what it is — present on every non-trivial verdict, including a fail-open `claimed: true`. */
   reason?: string;
 }
 

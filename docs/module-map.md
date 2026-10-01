@@ -613,7 +613,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `daemon/cli.ts` | `pi-gate daemon start|stop|status|install|uninstall`：start 幂等靠探测 + `start.lock`（`O_EXCL`，两个并发 start 不会各起一份，死主的锁可接管），stop 等进程真死再清记录，install/uninstall 是明确定位的占位（launchd 属 menubar-and-boot） |
 | `daemon/config.ts` | 四个配置文件的读（**敏感键整棵子树掩码**，非字符串也掩）/写（白名单 + `validateSlots` + 时间戳备份 + 原子写 + 保留 10 份）；配置路径与字段清单也在这里 |
 | `daemon/control.ts` | 写 inbox（与 `session-message-tools.ts` 逐字段一致，含溢出 side file）、`POST /api/tasks` 起会话（复用 `openScopeWindow` 与专属 session 派生，env 传 `RG_GATE_MODE`/`RG_STATION_CAP`）、候选仓库列表、daemon 自己的 tmux runner（只寻址自己派生的那个 session） |
-| `daemon/events.ts` | SSE hub + 会话 watcher（session/output/notification 事件）+ 通知去重存储（直接复用 `lib/user-notify.ts` 的 `decideNotify`/`recordNotify`/`notifyKey`/`buildUserNotifyMessage`，不另立一套）；`prime` 只在没有游标时建，**永不移动已有游标** |
+| `daemon/events.ts` | SSE hub + 会话 watcher（session/output/notification 事件）+ 通知去重存储（**判定调门禁自己的 `decideNotify`**、标题与 key 用 `buildUserNotifyMessage`/`notifyKey`，不另立一套；存储是每 key 一个 claim 文件 `link(2)` + 追加式 `history.jsonl`，写入与裁剪是本模块的 append+prune）；`prime` 只在没有游标时建，**永不移动已有游标** |
 | `daemon/paths.ts` | daemon 的全部路径与常量（state / token / questions / notifications / identity / 日志）+ sessionId 作路径段的安全校验 |
 | `daemon/questions.ts` | 待答问题文件协议的实现（列待答、写答案）：身份 = (目录 sessionId, 文件名 requestId)，且必须与文件里的字段一致；答案用 `O_EXCL` 创建 ⇒ **先答者生效**；归一复用 `resolveAnswer` |
 | `daemon/server.ts` | 路由表 + 鉴权（0600 token、常量时间比较）+ SSE 帧格式 + 静态接线；**无策略**，每个 endpoint 只把请求转给上面某个模块 |
