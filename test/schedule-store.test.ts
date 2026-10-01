@@ -189,6 +189,11 @@ test("a rename onto its own id is legal, onto another task's id is refused", () 
   // this state is reachable through a legal rename.
   const ownId = updateScheduledTask(home, first.value.id, { name: first.value.id }, { from: "panel" });
   assert.equal(ownId.ok, true);
+  if (!ownId.ok) return;
+  // The rename has to have LANDED for the next assertion to mean anything:
+  // "the table still reads" is only interesting when `name === id` is really
+  // the state on disk.
+  assert.equal(ownId.value.name, first.value.id);
   assert.equal(readSchedules(home).ok, true, "a task may carry its own id as its name");
 
   // Onto ANOTHER task's id it is refused on the write side, so a successful
