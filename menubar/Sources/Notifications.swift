@@ -27,16 +27,29 @@ import UserNotifications
 final class UserNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = UserNotifier()
 
-    /// Ask once, at launch. A refused permission is a `false` here and nothing
-    /// else in the app ever mentions it again.
-    private(set) var authorized = false
+    /// CAN THIS APP ACTUALLY RAISE A BANNER? — the last thing it learned, and
+    /// the fact the terminal side needs (`PiGateApp.touchPresence` writes the
+    /// heartbeat only while this is true, and `lib/daemon-presence.ts` reads
+    /// that heartbeat before it agrees to stay silent).
+    ///
+    /// It is not just "the permission dialog was accepted": an `add` that FAILS
+    /// (permission revoked in System Settings, Notification Centre refusing
+    /// us) means no banner either, and an app that keeps claiming the banners
+    /// while posting nothing would silence both senders at once. `false` is the
+    /// fail-open end here too — the terminal takes over.
+    private(set) var canPost = false
 
     func setUp() {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-            self.authorized = granted
+            DispatchQueue.main.async { self.canPost = granted }
         }
+    }
+
+    /// Record what one post attempt learned about our ability to send.
+    private func notePost(_ error: Error?) {
+        DispatchQueue.main.async { self.canPost = (error == nil) }
     }
 
     /// Post one banner. Called only after the daemon CLAIMED the key.
@@ -51,9 +64,11 @@ final class UserNotifier: NSObject, UNUserNotificationCenterDelegate {
             content: content,
             trigger: nil
         )
-        UNUserNotificationCenter.current().add(request) { _ in
+        UNUserNotificationCenter.current().add(request) { [weak self] error in
             // Silent by design: a denied permission, a full Notification Center
             // or a missing bundle id are all "no banner", never "no app".
+            // Silent, but not unobserved — see `notePost`.
+            self?.notePost(error)
         }
     }
 

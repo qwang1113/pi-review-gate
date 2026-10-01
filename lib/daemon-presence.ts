@@ -267,8 +267,9 @@ export interface BannerSenderPresence {
  * earn its answer.
  *
  * EVERY DOUBT IS `false` (missing file, unreadable JSON, a stale heartbeat, a
- * dead pid, a clock that cannot be read): the terminal then sends, which is the
- * recoverable end — a duplicate banner instead of silence.
+ * dead pid, a `canPost: false` from the app itself, a clock that cannot be
+ * read): the terminal then sends, which is the recoverable end — a duplicate
+ * banner instead of silence.
  */
 export function bannerSenderPresence(opts: { home?: string; now?: number } = {}): BannerSenderPresence {
   const path = menubarPresencePath(opts.home ?? daemonUserHome());
@@ -281,10 +282,23 @@ export function bannerSenderPresence(opts: { home?: string; now?: number } = {})
   if (!raw || typeof raw !== "object") return { present: false, reason: "菜单栏 app 的心跳不是 JSON 对象" };
   const record = raw as Record<string, unknown>;
   if (record.schema !== 1) return { present: false, reason: `菜单栏 app 的心跳 schema 不认识（${JSON.stringify(record.schema)}）` };
-  const pid = typeof record.pid === "number" && Number.isInteger(record.pid) ? record.pid : undefined;
-  if (pid === undefined) return { present: false, reason: "菜单栏 app 的心跳没有 pid" };
+  // A POSITIVE pid, like every other pid this package trusts (`lib/daemon/state.ts`):
+  // `pidAlive(0)` and `pidAlive(-1)` are TRUE — `kill(0, 0)` / `kill(-1, 0)` signal
+  // the whole process group / every process of the user — so a heartbeat carrying
+  // one of those would read as "the app is running" for a file nobody wrote.
+  const pid = typeof record.pid === "number" && Number.isInteger(record.pid) && record.pid > 0 ? record.pid : undefined;
+  if (pid === undefined) return { present: false, reason: "菜单栏 app 的心跳没有可用的 pid（必须是正整数）" };
   const at = typeof record.at === "string" ? Date.parse(record.at) : Number.NaN;
   if (!Number.isFinite(at)) return { present: false, reason: "菜单栏 app 的心跳没有可读的时间戳" };
+  // A RUNNING APP IS NOT A SENDING APP (reviewer P1, 2026-10-01): the banner is
+  // raised through UNUserNotificationCenter, so an app whose permission was
+  // denied — or whose `add` failed — raises nothing while sitting there looking
+  // healthy. The app states that fact itself and this is where it is required;
+  // a heartbeat written before the field existed is also refused, which is the
+  // fail-open direction for a mixed-version pair.
+  if (record.canPost !== true) {
+    return { present: false, reason: "菜单栏 app 在跑，但它报告自己发不出横幅（通知权限被拒或投递失败）" };
+  }
   const now = opts.now ?? Date.now();
   if (now - at > MENUBAR_HEARTBEAT_FRESH_MS) {
     return { present: false, reason: `菜单栏 app 的心跳已过期 ${Math.round((now - at) / 1000)}s（app 大概没在跑）` };

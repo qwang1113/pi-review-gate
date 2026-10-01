@@ -119,9 +119,11 @@ open menubar/build/PiGate.app
   （10 分钟内同一条事实已发过）与 `throttled`（5 分钟最多 5 条）都不发。
   台账是共享的，所以两个发送方不会各发一条同样的消息。
 - 点击通知跳到该会话的面板页（`/sessions/<id>`）。
-- **通知权限被拒绝时静默降级**：菜单栏与其他功能照常，只是没有横幅。
-- **app 关掉也还有横幅**：app 每次刷新（5 秒）会写一个心跳，终端侧只在「心跳新鲜 + daemon 在线」时才抑制；
-  把 app 退出后，最多 20 秒终端通知就接管了 —— 两边的判定都不存在「谁都发不出来」的窗口。
+- **通知权限被拒绝时静默降级**：菜单栏与其他功能照常，只是没有横幅 —— 而且**终端侧会接管**：
+  app 把自己的投递能力写进心跳（`canPost`，权限被拒 / `add` 失败就是 `false`），
+  终端侧只在这一项为真时才抑制，所以「权限关掉的 app」不会把终端也一起锁死。
+- **app 关掉也还有横幅**：app 每次刷新（5 秒）写一个心跳，终端侧只在「心跳新鲜 + pid 活着 + `canPost` 为真 + daemon 在线」
+  时才抑制；把 app 退出（或撤掉它的通知权限）后，最多 20 秒终端通知就接管了 —— 两边都不会出现「谁都发不出来」的窗口。
 
 ---
 
@@ -133,7 +135,7 @@ open menubar/build/PiGate.app
 | `~/.pi/agent/rg-daemon.token` | token（0600，32 字节 base64url） |
 | `~/.pi/agent/rg-daemon/daemon.log` | 后台进程的 stdout+stderr |
 | `~/.pi/agent/rg-daemon/questions/…` | 待答问题协议（生产者是门禁，见 api.md §7） |
-| `~/.pi/agent/rg-daemon/menubar.json` | 菜单栏 app 的心跳（`{schema,pid,at}`，每 5 秒重写；终端侧靠它决定要不要抑制，api.md §8.1） |
+| `~/.pi/agent/rg-daemon/menubar.json` | 菜单栏 app 的心跳（`{schema,pid,at,canPost}`，每 5 秒重写；终端侧靠它决定要不要抑制，api.md §8.1） |
 | `~/.pi/agent/rg-daemon/notifications/` | 通知台账（每 key 一个 claim + 追加式 history） |
 | `~/Library/LaunchAgents/com.pi.review-gate.daemon.plist` | launchd 登录项（`install` 写、`uninstall` 删） |
 | `menubar/build/PiGate.app` | 菜单栏 app 的构建产物（`menubar/build.sh`） |

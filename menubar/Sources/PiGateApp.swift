@@ -136,14 +136,24 @@ final class GateModel: ObservableObject {
         }
     }
 
-    /// One small file, rewritten in place: pid + when. Failures are silent on
-    /// purpose — a heartbeat that cannot be written costs a duplicate banner
-    /// (the terminal falls back to sending), never a lost one.
+    /// One small file, rewritten in place: pid + when + whether this app can
+    /// actually deliver. Failures are silent on purpose — a heartbeat that
+    /// cannot be written costs a duplicate banner (the terminal falls back to
+    /// sending), never a lost one.
+    ///
+    /// `canPost` IS IN THE FILE, NOT ASSUMED BY ITS EXISTENCE (reviewer P1,
+    /// 2026-10-01): a running app whose notification permission was denied
+    /// (or whose posts fail) raises no banner, and a reader that took "the app
+    /// is running" for "the app is sending" would suppress the terminal too.
+    /// The file therefore states the fact, and `lib/daemon-presence.ts`
+    /// requires it — which also means a heartbeat written by an app built
+    /// before this field existed FAILS OPEN and the terminal keeps sending.
     private func touchPresence() {
         let payload: [String: Any] = [
             "schema": 1,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
             "at": ISO8601DateFormatter().string(from: Date()),
+            "canPost": UserNotifier.shared.canPost,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
         let directory = (DaemonPaths.presenceFile as NSString).deletingLastPathComponent

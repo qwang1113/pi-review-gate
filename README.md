@@ -1029,9 +1029,11 @@ either fact unreadable) the terminal sends exactly as before. The daemon rule
 §3) has ONE implementation — `lib/daemon-presence.ts` — asked asynchronously by the CLI and
 **synchronously** (system curl, token never in argv) by the notification path, which runs inside a
 dialog and inside an `exit` handler and cannot await anything. "The app is running" is the app's own
-heartbeat (`~/.pi/agent/rg-daemon/menubar.json`, rewritten every 5s, 20s of freshness) and is part of
-the same module: the daemon is auto-started by every session while the app is not, so the online
-fact alone used to suppress banners nobody else was going to raise.
+heartbeat (`~/.pi/agent/rg-daemon/menubar.json`, `{schema, pid, at, canPost}`, rewritten every 5s, 20s of
+freshness) and is part of the same module: the daemon is auto-started by every session while the app is
+not, so the online fact alone used to suppress banners nobody else was going to raise — and the app
+states its own delivery ability in the same file, because a running app whose notification permission
+was denied raises nothing either.
 
 **The menu bar app** (`menubar/Sources/*.swift`, built by `bash menubar/build.sh` with the machine's
 own `swiftc` into `menubar/build/PiGate.app`): `MenuBarExtra`, no Xcode project, no Electron, no

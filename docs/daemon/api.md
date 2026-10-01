@@ -431,9 +431,14 @@ daemon 据此不再列出它。
 - **菜单栏 app 在跑、而且 daemon 在线**时：**由 app 独家发出**，终端侧 `terminal-notifier` **抑制**。
 - 其余任何情况（app 没在跑 / daemon 不在线 / 两条里有任一条读不出来）：终端侧照旧发（现状不变）。
 
-两条判定的出处：**daemon 在线**只有 §3 那一条；**app 在跑**是 app 自己写的**心跳** ——
-`~/.pi/agent/rg-daemon/menubar.json`（0600，`{schema:1, pid, at}`，app 活着时每 5 s 重写一次，
-`lib/daemon-presence.ts` 的 `bannerSenderPresence` 读它，新鲜窗口 **20 s**，pid 还要活着）。
+两条判定的出处：**daemon 在线**只有 §3 那一条；**app 在跑而且发得出来**是 app 自己写的**心跳** ——
+`~/.pi/agent/rg-daemon/menubar.json`（`{schema:1, pid, at, canPost}`，不含任何秘密），
+app 活着时每 5 s 重写一次。`lib/daemon-presence.ts` 的 `bannerSenderPresence` 读它，
+四条全过才算发送者在场：新鲜窗口 **20 s**、pid **是正整数且活着**、
+**`canPost === true`**（app 自报的投递能力：通知权限被拒、或 `add` 失败 ⇒ `false`）。
+`canPost` 这个字段是 reviewer P1（2026-10-01）加的：**app 在跑 ≠ app 发得出来**，
+只看见进程活着就抑制，会得到同一个「两边都不发」的后果；字段缺席（旧版 app 写的心跳）也按 `false` 算，
+方向永远是「终端补上」。
 
 **为什么需要第二个条件**（质量轮 P1，2026-10-01）：daemon 会被每个交互会话自动拉起，app 不会 ——
 只看「daemon 在线」时，重启后的默认状态是「daemon 起来了、app 没跑」，于是终端侧抑制、app 又不存在，
@@ -586,7 +591,7 @@ data: <JSON>
 | `~/.pi/agent/rg-daemon/daemon.log` | 0600 | 后台进程的 stdout/stderr |
 | `~/.pi/agent/rg-daemon/identity` | 0600 | daemon 自己的持久 id（专属 tmux session 名用它派生） |
 | `~/.pi/agent/rg-daemon/scope.json` / `scope-repo` | 0600 | 专属 tmux session 的记录与锚点 repo |
-| `~/.pi/agent/rg-daemon/menubar.json` | 0644 | 菜单栏 app 的心跳（§8.1）：`{schema, pid, at}`，app 每 5 s 重写 |
+| `~/.pi/agent/rg-daemon/menubar.json` | — | 菜单栏 app 的心跳（§8.1）：`{schema, pid, at, canPost}`，app 每 5 s 重写（不含秘密） |
 | `~/.pi/agent/rg-daemon/questions/…` | — | 待答问题协议（§7） |
 | `~/.pi/agent/rg-daemon/notifications/claims/<hash>.json` | 0600 | 每个通知 key 的 claim 记录（§8.3） |
 | `~/.pi/agent/rg-daemon/notifications/history.jsonl` | 0600 | 速率限制用的追加式历史（§8.3） |

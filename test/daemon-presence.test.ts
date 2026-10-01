@@ -176,10 +176,14 @@ test("the async probe and the sync probe answer the same thing about the same da
 // WHO RAISES THE BANNER — the online rule alone was never enough
 // ---------------------------------------------------------------------------
 
-/** One heartbeat, exactly as the menu bar app writes it (pid + ISO time). */
-function heartbeat(home: string, at: number, pid: number = process.pid): void {
+/** One heartbeat, exactly as the menu bar app writes it (pid + ISO time + canPost). */
+function heartbeat(home: string, at: number, extra: Record<string, unknown> = {}): void {
   mkdirSync(join(home, ".pi", "agent", "rg-daemon"), { recursive: true });
-  writeFileSync(menubarPresencePath(home), JSON.stringify({ schema: 1, pid, at: new Date(at).toISOString() }), "utf8");
+  writeFileSync(
+    menubarPresencePath(home),
+    JSON.stringify({ schema: 1, pid: process.pid, at: new Date(at).toISOString(), canPost: true, ...extra }),
+    "utf8",
+  );
 }
 
 test("the banner sender is the app's own heartbeat — and every doubt means it is NOT there", () => {
@@ -195,9 +199,33 @@ test("the banner sender is the app's own heartbeat — and every doubt means it 
   assert.equal(bannerSenderPresence({ home, now }).present, false, "an app that stopped writing is not a sender");
   assert.match(bannerSenderPresence({ home, now }).reason, /已过期/);
 
-  heartbeat(home, now - 1_000, 999_999_999);
+  heartbeat(home, now - 1_000, { pid: 999_999_999 });
   assert.equal(bannerSenderPresence({ home, now }).present, false, "a crash leaves a fresh file behind a dead pid");
   assert.match(bannerSenderPresence({ home, now }).reason, /pid 999999999 已不在/);
+
+  // pid 0 / -1 ARE ALIVE to `kill(2)` (the process group / every process), so a
+  // heartbeat carrying one would otherwise read as "the app is running" in a
+  // file nobody wrote. Quality round P2, 2026-10-01.
+  for (const bogus of [0, -1]) {
+    heartbeat(home, now - 1_000, { pid: bogus });
+    assert.equal(bannerSenderPresence({ home, now }).present, false, `pid ${bogus} is not a sender`);
+    assert.match(bannerSenderPresence({ home, now }).reason, /必须是正整数/);
+  }
+
+  // A RUNNING APP THAT CANNOT DELIVER IS NOT A SENDER (reviewer P1,
+  // 2026-10-01): the app states its own ability, and it must be required.
+  heartbeat(home, now - 1_000, { canPost: false });
+  assert.equal(bannerSenderPresence({ home, now }).present, false, "fresh heartbeat, no permission ⇒ nobody posts");
+  assert.match(bannerSenderPresence({ home, now }).reason, /发不出横幅/);
+
+  // …and a heartbeat from an app built before the field existed is not a
+  // licence to stay silent either (the mixed-version pair fails OPEN).
+  writeFileSync(
+    menubarPresencePath(home),
+    JSON.stringify({ schema: 1, pid: process.pid, at: new Date(now - 1_000).toISOString() }),
+    "utf8",
+  );
+  assert.equal(bannerSenderPresence({ home, now }).present, false, "no canPost field ⇒ cannot be trusted");
 
   writeFileSync(menubarPresencePath(home), "not json", "utf8");
   assert.equal(bannerSenderPresence({ home, now }).present, false, "garbage is not a licence to stay silent");
