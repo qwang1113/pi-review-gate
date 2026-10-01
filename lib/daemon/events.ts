@@ -13,9 +13,11 @@
  *      TRANSITION (entering `waiting-input`, reaching `done`, or an exit).
  *   3. THE NOTIFICATION STORE — the ledger a consumer asks before it sends a
  *      banner. Its dedupe rule is NOT re-implemented here: the gate's own
- *      throttling (`decideNotify` / `recordNotify` / `notifyKey`,
- *      lib/user-notify.ts) is called, so the terminal notifier and the menu-bar
- *      app make the same decision from the same key.
+ *      throttling (`decideNotify` / `notifyKey` / `NOTIFY_DEDUP_MS` /
+ *      `NOTIFY_RATE_WINDOW_MS`, lib/user-notify.ts) is called — this module only
+ *      supplies the history that rule reads (this key's claim file plus the
+ *      recent sends) and records the outcome per key, so the terminal notifier
+ *      and the menu-bar app still make the same decision from the same key.
  *
  * ── WHY THE TITLE AND THE KEY ARE BUILT HERE, WITH THE GATE'S OWN HELPERS ──
  *
@@ -27,18 +29,16 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
   buildUserNotifyMessage,
-  emptyNotifyHistory,
-  normalizeNotifyHistory,
+  decideNotify,
   notifyKey,
   sanitizeNotifyText,
   NOTIFY_BODY_MAX,
   NOTIFY_DEDUP_MS,
-  NOTIFY_RATE_MAX,
   NOTIFY_RATE_WINDOW_MS,
   NOTIFY_TITLE_MAX,
   type NotifyHistory,
@@ -57,10 +57,8 @@ export interface DaemonEvent {
   data: unknown;
 }
 
-/** How long the store keeps an entry around for `GET /api/notifications`. */
+/** How long the store keeps a claim around for `GET /api/notifications`. */
 export const NOTIFICATION_HISTORY_MS = 24 * 60 * 60 * 1_000;
-/** Most entries the store keeps, newest last. */
-export const NOTIFICATION_HISTORY_MAX = 500;
 
 // ---------------------------------------------------------------------------
 // SSE hub
@@ -188,23 +186,26 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
     }
   }
 
-  /** How many notifications went out inside the gate's own rate window. */
-  function recentSends(at: number): number {
+  /** The timestamps of the notifications sent inside the gate's rate window. */
+  function recentSends(at: number): number[] {
     let text: string;
     try {
       text = readFileSync(historyPath, "utf8");
     } catch {
-      return 0;
+      return [];
     }
-    let count = 0;
+    const stamps: number[] = [];
     for (const line of text.split("\n")) {
       if (line.trim() === "") continue;
       try {
         const stamp = (JSON.parse(line) as { at?: unknown }).at;
-        if (typeof stamp === "string" && at - Date.parse(stamp) < NOTIFY_RATE_WINDOW_MS) count += 1;
+        if (typeof stamp === "string") {
+          const ms = Date.parse(stamp);
+          if (Number.isFinite(ms) && at - ms < NOTIFY_RATE_WINDOW_MS) stamps.push(ms);
+        }
       } catch { /* a torn line is one lost count, never a failed read */ }
     }
-    return count;
+    return stamps;
   }
 
   return {
@@ -212,23 +213,23 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
       const at = now();
       const existing = readClaim(input.key);
       const firstSeenAt = existing?.firstSeenAt ?? new Date(at).toISOString();
-      if (existing !== undefined && at - Date.parse(existing.at) < NOTIFY_DEDUP_MS) {
-        const waitS = Math.ceil((NOTIFY_DEDUP_MS - (at - Date.parse(existing.at))) / 1000);
+      // THE RULE IS THE GATE'S OWN (lib/user-notify.ts `decideNotify`): this
+      // store only supplies the history it reads — this key's last claim plus
+      // the recent send times — so the dedup window and the rate limit can
+      // never drift from what the terminal notifier applies.
+      const history: NotifyHistory = {
+        sentAt: recentSends(at),
+        lastByKey: existing === undefined ? {} : { [input.key]: Date.parse(existing.at) },
+      };
+      const decision = decideNotify({ history, key: input.key, now: at });
+      if (!decision.send) {
+        const inDedupWindow = existing !== undefined && at - Date.parse(existing.at) < NOTIFY_DEDUP_MS;
         return {
           claimed: false,
-          status: "duplicate",
-          firstSeenAt,
-          count: existing.count,
-          reason: `同样的通知 ${Math.round(NOTIFY_DEDUP_MS / 60000)} 分钟内已发过，还需等待约 ${waitS}s`,
-        };
-      }
-      if (recentSends(at) >= NOTIFY_RATE_MAX) {
-        return {
-          claimed: false,
-          status: "throttled",
+          status: inDedupWindow ? "duplicate" : "throttled",
           firstSeenAt,
           count: existing?.count ?? 0,
-          reason: `通知频率超限（${NOTIFY_RATE_WINDOW_MS / 60000} 分钟内最多 ${NOTIFY_RATE_MAX} 条）`,
+          reason: decision.reason,
         };
       }
       const entry: NotificationEntry = {
@@ -243,11 +244,17 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
         count: (existing?.count ?? 0) + 1,
       };
       // ONE WINNER PER KEY WITHOUT A LOCK: the claim file appears atomically
-      // (temp + `link(2)`), and a name that already exists means somebody beat
-      // us to it in this same instant. Their own `at` cannot have been inside
-      // this key's dedup window (the read above would have said so), so the
-      // honest answer is "they are sending it" rather than "it was sent".
+      // (temp + `link(2)`), and EEXIST means somebody beat us to it in this same
+      // instant — they are sending it, so it is a duplicate.
+      //
+      // ANY OTHER FAILURE IS FAIL-OPEN (reviewer P1, 2026-10-01): a ledger that
+      // cannot be written (a read-only home, ENOSPC) must not answer
+      // `duplicate`, because the contract for that word is "do not send" — the
+      // notification would vanish and nobody would ever hear about it. Reporting
+      // the claim as won costs at most a duplicate banner on the next retry,
+      // which is the direction this module promises.
       let won = false;
+      let lostToWriter = false;
       try {
         mkdirSync(claimsDir, { recursive: true });
         const tmp = `${claimPathFor(input.key)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
@@ -256,10 +263,9 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
           if (existing !== undefined) {
             // A STALE CLAIM IS REPLACED, not linked over: `link` would answer
             // EEXIST against the key's OWN old file and the fact could never be
-            // sent again after the dedup window (the bug this branch exists
-            // for). A rename is atomic, and the only loser of a concurrent
-            // re-claim is one duplicate banner on a fact that was already old
-            // enough to repeat.
+            // sent again after the dedup window. A rename is atomic, and the
+            // only loser of a concurrent re-claim is one duplicate banner on a
+            // fact that was already old enough to repeat.
             renameSync(tmp, claimPathFor(input.key));
             won = true;
           } else {
@@ -267,12 +273,13 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
             won = true;
           }
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          if ((error as NodeJS.ErrnoException).code === "EEXIST") lostToWriter = true;
+          else throw error;
         } finally {
           rmSync(tmp, { force: true });
         }
-      } catch { /* best effort: a failed write costs one duplicate banner */ }
-      if (!won) {
+      } catch { /* fail-open below: a ledger write failure never silences */ }
+      if (lostToWriter) {
         const winner = readClaim(input.key);
         return {
           claimed: false,
@@ -282,9 +289,24 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
           reason: "这条通知刚被另一个调用方在同一瞬间声明 —— 由它来发",
         };
       }
+      if (!won) {
+        // Say it plainly: this caller is the one that must send it.
+        return {
+          claimed: true,
+          status: "claimed",
+          firstSeenAt,
+          count: entry.count,
+          reason: "通知台账写不进去（只读 home / 磁盘满）—— 按 fail-open 处理：本条由你来发",
+        };
+      }
       try {
         mkdirSync(dir, { recursive: true });
-        appendFileSync(historyPath, `${JSON.stringify({ at: entry.at, key: input.key })}\n`, "utf8");
+        // 0600 at CREATION, and `prune` re-asserts it: each line here is a
+        // notification key, which is the rendered title+body (session names,
+        // task names) — not something for every user on the machine (reviewer
+        // P2, 2026-10-01).
+        appendFileSync(historyPath, `${JSON.stringify({ at: entry.at, key: input.key })}\n`, { mode: 0o600 });
+        chmodSync(historyPath, 0o600);
       } catch { /* the rate limit loses one count; the banner is already the caller's */ }
       prune(at);
       return { claimed: true, status: "claimed", firstSeenAt, count: entry.count };

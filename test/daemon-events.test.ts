@@ -8,7 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { createNotificationStore, createSessionWatcher, createSseHub, notificationKindFor, type DaemonEvent } from "../lib/daemon/events.ts";
@@ -64,6 +64,23 @@ test("the ledger lets exactly one caller claim a fact", () => {
   at += 11 * 60_000;
   assert.equal(store.claim({ key: "k1", kind: "waiting-input", sessionId: "s1", title: "等你回答", body: "有人问你" }).claimed, true);
   assert.equal(store.list().find((entry) => entry.key === "k1")?.count, 2);
+});
+
+test("a ledger that cannot be written is fail-open: the caller still sends it", () => {
+  const home = scratchHome();
+  const dir = join(home, "notifications");
+  mkdirSync(join(dir, "claims"), { recursive: true });
+  const store = createNotificationStore(dir);
+  if (process.getuid?.() === 0) return; // root ignores the mode; nothing to test
+  chmodSync(join(dir, "claims"), 0o500);
+  try {
+    const outcome = store.claim({ key: "k", kind: "done", sessionId: "s", title: "t", body: "b" });
+    assert.equal(outcome.claimed, true, "a storage failure must never answer 'duplicate'");
+    assert.equal(outcome.status, "claimed");
+    assert.match(outcome.reason ?? "", /fail-open/);
+  } finally {
+    chmodSync(join(dir, "claims"), 0o700);
+  }
 });
 
 test("claims for DIFFERENT keys never collide (one file per key, no shared document)", () => {

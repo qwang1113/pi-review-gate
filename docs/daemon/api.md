@@ -459,9 +459,10 @@ daemon 在会话状态**发生迁移**时推出 `notification` 事件（不是�
 
 ### 8.3 去重存储
 
-`~/.pi/agent/rg-daemon/notifications.json`（0600）。去重窗口与会话级限流**复用门禁自己的**
-`decideNotify` / `recordNotify`（`NOTIFY_DEDUP_MS` = 10 分钟、`NOTIFY_RATE_MAX` = 5 / 5 分钟）；
-历史保留 **24 小时**、最多 **500** 条。
+`~/.pi/agent/rg-daemon/notifications/`（0600）：一目录，每 key 一个 claim 文件 + 一份追加式历史（形状见下）。
+去重窗口与频率上限**用门禁自己的规则**：`decideNotify`（`lib/user-notify.ts`）——本模块只把那条规则要读的 history
+现读出来（该 key 上次 claim 的时间 + 速率窗口内最近几次发送），不重写判定；`NOTIFY_DEDUP_MS` = 10 分钟、
+`NOTIFY_RATE_MAX` = 5 / 5 分钟。历史保留 **24 小时**（按龄清理，没有条数上限）。
 
 #### `POST /api/notifications/claim`
 
@@ -469,15 +470,17 @@ daemon 在会话状态**发生迁移**时推出 `notification` 事件（不是�
 （`key` 必填，≤512 字符；**推荐直接用事件里的 `key` 原样回传**。）
 
 ```json
-{ "schema": 1, "key": "…", "claimed": true, "firstSeenAt": "ISO", "count": 1 }
-{ "schema": 1, "key": "…", "claimed": false, "firstSeenAt": "ISO", "count": 1, "reason": "同样的通知 10 分钟内已发过，还需等待约 320s" }
+{ "schema": 1, "key": "…", "claimed": true, "status": "claimed", "firstSeenAt": "ISO", "count": 1 }
+{ "schema": 1, "key": "…", "claimed": false, "status": "duplicate", "firstSeenAt": "ISO", "count": 1, "reason": "同样的通知 10 分钟内已发过，还需等待约 320s" }
+{ "schema": 1, "key": "…", "claimed": false, "status": "throttled", "firstSeenAt": "ISO", "count": 1, "reason": "通知频率超限（5 分钟内最多 5 条）" }
+{ "schema": 1, "key": "…", "claimed": true, "status": "claimed", "firstSeenAt": "ISO", "count": 1, "reason": "通知台账写不进去（只读 home / 磁盘满）—— 按 fail-open 处理：本条由你来发" }
 ```
 
 **`claimed: false` 要看 `status`**（机器可读，不是靠 reason 猜）：
 
 | `status` | `claimed` | 含义 |
 | --- | --- | --- |
-| `claimed` | true | **你发**：这一条由本次调用发出 |
+| `claimed` | true | **你发**：这一条由本次调用发出（台账写不进去时也是它 + reason —— **fail-open**，存储故障绝不静默通知） |
 | `duplicate` | false | 这条事实在去重窗口内已经发过，别再发 |
 | `throttled` | false | 达到频率上限（与去重是**两条规则**）；稍后再说 |
 
