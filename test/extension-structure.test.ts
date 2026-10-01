@@ -4052,8 +4052,8 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
   // file, and the sidecar records the hash of exactly that text. The syscall
   // itself is the injected seam (the extension wires it to writeFileSync).
   assert.match(body, /writeGoalFile\(goalPath/);
-  assert.match(GOAL_WIRING(), /writeFileSync\(path, text, "utf8"\)/,
-    "…and the wiring really writes the file the module was handed");
+  assert.match(GOAL_WIRING(), /writeGoalFile: writeSessionGoalFile/,
+    "…and the wiring hands the module the ONE writer that really writes the file");
   assert.match(body, /(?:state|goalSt)\.loopGoal = \{\s*\n\s+hash: goalTextHash\(goalText\),/);
   // …and the record carries the station the user was shown in that same dialog
   // (2026-09-06), taken from the variable both surfaces printed — never
@@ -6329,9 +6329,11 @@ test("ONE gate session per worktree: refuse, hold, release — and only ONE live
   const addAt = checkpoint.indexOf(ADD_ALL);
   assert.ok(ckRefusalAt > 0 && ckRefusalAt < addAt,
     "a refused session must be stopped BEFORE the gate's own commit sweeps the holder's work");
-  const goalWrite = codeOnly(windowOf("writeGoalFile: (path, text) => {", /\n    \},/, "goal file writer"));
+  const goalWrite = codeOnly(windowOf("const writeSessionGoalFile = (path: string, text: string): void => {", /\n  \};/, "goal file writer"));
   assert.match(goalWrite, /state\.exclusivityRefusal/,
     "…and before overwriting the holder's approved goal file");
+  assert.match(goalWrite, /writeFileSync\(path, text, "utf8"\)/,
+    "…and it is the writer that really writes the file");
 
   // The refusal must be able to LIFT on its own: its own text promises that
   // closing the other session is enough, so a re-check has to exist.
