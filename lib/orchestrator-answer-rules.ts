@@ -136,9 +136,20 @@ function resolveMultiAnswer(
   return { ok: true, answer: rows.join(MULTI_ANSWER_SEPARATOR) };
 }
 
+/**
+ * WHAT AN ANSWER IS READ AGAINST — the offered rows and whether several are
+ * legal. Narrower than {@link PendingRequest} on purpose: the daemon
+ * (lib/daemon/questions.ts) answers a question it read off disk, and it
+ * should not have to fabricate a channel record to reuse this rule.
+ */
+export interface AnswerableRequest {
+  options: string[];
+  multiple?: boolean;
+}
+
 /** Resolve `answer` against the offered rows: exact text, a letter, or a 1-based index. */
 export function resolveAnswer(
-  request: PendingRequest,
+  request: AnswerableRequest,
   raw: string,
 ): { ok: true; answer: string } | { ok: false; reason: string } {
   const text = raw.trim();
