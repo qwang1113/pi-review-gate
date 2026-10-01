@@ -3,7 +3,6 @@
  * scheduler kernel (`lib/cron-schedule.ts` is the pure half).
  *
  * ── TWO FILES, TWO KINDS OF TRUTH ──
- *
  *   ~/.pi/agent/rg-daemon/schedules.json      0600  WHAT should run
  *   ~/.pi/agent/rg-daemon/schedule-runs.jsonl 0600  WHAT DID run (append-only)
  *
@@ -160,22 +159,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
 /**
- * A timestamp `new Date(...)` can read. The rule: a date the gate ACTS on —
- * `lastFiredAt` (what `nextRunAtFor` counts from) and `approvedAt` (what makes
- * a re-negotiation a re-negotiation) — is parsed on BOTH sides: the write side
- * refuses it, the read side refuses to hand it on. The display-only `at` fields
- * are only required to be non-empty.
+ * A timestamp `new Date(...)` can read. The gate ACTS on `lastFiredAt` (what
+ * `nextRunAtFor` counts from) and on `approvedAt` (what makes a re-negotiation
+ * one), so both are validated on BOTH sides: the write side refuses them, the
+ * read side refuses to hand them on.
  */
 const isTimestamp = (value: unknown): value is string => isText(value) && Number.isFinite(Date.parse(value));
 
-/** Enough of a shape check that a hand-edited entry cannot reach a caller as `undefined`. */
+/**
+ * Enough of a shape check that a hand-edited entry cannot reach a caller as
+ * `undefined` or as a value the gate reads but cannot act on: the fields a RULE
+ * consumes (`cron` / `enabled` / `lastFiredAt` / `approvedAt`) get their
+ * write-side validation run here too.
+ */
 function isStoredTask(value: unknown): value is ScheduledTask {
   if (!isRecord(value)) return false;
   const contract = value.contract;
   if (!isRecord(contract) || !isRecord(contract.restatement) || !isRecord(contract.goal)) return false;
   const { restatement, goal } = contract;
   return (
-    isText(value.id) && isText(value.name) && isText(value.repo) && isText(value.cron) &&
+    isText(value.id) && isText(value.name) && isText(value.repo) && parseCron(String(value.cron)).ok &&
     isText(value.requirement) && typeof value.enabled === "boolean" &&
     isText(value.createdAt) && isText(value.updatedAt) &&
     (value.lastFiredAt === null || isTimestamp(value.lastFiredAt)) &&
@@ -187,8 +190,8 @@ function isStoredTask(value: unknown): value is ScheduledTask {
 
 /**
  * Read `schedules.json`. A MISSING file is an empty table (version 0); an
- * unreadable, malformed or wrong-shaped one is `{ ok: false }` — deliberately
- * NOT an empty table, which the next write would happily overwrite.
+ * unreadable, malformed or wrong-shaped one is `{ ok: false }` — NOT an empty
+ * table, which the next write would happily overwrite.
  */
 export function readSchedules(home: string): SchedulesRead {
   const path = schedulesPath(home);
@@ -266,12 +269,9 @@ export function scheduleAuthoringRefusal(problem: string): string {
 
 /**
  * The write-qualification rule — ONE implementation, called by the tool side
- * (via `updateScheduledTask`) and by the panel side alike.
- *
- * It judges the ORIGIN and the FIELD NAMES only; value validation is the
- * store's (see `patchProblem`), so there is exactly one place that knows "a
- * panel may not touch a contract" and exactly one that knows "a name must be
- * kebab-case".
+ * (via `updateScheduledTask`) and the panel side alike. It judges the ORIGIN
+ * and the FIELD NAMES only; value validation is the store's (`patchProblem`),
+ * so exactly one place knows "a panel may not touch a contract".
  */
 export function applyScheduleEdit(request: { from: ScheduleEditOrigin; patch: ScheduleEditPatch }): ScheduleEdit {
   const from = request?.from;

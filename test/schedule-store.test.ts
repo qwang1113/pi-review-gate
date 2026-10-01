@@ -421,6 +421,15 @@ test("a hand-edited table missing a contract field is refused, never passed on",
   contract.approvedAt = goodApproval;
   writeFileSync(schedulesPath(home), JSON.stringify(file));
   assert.equal(readSchedules(home).ok, true, "the file was never rewritten by a refused read");
+
+  // `cron` is the last field a RULE reads (nextRunAtFor), so it is validated by
+  // the same parser the write side uses: a garbage expression must not survive
+  // as a task that silently never fires.
+  const task = file.tasks[0]! as unknown as { cron: string };
+  task.cron = "not a cron";
+  writeFileSync(schedulesPath(home), JSON.stringify(file));
+  assert.equal(readSchedules(home).ok, false);
+  assert.deepEqual(listScheduledTasks(home), []);
 });
 
 test("moving a task to another repo has to bring a new contract with it", () => {
