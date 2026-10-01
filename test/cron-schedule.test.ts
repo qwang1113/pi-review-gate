@@ -128,4 +128,8 @@ test("describeCron says it in one line, and falls back to the expression", () =>
   assert.equal(describeCron("1,2 3 4 5 6"), "1,2 3 4 5 6");
   assert.equal(describeCron("0 9 1 * 1"), "0 9 1 * 1");
   assert.equal(describeCron("not a cron"), "not a cron");
+  // A step that does not divide the field's span is NOT that rhythm: `*/70`
+  // fires once an hour and `0 */7` leaves a 3-hour hole before midnight.
+  assert.equal(describeCron("*/70 * * * *"), "*/70 * * * *");
+  assert.equal(describeCron("0 */7 * * *"), "0 */7 * * *");
 });

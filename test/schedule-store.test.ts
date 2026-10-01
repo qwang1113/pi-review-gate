@@ -138,8 +138,19 @@ test("name / repo / cron / contract are all validated before anything is written
   }
   assert.equal(listScheduledTasks(home).length, 0);
 
-  const first = addScheduledTask(home, taskInput(repo));
+  const first = addScheduledTask(home, taskInput(repo, { enabled: false }));
   assert.equal(first.ok, true);
+  if (first.ok) assert.equal(first.value.enabled, false);
+
+  // A non-boolean `enabled` would be written as-is and make the whole table
+  // unreadable on the next load — refused by the same value validation as
+  // every other field (round-1 reviewer P2).
+  const badEnabled = addScheduledTask(home, taskInput(repo, { name: "bad-enabled", enabled: "yes" as unknown as boolean }));
+  assert.equal(badEnabled.ok, false);
+  if (badEnabled.ok) return;
+  assert.match(badEnabled.problem, /enabled/);
+  assert.equal(readSchedules(home).ok, true, "the table is still readable");
+
   const duplicate = addScheduledTask(home, taskInput(repo, { cron: "0 10 * * *" }));
   assert.equal(duplicate.ok, false);
   if (duplicate.ok) return;
@@ -211,12 +222,12 @@ test("a panel edit may touch name / cron / enabled — and nothing else", () => 
   if (!added.ok) return;
   const id = added.value.id;
 
-  const refused: Array<[string, Parameters<typeof updateScheduledTask>[2]]> = [
+  const panelRefused: Array<[string, Parameters<typeof updateScheduledTask>[2]]> = [
     ["requirement", { requirement: "换一个需求" }],
     ["repo", { repo: other }],
     ["contract", { contract: makeContract() }],
   ];
-  for (const [field, patch] of refused) {
+  for (const [field, patch] of panelRefused) {
     const result = updateScheduledTask(home, id, patch, { from: "panel" });
     assert.equal(result.ok, false, `panel 改 ${field} 必须被拒`);
     if (result.ok) continue;
@@ -368,6 +379,91 @@ test("the run ledger appends one line per record and reads back filtered", () =>
   assert.deepEqual(readScheduleRuns(home, { taskId: "sch-cccccccc" }), []);
 
   assert.throws(() => appendScheduleRun(home, { kind: "nope" } as never), /未知的调度台账记录/);
+});
+
+test("a hand-edited table missing a contract field is refused, never passed on", () => {
+  const home = scratch();
+  const repo = scratch();
+  const added = addScheduledTask(home, taskInput(repo));
+  assert.equal(added.ok, true);
+  if (!added.ok) return;
+
+  const file = JSON.parse(readFileSync(schedulesPath(home), "utf8")) as {
+    tasks: Array<{ contract: { restatement: Record<string, unknown> } }>;
+  };
+  delete file.tasks[0]!.contract.restatement.station;
+  writeFileSync(schedulesPath(home), JSON.stringify(file));
+
+  const read = readSchedules(home);
+  assert.equal(read.ok, false, "a task without a station is not a task");
+  if (read.ok) return;
+  assert.match(read.problem, /形状/);
+  assert.deepEqual(listScheduledTasks(home), []);
+});
+
+test("moving a task to another repo has to bring a new contract with it", () => {
+  const home = scratch();
+  const repo = scratch();
+  const other = scratch();
+  const added = addScheduledTask(home, taskInput(repo));
+  assert.equal(added.ok, true);
+  if (!added.ok) return;
+
+  // No hash binds `repo`, so a bare move would re-point a task the user agreed
+  // to in THIS repository (round-1 quality P2).
+  const bare = updateScheduledTask(home, added.value.id, { repo: other }, { from: "gate", expectedVersion: 1 });
+  assert.equal(bare.ok, false);
+  if (bare.ok) return;
+  assert.match(bare.problem, /新的 contract/);
+
+  const moved = updateScheduledTask(
+    home,
+    added.value.id,
+    { repo: other, contract: makeContract() },
+    { from: "gate", expectedVersion: 1 },
+  );
+  assert.equal(moved.ok, true);
+  if (!moved.ok) return;
+  assert.equal(moved.value.repo, other);
+});
+
+test("an unparseable lastFiredAt is refused on both sides — it would mean「never again」", () => {
+  const home = scratch();
+  const repo = scratch();
+  const added = addScheduledTask(home, taskInput(repo));
+  assert.equal(added.ok, true);
+  if (!added.ok) return;
+
+  const bad = updateScheduledTask(
+    home,
+    added.value.id,
+    { lastFiredAt: "yesterday" },
+    { from: "gate", expectedVersion: 1 },
+  );
+  assert.equal(bad.ok, false);
+  if (bad.ok) return;
+  assert.match(bad.problem, /lastFiredAt/);
+
+  const firedAt = new Date(2026, 9, 1, 9, 0).toISOString();
+  const stamped = updateScheduledTask(
+    home,
+    added.value.id,
+    { lastFiredAt: firedAt },
+    { from: "gate", expectedVersion: 1 },
+  );
+  assert.equal(stamped.ok, true);
+  if (!stamped.ok) return;
+  assert.equal(stamped.value.lastFiredAt, firedAt);
+  assert.equal(
+    nextRunAtFor(stamped.value, new Date(2026, 9, 1, 9, 30))?.getTime(),
+    new Date(2026, 9, 2, 9, 0).getTime(),
+  );
+
+  // A hand-edited file cannot get past the read side either.
+  const file = JSON.parse(readFileSync(schedulesPath(home), "utf8")) as { tasks: Array<{ lastFiredAt: string }> };
+  file.tasks[0]!.lastFiredAt = "yesterday";
+  writeFileSync(schedulesPath(home), JSON.stringify(file));
+  assert.equal(readSchedules(home).ok, false);
 });
 
 test("a corrupt table is refused, never silently emptied and overwritten", () => {

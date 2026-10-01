@@ -266,13 +266,17 @@ export function describeCron(cron: string): string {
     return "每分钟";
   }
   const minuteStep = everyN(minuteRaw);
-  if (minuteStep !== undefined && hourRaw === "*" && domRaw === "*" && monthRaw === "*" && dowRaw === "*") {
+  if (
+    minuteStep !== undefined && minuteStep > 0 && 60 % minuteStep === 0 &&
+    hourRaw === "*" && domRaw === "*" && monthRaw === "*" && dowRaw === "*"
+  ) {
     return minuteStep <= 1 ? "每分钟" : `每 ${minuteStep} 分钟`;
   }
-  // 每 n 小时（分钟必须是 0，否则老实回退）
+  // 每 n 小时（分钟必须是 0、且 24 能被 n 整除，否则老实回退）
   const hourStep = everyN(hourRaw);
   if (
-    hourStep !== undefined && minuteRaw === "0" && domRaw === "*" && monthRaw === "*" && dowRaw === "*"
+    hourStep !== undefined && hourStep > 0 && 24 % hourStep === 0 && minuteRaw === "0" &&
+    domRaw === "*" && monthRaw === "*" && dowRaw === "*"
   ) {
     return hourStep <= 1 ? "每小时" : `每 ${hourStep} 小时`;
   }

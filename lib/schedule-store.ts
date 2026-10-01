@@ -165,6 +165,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
+/**
+ * A timestamp that `new Date(...)` can actually read.
+ *
+ * `lastFiredAt` is not decoration: `nextRunAtFor` counts the next run from it,
+ * so an unparseable value silently means “never again” (Invalid Date → null).
+ * It is therefore the one date field held to a parse on BOTH sides — the write
+ * side refuses it, and the read side refuses to hand it on.
+ */
+const isTimestamp = (value: unknown): value is string => isText(value) && Number.isFinite(Date.parse(value));
+
 /** Enough of a shape check that a hand-edited entry cannot reach a caller as `undefined`. */
 function isStoredTask(value: unknown): value is ScheduledTask {
   if (!isRecord(value)) return false;
@@ -178,14 +188,17 @@ function isStoredTask(value: unknown): value is ScheduledTask {
     typeof value.enabled === "boolean" &&
     isText(value.createdAt) &&
     isText(value.updatedAt) &&
-    (value.lastFiredAt === null || isText(value.lastFiredAt)) &&
+    (value.lastFiredAt === null || isTimestamp(value.lastFiredAt)) &&
     isRecord(contract) &&
     isRecord(contract.restatement) &&
     isText(contract.restatement.text) &&
     isText(contract.restatement.hash) &&
+    isText(contract.restatement.at) &&
+    isDeliveryStation(contract.restatement.station) &&
     isRecord(contract.goal) &&
     isText(contract.goal.text) &&
     isText(contract.goal.hash) &&
+    isText(contract.goal.at) &&
     isText(contract.approvedAt)
   );
 }
@@ -377,6 +390,14 @@ function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, selfId?: st
   if (has(patch, "repo")) {
     const problem = scheduleRepoProblem(patch.repo);
     if (problem) return problem;
+    // `repo` is authoring-only AND it is not bound by any hash: moving a task to
+    // another checkout would silently re-point a task the user agreed to in one
+    // repository. The move therefore has to bring a NEW contract in the same
+    // patch — the requirement is re-negotiated for the repo it will run in.
+    if (!has(patch, "contract")) {
+      return "改 repo 必须和一份新的 contract 一起提交（需求反述 + goal 批准）：契约的两个 hash 绑不住 repo，" +
+        "而「这份反述 / goal 是在哪个仓库上批准的」正是换 repo 会默默改掉的东西";
+    }
   }
   if (has(patch, "cron")) {
     const parsed = parseCron(String(patch.cron));
@@ -385,8 +406,8 @@ function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, selfId?: st
   if (has(patch, "enabled") && typeof patch.enabled !== "boolean") {
     return `enabled 必须是布尔值：${JSON.stringify(patch.enabled)}`;
   }
-  if (has(patch, "lastFiredAt") && patch.lastFiredAt !== null && !isText(patch.lastFiredAt)) {
-    return "lastFiredAt 必须是 ISO 时间字符串或 null";
+  if (has(patch, "lastFiredAt") && patch.lastFiredAt !== null && !isTimestamp(patch.lastFiredAt)) {
+    return `lastFiredAt 必须是可解析的 ISO 时间字符串或 null：${JSON.stringify(patch.lastFiredAt)}`;
   }
   if (has(patch, "requirement") && !isText(patch.requirement)) return "requirement 不能是空的";
   if (has(patch, "contract")) {
@@ -424,6 +445,11 @@ export function addScheduledTask(home: string, input: NewScheduledTask): Schedul
     cron: input.cron,
     requirement: input.requirement,
     contract: input.contract,
+    // `enabled` is in the patch EVEN when the caller left it out: value
+    // validation only looks at keys that are present, and a non-boolean one
+    // reaching the table is exactly what makes the whole file unreadable on
+    // the next load (round-1 reviewer P2).
+    enabled: input.enabled ?? true,
   };
   const qualification = applyScheduleEdit({ from: input.from ?? "panel", patch });
   if (!qualification.ok) return qualification;
@@ -437,7 +463,7 @@ export function addScheduledTask(home: string, input: NewScheduledTask): Schedul
     cron: input.cron,
     requirement: input.requirement,
     contract: input.contract,
-    enabled: input.enabled ?? true,
+    enabled: patch.enabled ?? true,
     createdAt: now,
     updatedAt: now,
     lastFiredAt: null,
