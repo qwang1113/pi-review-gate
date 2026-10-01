@@ -25,7 +25,8 @@
  * is the ONE implementation of that rule: `from: "panel"` may touch `name` /
  * `cron` / `enabled`, and any patch touching `requirement` / `repo` / `contract`
  * is refused whole (the authoring path is named in the copy); `from: "gate"`
- * may carry the contract. `updateScheduledTask` routes through it too.
+ * may carry the contract. `updateScheduledTask` routes through it too, so the
+ * store's write path cannot be used to skip the rule.
  */
 
 import { randomBytes } from "node:crypto";
@@ -159,9 +160,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
 /**
- * A timestamp `new Date(...)` can read — the one date field held to a parse on
- * BOTH sides: it is what `nextRunAtFor` counts from, so an unparseable value
- * means "never again".
+ * A timestamp `new Date(...)` can read. The rule: a date the gate ACTS on —
+ * `lastFiredAt` (what `nextRunAtFor` counts from) and `approvedAt` (what makes
+ * a re-negotiation a re-negotiation) — is parsed on BOTH sides: the write side
+ * refuses it, the read side refuses to hand it on. The display-only `at` fields
+ * are only required to be non-empty.
  */
 const isTimestamp = (value: unknown): value is string => isText(value) && Number.isFinite(Date.parse(value));
 
@@ -178,7 +181,7 @@ function isStoredTask(value: unknown): value is ScheduledTask {
     (value.lastFiredAt === null || isTimestamp(value.lastFiredAt)) &&
     isText(restatement.text) && isText(restatement.hash) && isText(restatement.at) &&
     isDeliveryStation(restatement.station) &&
-    isText(goal.text) && isText(goal.hash) && isText(goal.at) && isText(contract.approvedAt)
+    isText(goal.text) && isText(goal.hash) && isText(goal.at) && isTimestamp(contract.approvedAt)
   );
 }
 
@@ -332,7 +335,9 @@ export function scheduleContractProblem(contract: unknown): string | undefined {
   if (!isRecord(goal) || !isText(goal.text) || !isText(goal.hash) || !isText(goal.at)) {
     return "contract.goal 必须是 {text, hash, at}";
   }
-  if (!isText(contract.approvedAt)) return "contract.approvedAt 必须是非空的 ISO 时间字符串";
+  if (!isTimestamp(contract.approvedAt)) {
+    return `contract.approvedAt 必须是能被 Date 解析的时间字符串：${JSON.stringify(contract.approvedAt)}`;
+  }
   if (!isDeliveryStation(restatement.station)) {
     return `contract.restatement.station 不是交付站点（precommit / commit / pr）：${JSON.stringify(restatement.station)}`;
   }

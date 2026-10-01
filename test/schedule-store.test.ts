@@ -183,6 +183,15 @@ test("the contract's hashes must be the hashes of its own texts", () => {
   assert.equal(third.ok, false);
   if (third.ok) return;
   assert.match(third.problem, /station/);
+
+  // `approvedAt` is a RULE's criterion (it is what makes a re-negotiation a
+  // re-negotiation), so it is held to a parse like `lastFiredAt`.
+  const badApproval = makeContract();
+  badApproval.approvedAt = "someday";
+  const fourth = addScheduledTask(home, taskInput(repo, { contract: badApproval }));
+  assert.equal(fourth.ok, false);
+  if (fourth.ok) return;
+  assert.match(fourth.problem, /approvedAt/);
 });
 
 test("expectedVersion is the only thing standing between two writers", () => {
@@ -389,16 +398,29 @@ test("a hand-edited table missing a contract field is refused, never passed on",
   if (!added.ok) return;
 
   const file = JSON.parse(readFileSync(schedulesPath(home), "utf8")) as {
-    tasks: Array<{ contract: { restatement: Record<string, unknown> } }>;
+    tasks: Array<{ contract: { restatement: Record<string, unknown>; approvedAt: string } }>;
   };
-  delete file.tasks[0]!.contract.restatement.station;
-  writeFileSync(schedulesPath(home), JSON.stringify(file));
+  const contract = file.tasks[0]!.contract;
+  const goodApproval = contract.approvedAt;
 
+  delete contract.restatement.station;
+  writeFileSync(schedulesPath(home), JSON.stringify(file));
+  assert.equal(readSchedules(home).ok, false, "a task without a station is not a task");
+
+  // …and the same on the field a RULE reads: an unparseable approval would
+  // otherwise make the task unmovable (every later one is "not newer").
+  contract.restatement.station = "commit";
+  contract.approvedAt = "someday";
+  writeFileSync(schedulesPath(home), JSON.stringify(file));
   const read = readSchedules(home);
-  assert.equal(read.ok, false, "a task without a station is not a task");
+  assert.equal(read.ok, false, "an unparseable approval is not an approval");
   if (read.ok) return;
   assert.match(read.problem, /形状/);
   assert.deepEqual(listScheduledTasks(home), []);
+
+  contract.approvedAt = goodApproval;
+  writeFileSync(schedulesPath(home), JSON.stringify(file));
+  assert.equal(readSchedules(home).ok, true, "the file was never rewritten by a refused read");
 });
 
 test("moving a task to another repo has to bring a new contract with it", () => {
