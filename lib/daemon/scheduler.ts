@@ -32,10 +32,27 @@
  * jitters, and a daemon that restarts, never deal with the same slot twice.
  * The ledger (`schedule-runs.jsonl`, append-only) is what a restart reads to
  * learn which runs are still OPEN; the table's `lastFiredAt` is what it reads
- * to learn which slots are already dealt with. Both are files: neither piece
- * of state lives only in memory. `run-started` is appended BEFORE the stamp —
- * a process killed between the two steps comes back, sees an open run for that
- * task and starts no second one.
+ * to learn which slots are already dealt with.
+ *
+ * THE STAMP COMES FIRST, AND A WRITE THAT FAILS IS REMEMBERED IN MEMORY. A
+ * session that has been launched cannot be un-launched, so its slot counts as
+ * dealt with the moment the launch returns: stamp, then append. When the stamp
+ * cannot be written at all (read-only home, full disk) the slot is kept in
+ * `unrecordedSlots` and the run in `unrecordedRuns` — this process only — so
+ * the same slot is never started twice while the disk is broken, and the run
+ * still holds its repo and still settles. Both maps are pruned by age, which
+ * is what lets a permanently broken home recover rather than grow forever.
+ * The window this leaves is the one between the stamp landing and the append:
+ * a process killed there leaves a RUNNING session with no `run-started` line,
+ * so a restart neither settles it nor counts it as holding its repo. The other
+ * order is the fail-spin the quality round measured — one real session per
+ * tick, forever — which is strictly worse.
+ *
+ * A version that was taken mid-write is RETRIED, not parked: the panel's `PUT`
+ * can replace the table between our read and our write, and the store then
+ * refuses the stamp ("请重读"). That is a race, so the stamp tries again with
+ * the version it just read — otherwise one colliding panel edit would leave
+ * the task believing its slot was dealt with while `lastFiredAt` never moved.
  *
  * ── WHY A RUN MUST SETTLE BEFORE THE NEXT ONE IN THE SAME REPO STARTS ──
  *
@@ -303,26 +320,29 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // die, and the disk can refuse both — either way the slot is known to be
     // dealt with. See `unrecordedSlots` for why that matters.
     unrecordedSlots.set(slot, at.getTime());
-    // THE VERSION IS READ RIGHT BEFORE THE WRITE and carried into it. The
-    // panel's `PUT` carries the version it read too, so a write that loses a
-    // race is REFUSED rather than silently resurrecting an older `lastFiredAt`
-    // — which would make the same slot due a second time.
-    const current = readSchedules(deps.home);
-    let stamped;
-    try {
-      stamped = updateScheduledTask(deps.home, task.id, { lastFiredAt: at.toISOString() }, {
-        from: "gate",
-        ...(current.ok ? { expectedVersion: current.file.version } : {}),
-      });
-    } catch (error) {
-      log(`调度任务 ${task.id} 的 lastFiredAt 没写上（只记在内存里）：${error instanceof Error ? error.message : String(error)}`);
-      return;
+    let problem = "未知原因";
+    // TWO ATTEMPTS, BECAUSE THE FIRST CAN LOSE A RACE: the version read here
+    // can be replaced by a panel write microseconds before ours lands, and the
+    // store then refuses it. A refused stamp must not park the task until the
+    // TTL expires — retrying with the version just read is what makes the race
+    // a retry rather than a day of silence.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const current = readSchedules(deps.home);
+      try {
+        const stamped = updateScheduledTask(deps.home, task.id, { lastFiredAt: at.toISOString() }, {
+          from: "gate",
+          ...(current.ok ? { expectedVersion: current.file.version } : {}),
+        });
+        if (stamped.ok) {
+          unrecordedSlots.delete(slot);
+          return;
+        }
+        problem = stamped.problem;
+      } catch (error) {
+        problem = error instanceof Error ? error.message : String(error);
+      }
     }
-    if (!stamped.ok) {
-      log(`调度任务 ${task.id} 的 lastFiredAt 没写上（只记在内存里）：${stamped.problem}`);
-      return;
-    }
-    unrecordedSlots.delete(slot);
+    log(`调度任务 ${task.id} 的 lastFiredAt 没写上（只记在内存里）：${problem}`);
   }
 
   function skipped(task: ScheduledTask, at: Date, reason: string, slot: string): void {
