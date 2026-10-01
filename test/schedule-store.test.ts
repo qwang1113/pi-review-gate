@@ -166,6 +166,15 @@ test("name / repo / cron / contract are all validated before anything is written
   assert.equal(duplicate.ok, false);
   if (duplicate.ok) return;
   assert.match(duplicate.problem, /已经被另一个调度任务用了/);
+
+  // A name that collides with another task's ID is the same collision: the read
+  // side keeps both in one namespace, so the write side must refuse it rather
+  // than produce a table it will not read back (round-8 reviewer P2).
+  const idClash = addScheduledTask(home, taskInput(repo, { name: first.value.id, cron: "0 11 * * *" }));
+  assert.equal(idClash.ok, false);
+  if (idClash.ok) return;
+  assert.match(idClash.problem, /已经被另一个调度任务用了/);
+  assert.equal(readSchedules(home).ok, true, "the refused write left a readable table");
 });
 
 test("the contract's hashes must be the hashes of its own texts", () => {

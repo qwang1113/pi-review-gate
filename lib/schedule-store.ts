@@ -377,7 +377,11 @@ const has = (patch: ScheduleEditPatch, key: keyof ScheduleEditPatch): boolean =>
  * make the whole document unreadable on the next load.
  */
 function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, current?: ScheduledTask): string | undefined {
-  const taken = file.tasks.filter((task) => task.id !== current?.id).map((task) => task.name);
+  // id AND name: the read side holds them in one namespace (that is what
+  // `findScheduledTask` answers to), so a name that collides with another
+  // task's id must be refused HERE too — otherwise a legal-looking write makes
+  // the whole table unreadable on the next load.
+  const taken = file.tasks.filter((task) => task.id !== current?.id).flatMap((task) => [task.name, task.id]);
   if (has(patch, "name")) {
     const problem = scheduleNameProblem(patch.name, taken);
     if (problem) return problem;
@@ -466,7 +470,7 @@ export function addScheduledTask(home: string, input: NewScheduledTask): Schedul
   if (problem) return { ok: false, problem: problem };
   const now = new Date().toISOString();
   const task: ScheduledTask = {
-    id: newScheduleId(new Set(file.tasks.map((entry) => entry.id))),
+    id: newScheduleId(new Set(file.tasks.flatMap((entry) => [entry.id, entry.name]))),
     name: input.name,
     repo: input.repo,
     cron: input.cron,
