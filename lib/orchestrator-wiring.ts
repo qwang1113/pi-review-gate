@@ -13,14 +13,15 @@
  * here keeps the extension's share of the orchestration layer down to a
  * registration call and a handful of accessors.
  *
- * SAFETY NOTE. `runTmux` spawns tmux WITHOUT a shell (execFileSync with an
- * argv array) and re-validates the argv through {@link assertSafeTmuxArgv}
- * first: the gate's own execution path is bound by the same forbidden list
- * the bash guard enforces against the agent, so "the gate is exempt from the
- * guard" can never mean "the gate may do the forbidden thing".
+ * SAFETY NOTE. The exec half lives in `lib/tmux-exec.ts` (`runTmuxArgv`):
+ * tmux is spawned WITHOUT a shell (execFileSync with an argv array) and the
+ * argv is re-validated through `assertSafeTmuxArgv` first — the gate's own
+ * execution path is bound by the same forbidden list the bash guard enforces
+ * against the agent, so "the gate is exempt from the guard" can never mean
+ * "the gate may do the forbidden thing". `runTmux` below is the gate-side
+ * spelling of that one implementation.
  */
 
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync } from "node:fs";
 
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -32,7 +33,8 @@ import type { AnnouncedRequest } from "./orchestrator-wait.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { gitOrNull } from "./git-exec.ts";
 import { readJsonIfExists } from "./json-file.ts";
-import { assertSafeTmuxArgv, type SafeTmuxOptions, type TmuxRunResult } from "./orchestrator-tmux.ts";
+import type { SafeTmuxOptions, TmuxRunResult } from "./orchestrator-tmux.ts";
+import { runTmuxArgv } from "./tmux-exec.ts";
 import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
 import { sidecarPath } from "./gate-state-io.ts";
@@ -62,23 +64,9 @@ export function runTmux(
   env: NodeJS.ProcessEnv = process.env,
   guard: SafeTmuxOptions = {},
 ): TmuxRunResult {
-  try {
-    assertSafeTmuxArgv(argv, guard);
-  } catch (error) {
-    return { ok: false, stdout: "", stderr: (error as Error).message };
-  }
-  try {
-    const stdout = execFileSync("tmux", [...argv], {
-      encoding: "utf8",
-      env,
-      timeout: 10_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return { ok: true, stdout: String(stdout ?? ""), stderr: "" };
-  } catch (error) {
-    const err = error as { stderr?: Buffer | string; message?: string };
-    return { ok: false, stdout: "", stderr: String(err.stderr ?? err.message ?? "tmux failed") };
-  }
+  // The exec half lives in lib/tmux-exec.ts, shared with the standalone daemon
+  // (2026-10-01): one copy of "run tmux under the door", not two that can drift.
+  return runTmuxArgv(argv, env, guard);
 }
 
 /** Read + validate `.pi/orchestrator-plan.json`. Absent ⇒ no plan, no problems. */

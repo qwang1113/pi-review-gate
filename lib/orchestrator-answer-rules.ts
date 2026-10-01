@@ -136,9 +136,20 @@ function resolveMultiAnswer(
   return { ok: true, answer: rows.join(MULTI_ANSWER_SEPARATOR) };
 }
 
+/**
+ * WHAT AN ANSWER IS READ AGAINST — the offered rows and whether several are
+ * legal. Narrower than {@link PendingRequest} on purpose: the daemon
+ * (lib/daemon/questions.ts) answers a question it read off disk, and it
+ * should not have to fabricate a channel record to reuse this rule.
+ */
+export interface AnswerableRequest {
+  options: string[];
+  multiple?: boolean;
+}
+
 /** Resolve `answer` against the offered rows: exact text, a letter, or a 1-based index. */
 export function resolveAnswer(
-  request: PendingRequest,
+  request: AnswerableRequest,
   raw: string,
 ): { ok: true; answer: string } | { ok: false; reason: string } {
   const text = raw.trim();
@@ -156,6 +167,53 @@ export function resolveAnswer(
   if (request.multiple) return resolveMultiAnswer(request.options, text);
   const read = readRow(text, request.options);
   return "reason" in read ? { ok: false, reason: read.reason } : { ok: true, answer: read.row };
+}
+
+/**
+ * THE STRUCTURED FORM — one element per chosen row, already split by the caller.
+ *
+ * The daemon's HTTP layer receives `answers: ["甲", "乙"]` from the panel, and
+ * those elements ARE the rows (`docs/daemon/api.md` §7.5). Joining them back
+ * into one string and feeding it through the text parser is wrong, and
+ * measurably so (quality round P1, 2026-10-01): an option's own text may
+ * contain the very separators that parser splits on (` / `, `、`, `,`, `+`, a
+ * space), so a question offering `["A 方案", "B 方案"]` either refuses the whole
+ * answer ("同时匹配 N 个选项") or mints a combination nobody picked. Each element
+ * is read on its own — the same row/letter/number reading a single row gets,
+ * exact text first — and the canonical separator is applied once, at the end.
+ */
+export function resolveAnswerList(
+  request: AnswerableRequest,
+  answers: readonly string[],
+): { ok: true; answer: string } | { ok: false; reason: string } {
+  // THE DECLINE ROW IS ONE ANSWER, NOT A ROW AMONG ROWS (quality round P2,
+  // 2026-10-01): the text path accepts it verbatim (`resolveAnswer`), so this
+  // path must not refuse the same intent — and it must not silently drop the
+  // rows next to it either, hence the refusal when it arrives in company.
+  const decline = request.options.find(looksLikeDeclineRow);
+  // Whitespace is not part of a row, and an empty element is no row at all:
+  // the text path trims before reading, so this path must too — and `readRow`
+  // would otherwise match an empty token against EVERY option
+  // (`option.includes("")`), turning a blank into "the only choice" on a
+  // one-option question (reviewer P2, 2026-10-01). Blank slots are dropped
+  // BEFORE the "a decline row stands alone" test, or `[decline, ""]` would be
+  // refused for company it does not have.
+  const lines = answers.map((item) => item.trim()).filter((text) => text !== "");
+  const rows: string[] = [];
+  for (const text of lines) {
+    if (decline !== undefined && text.startsWith(decline)) {
+      if (lines.length > 1) return { ok: false, reason: "退路行不能和别的选项一起提交" };
+      return { ok: true, answer: text };
+    }
+    const read = readRow(text, request.options);
+    if ("reason" in read) return { ok: false, reason: `多选答案里有一段读不出来：${read.reason}` };
+    if (!rows.includes(read.row)) rows.push(read.row);
+  }
+  if (rows.length === 0) return { ok: false, reason: "answers 里没有可读的选项" };
+  if (request.multiple !== true && rows.length > 1) {
+    return { ok: false, reason: "这不是多选题，一次只能给一行答案" };
+  }
+  return { ok: true, answer: rows.join(MULTI_ANSWER_SEPARATOR) };
 }
 
 // ---------------------------------------------------------------------------

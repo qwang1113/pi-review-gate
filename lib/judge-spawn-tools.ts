@@ -499,17 +499,7 @@ async function doAnswer(
   }
 
   const matched = resolveAnswer(
-    {
-      childId: entry.judgeId,
-      taskId: entry.judgeId,
-      requestId: first.requestId,
-      dialogKind: first.dialogKind,
-      topic: first.topic,
-      title: first.title,
-      options: first.options,
-      payload: requestPayload(io, first),
-      askedAt: first.at,
-    },
+    { options: first.options, ...(first.multiple ? { multiple: true } : {}) },
     raw,
   );
   if (!matched.ok) return fail(`review-gate: ${matched.reason}`);

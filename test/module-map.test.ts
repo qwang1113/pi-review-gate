@@ -38,9 +38,20 @@ function modulesInTable(): string[] {
 }
 
 function modulesOnDisk(): string[] {
-  return readdirSync(join(ROOT, "lib"))
-    .filter((f) => f.endsWith(".ts"))
-    .sort();
+  // RECURSIVE since 2026-10-01: `lib/` gained its first SUBDIRECTORY
+  // (lib/daemon/). A flat scan would have kept this invariant from covering it —
+  // the map would say "every module in lib/" while 11 of them were invisible,
+  // which is exactly the unlisted-module failure this test exists to catch.
+  const walk = (dir: string, prefix: string): string[] => {
+    const found: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) found.push(...walk(join(dir, entry.name), rel));
+      else if (entry.name.endsWith(".ts")) found.push(rel);
+    }
+    return found;
+  };
+  return walk(join(ROOT, "lib"), "").sort();
 }
 
 test("the derivation itself works before its verdict means anything", () => {

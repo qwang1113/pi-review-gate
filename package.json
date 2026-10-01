@@ -4,8 +4,12 @@
   "description": "Quality gates for Pi — hard-block git commit/push/PR until review + precommit pass. Installs as a standard pi package (extensions + skills + agents + hooks via postinstall).",
   "type": "module",
   "license": "MIT",
+  "workspaces": [
+    "web"
+  ],
   "bin": {
-    "pi-review-gate-install-hooks": "./scripts/install-git-hooks.sh"
+    "pi-review-gate-install-hooks": "./scripts/install-git-hooks.sh",
+    "pi-gate": "./scripts/pi-gate.mjs"
   },
   "files": [
     "extensions/",
@@ -14,11 +18,16 @@
     "scripts/",
     "skills/",
     "agents/",
+    "web/dist/",
     "README.md"
   ],
   "scripts": {
     "postinstall": "node scripts/install-package.mjs",
     "typecheck": "tsc --noEmit",
+    "daemon": "node scripts/pi-gate.mjs daemon",
+    "daemon:start": "node scripts/pi-gate.mjs daemon start",
+    "daemon:status": "node scripts/pi-gate.mjs daemon status",
+    "build:web": "npm --workspace web run build",
     "test": "node --test --test-concurrency=6 \"test/**/*.test.ts\" \"test/**/*.test.mjs\""
   },
   "jest": {
@@ -58,9 +67,15 @@
     "node": ">=22.19.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-ai": "^0.99.2",
+    "@earendil-works/pi-coding-agent": "^0.99.2",
     "@types/node": "^26.2.0",
     "typebox": "^1.3.11",
     "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "pi-mcp-adapter": {
+      "@earendil-works/pi-ai": "^0.99.2"
+    }
   }
 }

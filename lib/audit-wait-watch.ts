@@ -164,7 +164,7 @@ export async function watchAuditRound(
       void deps.ask(spec, ctl.signal).then((answer) => {
         if (answer === undefined || ctl.signal.aborted) return;
         const resolved = resolveAnswer(
-          { childId: "", taskId: "", requestId: request.requestId, dialogKind: request.dialogKind, title: request.title, options: request.options, askedAt: request.at },
+          { options: request.options, ...(request.multiple ? { multiple: true } : {}) },
           answer,
         );
         try { deps.writeAnswer(request.requestId, resolved.ok ? resolved.answer : answer); } catch { /* the pane's own box is still up */ }

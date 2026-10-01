@@ -1005,6 +1005,49 @@ Per repo, idempotent, chains existing hooks, supports worktrees:
 ~/workspace/pi-review-gate/scripts/install-git-hooks.sh
 ```
 
+## The daemon — a resident service, the web panel and the menu bar app (2026-10-01)
+
+`pi-gate daemon` is a small **Node process, not a pi extension**: it watches every pi session on
+this machine over loopback HTTP + SSE, and it is the one backend the web panel and the macOS menu
+bar app talk to. Its HTTP contract is frozen in `docs/daemon/api.md`; the user-facing guide is
+`docs/daemon/README.md`.
+
+**Three ways to start it, and they never fight** — all three go through the same `start.lock` and the
+same spawn (one implementation), so there is never a second daemon:
+
+| Way | How | What it is for |
+|---|---|---|
+| login item | `pi-gate daemon install` | a launchd LaunchAgent: `RunAtLoad`, restarts a **crash** (`KeepAlive.SuccessfulExit=false` — a graceful `daemon stop` stays stopped), `ThrottleInterval` 30s; `uninstall` boots it out and removes the plist |
+| manual | `pi-gate daemon start` / `stop` / `status` | one-off control. `start` probes first (already online ⇒ print it, exit 0), `stop` refuses to signal a pid the token-bearing health check does not confirm as the daemon |
+| from a session | nothing — it happens by itself | the gate starts it in the background from `session_start` when it cannot be confirmed online. A failure logs one line and **cannot affect the session** |
+
+**One sender at a time (user decision).** While **the menu bar app is running and able to post** (its
+own notification permission — stated in its heartbeat) *and* the daemon can be confirmed online, the
+app is the only sender of system notifications and the terminal's `terminal-notifier` suppresses
+itself; in every other case (app not running, app unable to post, daemon unreachable, any fact
+unreadable) the terminal sends exactly as before. The daemon rule
+(`state file parses + pid alive + token-bearing /api/health answers 200 within 1s`, `docs/daemon/api.md`
+§3) has ONE implementation — `lib/daemon-presence.ts` — asked asynchronously by the CLI and
+**synchronously** (system curl, token never in argv) by the notification path, which runs inside a
+dialog and inside an `exit` handler and cannot await anything. "The app is running" is the app's own
+heartbeat (`~/.pi/agent/rg-daemon/menubar.json`, `{schema, pid, at, canPost}`, rewritten every 5s, 20s of
+freshness) and is part of the same module: the daemon is auto-started by every session while the app is
+not, so the online fact alone used to suppress banners nobody else was going to raise — and the app
+states its own delivery ability in the same file, because a running app whose notification permission
+was denied raises nothing either.
+
+**The menu bar app** (`menubar/Sources/*.swift`, built by `bash menubar/build.sh` with the machine's
+own `swiftc` into `menubar/build/PiGate.app`): `MenuBarExtra`, no Xcode project, no Electron, no
+Rust/Tauri, ad-hoc signed for local use. It shows the daemon's state and port, the summary
+`N sessions · M questions · K abnormal`, one row per active session (clicking opens
+`http://127.0.0.1:<port>/sessions/<id>` in the panel), the pending questions, and start/stop/quit.
+It reads **only** the daemon's HTTP API (plus the discovery record for the port and the token) and
+never parses a transcript or tmux; when the daemon is unreachable it says 「未运行」with the reason
+instead of showing a stale list. It writes one small file of its own — the heartbeat above, which is
+what tells the terminal side that somebody else is there to raise the banner. Notifications are
+claimed from the daemon's ledger before they are posted, so the same fact is never announced twice;
+a denied notification permission degrades silently.
+
 ## Usage
 
 Work normally. The moment the model edits a code or doc file:

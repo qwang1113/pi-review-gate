@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -53,6 +53,44 @@ test("the temp name is pid-scoped, so two processes never collide", () => {
   const b = tempPathFor("/tmp/x.json", 222);
   assert.notEqual(a, b);
   assert.equal(a, "/tmp/x.json.tmp-111");
+});
+
+test("the replacement keeps the target's permissions (a 0600 file stays 0600)", () => {
+  // THE FAILURE THIS PINS (reviewer P1, 2026-10-01): the temp file is created at
+  // the process umask (usually 0644), so an atomic replace used to WIDEN a
+  // 0600 file — and a config holding an API key is exactly the file that must
+  // not silently become readable to every user on the machine.
+  const dir = scratch();
+  const path = join(dir, "models.json");
+  writeFileSync(path, "old", { mode: 0o600 });
+  chmodSync(path, 0o600);
+  writeFileAtomic(path, "new");
+  assert.equal(readFileSync(path, "utf8"), "new");
+  assert.equal(statSync(path).mode & 0o777, 0o600, "the swap must not widen the file");
+
+  // …and a 0644 target stays 0644 (the rule is "keep", not "tighten everything").
+  const loose = join(dir, "settings.json");
+  writeFileSync(loose, "old", { mode: 0o644 });
+  chmodSync(loose, 0o644);
+  writeFileAtomic(loose, "new");
+  assert.equal(statSync(loose).mode & 0o777, 0o644);
+});
+
+test("an explicit mode is ENFORCED — on a new file and on a looser one", () => {
+  // The daemon's state / token / identity files must be 0600 even when they do
+  // not exist yet ("keep the target's mode" has nothing to keep) and even when
+  // an older build left them at the umask. This is the whole reason the second
+  // hand-rolled writer could be deleted (quality round P2, 2026-10-01).
+  const dir = scratch();
+  const fresh = join(dir, "token");
+  writeFileAtomic(fresh, "secret\n", { mode: 0o600 });
+  assert.equal(statSync(fresh).mode & 0o777, 0o600, "a new file gets the enforced mode");
+
+  const loose = join(dir, "state.json");
+  writeFileSync(loose, "old", { mode: 0o644 });
+  chmodSync(loose, 0o644);
+  writeFileAtomic(loose, "new", { mode: 0o600 });
+  assert.equal(statSync(loose).mode & 0o777, 0o600, "an explicit mode tightens, it does not preserve");
 });
 
 test("a crashed run's stale temp file is consumed, not left behind (THE atomicity pin)", () => {

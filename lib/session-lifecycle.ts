@@ -8,6 +8,7 @@
 import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, SessionShutdownEvent } from "@earendil-works/pi-coding-agent";
 import { computeFingerprint } from "./fingerprint.ts";
+import { ensureDaemonInBackground } from "./daemon/autostart.ts";
 import { showToUser } from "./gate-dialogs.ts";
 import { armingCommitsAhead, armingFromFacts } from "./gate-arming.ts";
 import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
@@ -29,6 +30,7 @@ import { isEnforcedMode, requestedModeFromEnv, type TaskMode, type TaskModeSourc
 import { mayNotifyUser } from "./user-notify.ts";
 import { readWorkerSideEnv } from "./worker-side.ts";
 import { isProtectedBranch } from "./workspace-branch.ts";
+import { sideEffectsEnabled } from "./side-effects.ts";
 import { changedFiles } from "./worktree-changes.ts";
 
 export interface SessionLifecycleDeps {
@@ -148,6 +150,26 @@ export function createSessionLifecycle(cells: SessionCells, deps: SessionLifecyc
     // THE TMUX SIDEBAR'S PANE STATE (s1): every pi session, git or not — so it
     // starts BEFORE the non-git short-circuit below.
     deps.runtime().startPaneState();
+
+    // THE DAEMON COMES UP WITH THE SESSION (menubar-and-boot, 2026-10-01).
+    //
+    // The web panel and the menu bar are only useful while it runs, and the
+    // user should not have to remember `pi-gate daemon start` — so the first
+    // session that needs it brings it up. THREE PROPERTIES, all of them this
+    // call's, not the caller's:
+    //   - it does NOT block the session (the work runs behind the interface);
+    //   - it CANNOT fail the session (autostart returns an outcome, and the
+    //     helper swallows a rejection rather than letting one escape into
+    //     `session_start`);
+    //   - it is silent in a test run, a CI job or a headless host
+    //     ({@link sideEffectsEnabled} — nothing may be spawned from `npm test`).
+    //
+    // It sits BEFORE the non-git short-circuit on purpose: whether this
+    // directory is a repository has nothing to do with whether the user's
+    // panel should be able to see their sessions.
+    if (sideEffectsEnabled(process.env, process.stdout.isTTY === true)) {
+      ensureDaemonInBackground(deps.log);
+    }
 
     // Reflect the precommit config source in the status bar right away.
     deps.updateWidget(ctx);

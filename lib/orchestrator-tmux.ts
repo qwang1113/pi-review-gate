@@ -339,6 +339,9 @@ export const INHERITED_GATE_ENV_NAMES: readonly string[] = Object.freeze(["RG_NO
  */
 export const GATE_ENV_NAMES: readonly string[] = Object.freeze([
   "RG_ACCEPTANCE_GATE",
+  // The daemon is a separate process, but its home override rides the same
+  // rule: a child session must never inherit one (2026-10-01).
+  "RG_DAEMON_HOME",
   "RG_GATE_MODE",
   "RG_HANDOFF_DOC",
   "RG_HANDOFF_KIND",

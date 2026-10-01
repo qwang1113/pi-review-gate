@@ -67,6 +67,18 @@
  * returns the argv to run or the reason not to. The caller owns the two side
  * effects (`spawn` and persisting the history), so no test can put a banner on
  * somebody's screen.
+ *
+ * ── AND ONE SENDER AT A TIME (2026-10-01) ──
+ *
+ * The daemon grew a resident menu bar app, and two senders raising the same
+ * banner is one too many. So while the menu bar app is RUNNING AND ABLE TO
+ * POST and the daemon can be confirmed ONLINE
+ * (`lib/daemon-presence.ts` `bannerSenderOnline`, the one rule in
+ * `docs/daemon/api.md` §8.1) the menu bar is the only sender and this module
+ * suppresses; the moment either half cannot be confirmed, this path is exactly
+ * what it was before the daemon existed. The check lives in
+ * {@link planUserNotify} (a thunk, after the throttle) and NOT in the wording
+ * layer, so every caller inherits it.
  */
 
 import type { TaskMode } from "./task-mode.ts";
@@ -477,6 +489,27 @@ export function describeNotifyOutcome(outcome: UserNotifyOutcome): string {
  * eligibility, then whether there is anything to run at all — a missing binary
  * is reported, not swallowed, because "I told you" and "I could not tell you"
  * are different outcomes and the second one is the user's to fix.
+ *
+ * ── THE MENU BAR OWNS THE BANNERS WHILE IT IS RUNNING (2026-10-01) ──
+ *
+ * One fact, one sender (user decision, `docs/daemon/api.md` §8.1): while the
+ * menu bar app is RUNNING AND the daemon answers, it raises the banner and this
+ * side stays silent; the moment either half cannot be confirmed the terminal
+ * notifier is the sender again exactly as it was before the daemon existed.
+ * `menuBarSending` is a THUNK for the same reason the two below are — it costs
+ * a subprocess (a curl against loopback, `lib/daemon-presence.ts`), and a
+ * banner the throttle or the mode gate would refuse anyway must not pay for it.
+ * It is asked BEFORE `watching` because it is the cheaper of the two
+ * suppressors.
+ *
+ * IT IS NOT "THE DAEMON IS ONLINE" (quality round P1, 2026-10-01): the daemon
+ * is auto-started by every interactive session while the app is not, so the
+ * online fact alone suppressed a banner nobody else was going to raise.
+ *
+ * SUPPRESSION FAILS OPEN, ALWAYS: a probe that cannot confirm the daemon
+ * (no state file, a dead pid, a timeout, no token, no curl) answers "offline",
+ * and the terminal sends. The failure is one duplicate banner, never a
+ * notification nobody receives.
  */
 export function planUserNotify(opts: {
   kind: UserNotifyKind;
@@ -505,6 +538,13 @@ export function planUserNotify(opts: {
    * judge panes that can never raise a banner.
    */
   watching?: (() => boolean) | undefined;
+  /**
+   * Is the menu bar app going to raise this banner — i.e. is it RUNNING and is
+   * the daemon answering (`lib/daemon-presence.ts` `bannerSenderOnline`)? Then
+   * this side suppresses — including the throttle slot, which a suppressed
+   * banner does not spend (nothing was sent).
+   */
+  menuBarSending?: (() => boolean) | undefined;
   /**
    * The notification-centre group (the session id): the notifier removes an
    * older banner with the same id, so one session never stacks up banners.
@@ -545,6 +585,12 @@ export function planUserNotify(opts: {
   const key = notifyKey(title, body);
   const decision = decideNotify({ history: opts.history, key, now: opts.now });
   if (!decision.send) return { status: "throttled", reason: decision.reason };
+  // THE OTHER SENDER, ASKED BEFORE THE ONE THAT COSTS MORE: while the menu bar
+  // app is running it owns every banner, and asking is one curl against
+  // loopback plus one small file read.
+  if (opts.menuBarSending?.() === true) {
+    return { status: "skipped", reason: "菜单栏 app 在跑：系统通知由它发（终端侧抑制）" };
+  }
   // ORDER — AFTER THE THROTTLE (quality round P2, 2026-09-18): answering
   // "is the user looking" costs three to five synchronous subprocesses, and a
   // banner the throttle would refuse anyway must not pay for them. A banner

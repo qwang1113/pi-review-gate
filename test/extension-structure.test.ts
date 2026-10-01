@@ -1294,8 +1294,17 @@ test("DIALOG QUEUE: one box at a time, with the host's abort and the question in
   // (list and reason box) inside it.
   assert.match(askChoiceBody, /const asked = scheduleDialog\(async \(\) => \{/,
     "the whole dialog — list AND reason box — runs under the ONE queue");
-  assert.match(askChoiceBody, /direct: asked,/,
-    "…and that one promise is the human side of the race, so a dialog still has exactly one answer path");
+  assert.match(askChoiceBody, /direct: Promise\.race\(\[asked, external\.answer\]\),/,
+    "…and that one promise is the human side of the race, beside the same user's own answer from the panel");
+  // THE THIRD ANSWER SOURCE IS WIRING, NOT A SECOND RENDER PATH (2026-10-01):
+  // the question is published to the daemon's pending-question protocol before
+  // the box is queued (so a panel can answer a dialog that is still waiting for
+  // its turn), and it leaves the wire the moment the dialog is settled —
+  // whoever settled it.
+  assert.match(askChoiceBody, /externalAnswers\.open\(\{/,
+    "the question goes on the external wire before this dialog's box is queued");
+  assert.match(askChoiceBody, /external\.close\(\);/,
+    "…and it comes off that wire on EVERY way out, so no panel offers an answer to a closed dialog");
   assert.match(DIALOGS_SRC, /const scheduleDialog = createDialogQueue\(\);/,
     "…and there is one queue per session, not one per call");
   assert.match(askChoiceBody, /dialogSignal\(uiCtx\.signal, opts\.signal,/,

@@ -388,8 +388,20 @@ test("nothing in the tmux module reads the passthrough option any more", () => {
 test("GATE_ENV_NAMES lists every `*_ENV = \"RG_…\"` constant and `env.RG_…` read in lib/", () => {
   const libDir = join(import.meta.dirname ?? ".", "..", "lib");
   const declared = new Set<string>();
-  for (const file of readdirSync(libDir).filter((f) => f.endsWith(".ts"))) {
-    for (const m of readFileSync(join(libDir, file), "utf8").matchAll(/const \w+_ENV\s*=\s*"(RG_[A-Z_]+)"|env(?:\.|\[")(RG_[A-Z_]+)/g)) {
+  // RECURSIVE since 2026-10-01: `lib/` gained a subdirectory (lib/daemon/), and
+  // a flat scan would have quietly kept this invariant from covering it — the
+  // day a daemon module starts reading `RG_…` directly, no test would notice.
+  const sources: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(".ts")) sources.push(full);
+    }
+  };
+  walk(libDir);
+  for (const file of sources) {
+    for (const m of readFileSync(file, "utf8").matchAll(/const \w+_ENV\s*=\s*"(RG_[A-Z_]+)"|env(?:\.|\[")(RG_[A-Z_]+)/g)) {
       declared.add((m[1] ?? m[2])!);
     }
   }
