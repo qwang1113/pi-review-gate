@@ -192,3 +192,78 @@ export const MODE_LABELS: Record<string, string> = {
   explore: "探索",
   normal: "普通",
 };
+
+/**
+ * 定时任务（`docs/daemon/api.md` §13）—— 与会话类型同一份契约来源。
+ *
+ * `ScheduledTask` 既有存储字段也有三个**派生**字段：daemon 在
+ * `GET /api/schedules` 里把它们算好一起给（§13.1），所以面板不需要、也不应该
+ * 自己解析 cron。
+ */
+export type DeliveryStation = "precommit" | "commit" | "pr";
+
+/** 用户实际批准过的契约：两段文本各绑自己的 hash（§13.1）。 */
+export interface ScheduleContract {
+  restatement: { text: string; hash: string; station: DeliveryStation; at: string };
+  goal: { text: string; hash: string; at: string };
+  approvedAt: string;
+}
+
+/** 台账里的一条运行记录（§13.6）。`run-started` 不是「结果」，不在 `lastRuns` 里。 */
+export type ScheduledTaskRun =
+  | { kind: "run-started"; runId: string; taskId: string; sessionId: string; at: string }
+  | {
+      kind: "run-settled";
+      runId: string;
+      taskId: string;
+      at: string;
+      outcome: "passed" | "blocked" | "failed" | "gone";
+      verdict: string | null;
+      unmet: string[];
+    }
+  | { kind: "run-skipped"; taskId: string; at: string; reason: string };
+
+/** 一行定时任务：存储字段 + §13.1 的三个派生字段。 */
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  repo: string;
+  cron: string;
+  requirement: string;
+  contract: ScheduleContract;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** 调度器上一次**处理**这个任务的时间（跑了、跳过、起不来都算）。 */
+  lastFiredAt: string | null;
+  /** 派生：调度器正要处理的那一个 cron 时刻；`enabled:false` 或 cron 非法时是 `null`。 */
+  nextRunAt: string | null;
+  /** 派生：`describeCron` 的一行人话，如「每天 09:00」。 */
+  describe: string;
+  /** 派生：最近 5 条**结果**（`run-settled` / `run-skipped`，旧→新）。 */
+  lastRuns: ScheduledTaskRun[];
+}
+
+export interface SchedulesResponse {
+  schema: number;
+  now: string;
+  tasks: ScheduledTask[];
+}
+
+/** `POST /api/schedules/author` 的回执（§13.3）—— 与启动任务同形，指向 authoring 会话。 */
+export interface ScheduleAuthorResponse {
+  ok: boolean;
+  sessionId: string;
+  scopeSession: string;
+  windowId: string;
+  paneId: string;
+}
+
+/**
+ * `PUT /api/schedules/:id` 与 `DELETE /api/schedules/:id` 的回执（§13.4 / §13.5 —— 两者同形）。
+ */
+export interface ScheduleTaskWriteResponse {
+  ok: boolean;
+  task: ScheduledTask;
+  version: number;
+}

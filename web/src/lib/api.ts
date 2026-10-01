@@ -18,7 +18,7 @@ export class ApiError extends Error {
 }
 
 interface ApiInit {
-  method?: "GET" | "POST" | "PUT";
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: unknown;
 }
 

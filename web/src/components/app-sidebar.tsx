@@ -1,4 +1,4 @@
-import { HistoryIcon, InboxIcon, LayoutGridIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import { CalendarClockIcon, HistoryIcon, InboxIcon, LayoutGridIcon, PlusIcon, SettingsIcon } from "lucide-react";
 import { NavLink, useSearchParams } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -6,11 +6,12 @@ import { Button } from "@/components/ui/button";
 import { useDaemon } from "@/lib/daemon-context";
 import { cn } from "@/lib/utils";
 
-/** The five destinations, in the order the work happens. */
+/** The six destinations, in the order the work happens. */
 const NAV = [
   { key: "sessions", to: "/", label: "会话", icon: LayoutGridIcon },
   { key: "questions", to: "/questions", label: "待处理", icon: InboxIcon },
   { key: "new", to: "/new", label: "发起任务", icon: PlusIcon },
+  { key: "schedules", to: "/schedules", label: "定时任务", icon: CalendarClockIcon },
   { key: "history", to: "/history", label: "历史", icon: HistoryIcon },
   { key: "settings", to: "/settings", label: "设置", icon: SettingsIcon },
 ] as const;

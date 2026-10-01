@@ -9,6 +9,7 @@ import HistoryPage from "@/pages/history-page";
 import NewTaskPage from "@/pages/new-task-page";
 import QuestionsPage from "@/pages/questions-page";
 import SessionDetailPage from "@/pages/session-detail-page";
+import SchedulesPage from "@/pages/schedules-page";
 import SessionsPage from "@/pages/sessions-page";
 import SettingsPage from "@/pages/settings-page";
 import TokenGatePage from "@/pages/token-gate-page";
@@ -48,6 +49,7 @@ export default function App() {
                 <Route path="/sessions/:id" element={<SessionDetailPage />} />
                 <Route path="/questions" element={<QuestionsPage />} />
                 <Route path="/new" element={<NewTaskPage />} />
+                <Route path="/schedules" element={<SchedulesPage />} />
                 <Route path="/history" element={<HistoryPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
