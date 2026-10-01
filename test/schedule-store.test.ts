@@ -175,6 +175,28 @@ test("name / repo / cron / contract are all validated before anything is written
   if (idClash.ok) return;
   assert.match(idClash.problem, /已经被另一个调度任务用了/);
   assert.equal(readSchedules(home).ok, true, "the refused write left a readable table");
+
+  // …and the same on the rename path. Onto its OWN id is legal and must stay
+  // readable (the read side checks both keys before adding either); onto
+  // ANOTHER task's id it is refused on the write side, so the table never
+  // becomes one the read side would reject.
+  const ownId = updateScheduledTask(
+    home,
+    first.value.id,
+    { name: first.value.id },
+    { from: "panel", expectedVersion: 1 },
+  );
+  assert.equal(ownId.ok, true);
+  assert.equal(readSchedules(home).ok, true, "a task may carry its own id as its name");
+
+  const second = addScheduledTask(home, taskInput(scratch(), { name: "second-task", cron: "0 12 * * *" }));
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  const ontoOther = updateScheduledTask(home, second.value.id, { name: first.value.id }, { from: "panel" });
+  assert.equal(ontoOther.ok, false);
+  if (ontoOther.ok) return;
+  assert.match(ontoOther.problem, /已经被另一个调度任务用了/);
+  assert.equal(readSchedules(home).ok, true, "the refused rename left a readable table");
 });
 
 test("the contract's hashes must be the hashes of its own texts", () => {
@@ -471,7 +493,6 @@ test("a duplicated id or name is refused — either one addresses the wrong task
   assert.match(byId.problem, /重复的 id \/ name/);
 
   // …and the mirror image, which makes `findScheduledTask(name)` ambiguous.
-  delete (file.tasks[1] as { id?: string }).id;
   file.tasks[1]!.id = "sch-11111111";
   file.tasks[1]!.name = "daily-audit";
   writeFileSync(schedulesPath(home), JSON.stringify(file));

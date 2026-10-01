@@ -217,17 +217,24 @@ export function readSchedules(home: string): SchedulesRead {
     return { ok: false, problem: `${path} 的形状不是 {schema:1, version, tasks[]}（或某个任务缺字段）—— 同上，不覆盖它` };
   }
   const tasks = parsed.tasks as ScheduledTask[];
-  // id and name share one namespace because `findScheduledTask` answers to
-  // either, and an id is what update / remove address. A hand-edited duplicate
-  // (a copied row whose id was not changed) must be refused rather than handed
-  // to a caller that would then edit or delete the wrong task.
-  const taken = new Set<string>();
+  // CHECK BOTH KEYS BEFORE ADDING EITHER — the order carries the meaning. A
+  // task may legitimately carry its own id as its name (that is a legal
+  // `updateScheduledTask` rename and it reads back fine); moving the two
+  // `taken.set` calls above the check would turn that state into a "duplicate"
+  // and make the whole table unreadable (the round-8 P1 class).
+  const taken = new Map<string, string>();
   for (const task of tasks) {
-    if (taken.has(task.id) || taken.has(task.name)) {
-      return { ok: false, problem: `${path} 里有重复的 id / name（${task.id} / ${task.name}）—— id 是寻址键、name 全局唯一，重复会让两者都不确定` };
+    const holder = taken.get(task.id) ?? taken.get(task.name);
+    if (holder !== undefined) {
+      return {
+        ok: false,
+        problem: `${path} 里有重复的 id / name：任务 ${task.id}（name ${task.name}）与任务 ${holder} 撞了 —— ` +
+          "id 是 update / remove 的寻址键、name 是 findScheduledTask 的键，两者共用一个命名空间，重复会让两者都不确定。" +
+          "请人工修复这一行（读侧从不改写文件，不会替你猜哪一条是对的）",
+      };
     }
-    taken.add(task.id);
-    taken.add(task.name);
+    taken.set(task.id, task.id);
+    taken.set(task.name, task.id);
   }
   return {
     ok: true,
@@ -370,6 +377,29 @@ export function scheduleContractProblem(contract: unknown): string | undefined {
 const has = (patch: ScheduleEditPatch, key: keyof ScheduleEditPatch): boolean => Object.hasOwn(patch, key);
 
 /**
+ * The ADDRESSABLE namespace: every id and every name in the table, as one set.
+ *
+ * `findScheduledTask(idOrName)` answers to either, so a name colliding with
+ * another task's id is exactly as ambiguous as a duplicated id — which is why
+ * the write-side uniqueness check and the id generator must avoid the SAME set.
+ * It is one function because the three copies it replaces drifted once already
+ * (round-8 P1: the read side refused a table the write side had just written).
+ *
+ * `exceptId` drops one task — the one being edited, which may legitimately
+ * carry its own id as its name (the read side tolerates that too, see
+ * `readSchedules`).
+ */
+function namespaceOf(tasks: readonly ScheduledTask[], exceptId?: string): Set<string> {
+  const taken = new Set<string>();
+  for (const task of tasks) {
+    if (task.id === exceptId) continue;
+    taken.add(task.id);
+    taken.add(task.name);
+  }
+  return taken;
+}
+
+/**
  * Value-level validation of a patch, given the table it would land in.
  *
  * Asked by PRESENCE, not by `!== undefined`: `{ name: undefined }` is a patch
@@ -377,11 +407,8 @@ const has = (patch: ScheduleEditPatch, key: keyof ScheduleEditPatch): boolean =>
  * make the whole document unreadable on the next load.
  */
 function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, current?: ScheduledTask): string | undefined {
-  // id AND name: the read side holds them in one namespace (that is what
-  // `findScheduledTask` answers to), so a name that collides with another
-  // task's id must be refused HERE too — otherwise a legal-looking write makes
-  // the whole table unreadable on the next load.
-  const taken = file.tasks.filter((task) => task.id !== current?.id).flatMap((task) => [task.name, task.id]);
+  // id AND name, one namespace — see `namespaceOf` for why they share it.
+  const taken = [...namespaceOf(file.tasks, current?.id)];
   if (has(patch, "name")) {
     const problem = scheduleNameProblem(patch.name, taken);
     if (problem) return problem;
@@ -470,7 +497,7 @@ export function addScheduledTask(home: string, input: NewScheduledTask): Schedul
   if (problem) return { ok: false, problem: problem };
   const now = new Date().toISOString();
   const task: ScheduledTask = {
-    id: newScheduleId(new Set(file.tasks.flatMap((entry) => [entry.id, entry.name]))),
+    id: newScheduleId(namespaceOf(file.tasks)),
     name: input.name,
     repo: input.repo,
     cron: input.cron,
