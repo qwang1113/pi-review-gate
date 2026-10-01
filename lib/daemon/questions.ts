@@ -41,6 +41,7 @@
  */
 
 import { linkSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 
 import { resolveAnswer } from "../orchestrator-answer-rules.ts";
 import {
@@ -316,26 +317,30 @@ export function submitAnswer(
     at: new Date().toISOString(),
   };
   const path = questionAnswerPath(home, input.sessionId, input.requestId);
+  // TWO STEPS, TWO MEANINGS (reviewer P2, 2026-10-01): only the LINK can report
+  // "somebody answered first". A failure while writing the temp file is a write
+  // failure — reporting it as "已经答过了" would freeze the panel on a question
+  // nobody answered. A RANDOM temp suffix keeps a crashed run's leftover from
+  // colliding with this one.
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
   try {
     mkdirSync(sessionQuestionsDir(home, input.sessionId), { recursive: true });
-    // ATOMIC **AND** EXCLUSIVE (quality round P2, 2026-10-01): `wx` alone makes
-    // the first writer win, but a crash halfway through leaves a TRUNCATED
-    // answer file — and `isPending` only asks whether the file exists, so that
-    // question would vanish from the list and refuse every later answer with
-    // "already answered". A temp file + `link(2)` gives both properties: the
-    // link fails with EEXIST when somebody got there first, and the name only
-    // ever appears with the complete document behind it.
-    const tmp = `${path}.tmp-${process.pid}`;
     writeFileSync(tmp, `${JSON.stringify(answer, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-    try {
-      linkSync(tmp, path);
-    } finally {
-      rmSync(tmp, { force: true });
-    }
+  } catch (error) {
+    return { ok: false, problem: `答案写入失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+  try {
+    // ATOMIC **AND** EXCLUSIVE: the link fails with EEXIST when somebody got
+    // there first, and the name only ever appears with the complete document
+    // behind it (a truncated answer file would both vanish from the pending list
+    // and refuse every later answer).
+    linkSync(tmp, path);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "EEXIST") return { ok: false, problem: "这个问题已经答过了（另一个回答先落地）" };
     return { ok: false, problem: `答案写入失败：${error instanceof Error ? error.message : String(error)}` };
+  } finally {
+    rmSync(tmp, { force: true });
   }
   return { ok: true, answer: answer.answer, path };
 }

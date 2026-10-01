@@ -420,6 +420,12 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
         session.stateSource = resolved.source;
       }
 
+      // ONE tmux-server probe for the whole collect, closed over (quality round
+      // P2, 2026-10-01): `classifyEntry` runs `display-message` when a stale
+      // entry carries a pane id, so a fresh closure per entry would start a
+      // tmux process per stale registration — on top of the `list-panes` the
+      // same classification already runs.
+      const server = currentTmuxServer(deps.runTmux);
       for (const entry of listed.entries) {
         const session = ensure(entry.sessionId);
         session.name = entry.name;
@@ -436,11 +442,11 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
           runTmux: deps.runTmux,
           alive: pidAlive,
           now,
-          // WHICH SERVER MINTED THE PANE ID MATTERS (reviewer P2, 2026-10-01):
-          // without it a restarted server's reused `%3` makes a dead session
-          // read as alive in this very list — the message path already passed
-          // it, so the observation面 was the odd one out.
-          currentServer: () => currentTmuxServer(deps.runTmux),
+          // WHICH SERVER MINTED THE PANE ID MATTERS: without it a restarted
+          // server's reused `%3` makes a dead session read as alive in this very
+          // list — the message path already passed it, so the observation side
+          // was the odd one out.
+          currentServer: () => server,
         }, entry);
         if (occupancy === "live") session.alive = true;
         // The registry's own word is the fallback the resolver already applied

@@ -97,9 +97,13 @@ export function questionAnswerPath(home: string, sessionId: string, requestId: s
   return join(sessionQuestionsDir(home, sessionId), `${requestId}.answer.json`);
 }
 
-/** The notification history / dedupe store (a consumer asks "was this already sent?"). */
+/**
+ * The notification ledger — a DIRECTORY (per-key claim files + an append-only
+ * history), not one JSON document: see lib/daemon/events.ts for why one file
+ * could not be written by two processes without losing an entry.
+ */
 export function notificationStorePath(home: string = homedir()): string {
-  return join(daemonHome(home), "notifications.json");
+  return join(daemonHome(home), "notifications");
 }
 
 export function daemonBaseUrl(port: number, host: string = DAEMON_HOST): string {

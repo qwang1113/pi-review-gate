@@ -473,13 +473,26 @@ daemon 在会话状态**发生迁移**时推出 `notification` 事件（不是�
 { "schema": 1, "key": "…", "claimed": false, "firstSeenAt": "ISO", "count": 1, "reason": "同样的通知 10 分钟内已发过，还需等待约 320s" }
 ```
 
-**`claimed: true` 才是「你发」**：第一个声明的调用方负责发这条通知，后面拿到的都是
-`claimed: false`（重复）。存储读不出来时按「没有任何记录」处理——只会多一条横幅，绝不静默。
+**`claimed: false` 要看 `status`**（机器可读，不是靠 reason 猜）：
 
-**同一个 key 同时只能有一个赢家（跨进程）**：claim 的读-改-写在一个**每 key 的 `O_EXCL` 锁**下
-完成（锁文件在 `~/.pi/agent/rg-daemon/notification-claims/`），撞上锁的调用方得到
-`claimed:false` + `reason`（重试即可，不是「已发过」）。超过 **30 秒**的锁可被接管——一个被杀死的
-进程不得把这个 key 永久封死。
+| `status` | `claimed` | 含义 |
+| --- | --- | --- |
+| `claimed` | true | **你发**：这一条由本次调用发出 |
+| `duplicate` | false | 这条事实在去重窗口内已经发过，别再发 |
+| `throttled` | false | 达到频率上限（与去重是**两条规则**）；稍后再说 |
+
+存储读不出来时按「没有任何记录」处理——只会多一条横幅，绝不静默。
+
+**存储形状：一个目录，不是一个 JSON 文件**（`~/.pi/agent/rg-daemon/notifications/`）：
+
+```
+claims/<sha256(key) 前 32 位>.json   每个 key 一个文件：谁声明的、什么时候
+history.jsonl                        只追加：每个已发的 claim 一行
+```
+
+每个 key 的决定是**那个文件自己的 `link(2)`**（原子且互斥，不需要锁）；历史是追加写，两个进程的
+claim 不会互相覆盖。去重窗口与频率上限仍用门禁自己的 `NOTIFY_DEDUP_MS` / `NOTIFY_RATE_MAX`。
+24 小时以前的 claim 与速率窗口以外的历史行在每次 claim 时清理。
 
 #### `GET /api/notifications?since=<ISO>&limit=<n>`
 
@@ -556,8 +569,8 @@ data: <JSON>
 | `~/.pi/agent/rg-daemon/identity` | 0600 | daemon 自己的持久 id（专属 tmux session 名用它派生） |
 | `~/.pi/agent/rg-daemon/scope.json` / `scope-repo` | 0600 | 专属 tmux session 的记录与锚点 repo |
 | `~/.pi/agent/rg-daemon/questions/…` | — | 待答问题协议（§7） |
-| `~/.pi/agent/rg-daemon/notifications.json` | 0600 | 通知去重存储（§8.3） |
-| `~/.pi/agent/rg-daemon/notification-claims/ledger.lock` | 0600 | claim 期间持有、结束即删；超过 30 s 可被接管（§8.3） |
+| `~/.pi/agent/rg-daemon/notifications/claims/<hash>.json` | 0600 | 每个通知 key 的 claim 记录（§8.3） |
+| `~/.pi/agent/rg-daemon/notifications/history.jsonl` | 0600 | 速率限制用的追加式历史（§8.3） |
 | `~/.pi/agent/rg-daemon/start.lock` | 0600 | `daemon start` 期间持有、结束即删；超过 30 s 可被接管（§12） |
 
 默认端口 **4597**（`--port` 可改）。`RG_DAEMON_HOME` 可覆盖 agent home（默认 `$HOME`），

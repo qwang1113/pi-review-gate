@@ -26,18 +26,20 @@
  * own identity for one notification.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { appendFileSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 
 import {
   buildUserNotifyMessage,
-  decideNotify,
   emptyNotifyHistory,
   normalizeNotifyHistory,
   notifyKey,
-  recordNotify,
   sanitizeNotifyText,
   NOTIFY_BODY_MAX,
+  NOTIFY_DEDUP_MS,
+  NOTIFY_RATE_MAX,
+  NOTIFY_RATE_WINDOW_MS,
   NOTIFY_TITLE_MAX,
   type NotifyHistory,
   type UserNotifyKind,
@@ -130,6 +132,18 @@ export interface NotificationEntry {
 
 export interface NotificationClaim {
   claimed: boolean;
+  /**
+   * The MACHINE-READABLE verdict, because `claimed:false` alone is ambiguous:
+   *
+   *   "claimed"   — you are the one; send it
+   *   "duplicate" — this exact fact was already sent inside the dedup window
+   *   "throttled" — too many notifications recently (a DIFFERENT limit)
+   *
+   * A caller that reads only the boolean cannot tell "somebody already told the
+   * user" from "nobody did, but stop" — which is why the word is here and the
+   * prose is only prose.
+   */
+  status: "claimed" | "duplicate" | "throttled";
   firstSeenAt: string;
   count: number;
   /** Present when the answer is `claimed: false`. */
@@ -141,127 +155,195 @@ export interface NotificationStore {
   list(opts?: { sinceMs?: number; limit?: number }): NotificationEntry[];
 }
 
-interface StoreFile {
-  schema: 1;
-  history: NotifyHistory;
-  entries: NotificationEntry[];
-}
-
-export function createNotificationStore(path: string, deps: { now?: () => number } = {}): NotificationStore {
+/**
+ * The notification ledger as a DIRECTORY, not one JSON document.
+ *
+ *     <dir>/claims/<sha256(key)>.json   one file per key: who claimed it, when
+ *     <dir>/history.jsonl               append-only: one line per SENT claim
+ *
+ * WHY IT IS NOT ONE FILE (quality round P2, 2026-10-01). A single document made
+ * every claim a read-modify-write of the WHOLE ledger: two processes claiming
+ * different keys each read the same snapshot and the later write dropped the
+ * other's entry, and locking the whole document turned one key's claim into
+ * another key's refusal — a notification nobody would ever send. Here the
+ * per-key decision is `link(2)` on that key's own file (atomic and exclusive by
+ * construction, no lock at all), and the history is an APPEND, which cannot lose
+ * another writer's line.
+ */
+export function createNotificationStore(dir: string, deps: { now?: () => number } = {}): NotificationStore {
   const now = deps.now ?? ((): number => Date.now());
-  const claimDirs = join(dirname(path), "notification-claims");
-  let loaded: StoreFile | undefined;
-  let loadedAt = 0;
+  const claimsDir = join(dir, "claims");
+  const historyPath = join(dir, "history.jsonl");
 
-  /**
-   * The ledger, re-read from disk when it may have moved on.
-   *
-   * `fresh` is REQUIRED for a claim (reviewer P1, 2026-10-01): the store is a
-   * file that more than one process can write, and a claim decided against a
-   * snapshot taken hours ago would drop every entry another writer appended in
-   * between — the per-key lock serialises the write, but only a fresh read sees
-   * what the last writer left. Readers (`list`) keep a short cache instead:
-   * a menu-bar poll that is seconds behind is not a correctness problem.
-   */
-  function read(fresh = false): StoreFile {
-    const at = now();
-    if (!fresh && loaded !== undefined && at - loadedAt < LIST_TTL_MS) return loaded;
+  const claimPathFor = (key: string): string =>
+    join(claimsDir, `${createHash("sha256").update(key).digest("hex").slice(0, 32)}.json`);
+
+  /** This key's last claim, or undefined when it has none / is unreadable. */
+  function readClaim(key: string): NotificationEntry | undefined {
     try {
-      const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-      const entries = Array.isArray(raw.entries)
-        ? raw.entries.filter((entry): entry is NotificationEntry =>
-            !!entry && typeof entry === "object" && typeof (entry as NotificationEntry).key === "string")
-        : [];
-      loaded = { schema: 1, history: normalizeNotifyHistory(raw.history), entries };
+      const raw = JSON.parse(readFileSync(claimPathFor(key), "utf8")) as NotificationEntry;
+      return typeof raw?.at === "string" && typeof raw.key === "string" ? raw : undefined;
     } catch {
-      // An unreadable ledger means "no record of anything sent" — the direction
-      // that can only ever produce one extra banner, never silence.
-      loaded = { schema: 1, history: emptyNotifyHistory(), entries: [] };
+      return undefined;
     }
-    loadedAt = at;
-    return loaded;
   }
 
-  function persist(file: StoreFile): void {
+  /** How many notifications went out inside the gate's own rate window. */
+  function recentSends(at: number): number {
+    let text: string;
     try {
-      mkdirSync(dirname(path), { recursive: true });
-      const tmp = `${path}.tmp-${process.pid}`;
-      writeFileSync(tmp, `${JSON.stringify(file)}\n`, { mode: 0o600 });
-      renameSync(tmp, path);
+      text = readFileSync(historyPath, "utf8");
     } catch {
-      // The ledger is best effort: losing it costs one duplicate banner.
+      return 0;
     }
-    loaded = file;
-    loadedAt = now();
+    let count = 0;
+    for (const line of text.split("\n")) {
+      if (line.trim() === "") continue;
+      try {
+        const stamp = (JSON.parse(line) as { at?: unknown }).at;
+        if (typeof stamp === "string" && at - Date.parse(stamp) < NOTIFY_RATE_WINDOW_MS) count += 1;
+      } catch { /* a torn line is one lost count, never a failed read */ }
+    }
+    return count;
   }
 
   return {
     claim(input) {
-      // ONE LEDGER WRITER AT A TIME, ACROSS PROCESSES (reviewer P1/P2,
-      // 2026-10-01). The claim is a read-modify-write of ONE file, so the lock
-      // has to cover the WHOLE ledger, not one key: two processes claiming
-      // different keys would otherwise each read the same snapshot and the
-      // later write would drop the other's entry. Claims are rare, so
-      // serialising all of them costs nothing.
-      const guard = claimGuard(join(claimDirs, "ledger.lock"), now());
-      if (guard.kind === "busy") {
-        return { claimed: false, firstSeenAt: new Date(now()).toISOString(), count: 0, reason: guard.reason };
+      const at = now();
+      const existing = readClaim(input.key);
+      const firstSeenAt = existing?.firstSeenAt ?? new Date(at).toISOString();
+      if (existing !== undefined && at - Date.parse(existing.at) < NOTIFY_DEDUP_MS) {
+        const waitS = Math.ceil((NOTIFY_DEDUP_MS - (at - Date.parse(existing.at))) / 1000);
+        return {
+          claimed: false,
+          status: "duplicate",
+          firstSeenAt,
+          count: existing.count,
+          reason: `同样的通知 ${Math.round(NOTIFY_DEDUP_MS / 60000)} 分钟内已发过，还需等待约 ${waitS}s`,
+        };
+      }
+      if (recentSends(at) >= NOTIFY_RATE_MAX) {
+        return {
+          claimed: false,
+          status: "throttled",
+          firstSeenAt,
+          count: existing?.count ?? 0,
+          reason: `通知频率超限（${NOTIFY_RATE_WINDOW_MS / 60000} 分钟内最多 ${NOTIFY_RATE_MAX} 条）`,
+        };
+      }
+      const entry: NotificationEntry = {
+        key: input.key,
+        kind: input.kind,
+        sessionId: input.sessionId,
+        name: input.name ?? null,
+        title: sanitizeNotifyText(input.title, NOTIFY_TITLE_MAX),
+        body: sanitizeNotifyText(input.body, NOTIFY_BODY_MAX),
+        at: new Date(at).toISOString(),
+        firstSeenAt,
+        count: (existing?.count ?? 0) + 1,
+      };
+      // ONE WINNER PER KEY WITHOUT A LOCK: the claim file appears atomically
+      // (temp + `link(2)`), and a name that already exists means somebody beat
+      // us to it in this same instant. Their own `at` cannot have been inside
+      // this key's dedup window (the read above would have said so), so the
+      // honest answer is "they are sending it" rather than "it was sent".
+      let won = false;
+      try {
+        mkdirSync(claimsDir, { recursive: true });
+        const tmp = `${claimPathFor(input.key)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+        writeFileSync(tmp, `${JSON.stringify(entry)}\n`, { flag: "wx", mode: 0o600 });
+        try {
+          if (existing !== undefined) {
+            // A STALE CLAIM IS REPLACED, not linked over: `link` would answer
+            // EEXIST against the key's OWN old file and the fact could never be
+            // sent again after the dedup window (the bug this branch exists
+            // for). A rename is atomic, and the only loser of a concurrent
+            // re-claim is one duplicate banner on a fact that was already old
+            // enough to repeat.
+            renameSync(tmp, claimPathFor(input.key));
+            won = true;
+          } else {
+            linkSync(tmp, claimPathFor(input.key));
+            won = true;
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        } finally {
+          rmSync(tmp, { force: true });
+        }
+      } catch { /* best effort: a failed write costs one duplicate banner */ }
+      if (!won) {
+        const winner = readClaim(input.key);
+        return {
+          claimed: false,
+          status: "duplicate",
+          firstSeenAt: winner?.firstSeenAt ?? firstSeenAt,
+          count: winner?.count ?? 0,
+          reason: "这条通知刚被另一个调用方在同一瞬间声明 —— 由它来发",
+        };
       }
       try {
-        return decideAndRecord(input);
-      } finally {
-        guard.release();
-      }
+        mkdirSync(dir, { recursive: true });
+        appendFileSync(historyPath, `${JSON.stringify({ at: entry.at, key: input.key })}\n`, "utf8");
+      } catch { /* the rate limit loses one count; the banner is already the caller's */ }
+      prune(at);
+      return { claimed: true, status: "claimed", firstSeenAt, count: entry.count };
     },
 
     list(opts = {}) {
-      const file = read();
-      const since = opts.sinceMs ?? now() - NOTIFICATION_HISTORY_MS;
+      const at = now();
+      const since = opts.sinceMs ?? at - NOTIFICATION_HISTORY_MS;
       const limit = opts.limit ?? 100;
-      const entries = file.entries
-        .filter((entry) => {
-          const at = Date.parse(entry.at);
-          return Number.isFinite(at) && at >= since;
-        })
-        .slice(-limit);
-      return entries;
+      let files: string[];
+      try {
+        files = readdirSync(claimsDir);
+      } catch {
+        return [];
+      }
+      const entries: NotificationEntry[] = [];
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        try {
+          const raw = JSON.parse(readFileSync(join(claimsDir, file), "utf8")) as NotificationEntry;
+          if (typeof raw?.at !== "string" || typeof raw.key !== "string") continue;
+          if (Date.parse(raw.at) >= since) entries.push(raw);
+        } catch { /* an unreadable claim is one missing row, never a failed read */ }
+      }
+      entries.sort((a, b) => a.at.localeCompare(b.at));
+      return entries.slice(-limit);
     },
   };
 
-  /** The claim itself, under the per-key lock. */
-  function decideAndRecord(input: {
-    key: string;
-    kind: string;
-    sessionId: string;
-    name?: string | null;
-    title: string;
-    body: string;
-  }): NotificationClaim {
-    const at = now();
-    const file = read(true);
-    const decision = decideNotify({ history: file.history, key: input.key, now: at });
-    const existing = file.entries.find((entry) => entry.key === input.key);
-    const firstSeenAt = existing?.firstSeenAt ?? new Date(at).toISOString();
-    if (!decision.send) {
-      return { claimed: false, firstSeenAt, count: existing?.count ?? 0, reason: decision.reason };
-    }
-    const history = recordNotify(file.history, input.key, at);
-    const entry: NotificationEntry = {
-      key: input.key,
-      kind: input.kind,
-      sessionId: input.sessionId,
-      name: input.name ?? null,
-      title: sanitizeNotifyText(input.title, NOTIFY_TITLE_MAX),
-      body: sanitizeNotifyText(input.body, NOTIFY_BODY_MAX),
-      at: new Date(at).toISOString(),
-      firstSeenAt,
-      count: (existing?.count ?? 0) + 1,
-    };
-    const entries = [...file.entries.filter((candidate) => candidate.key !== input.key), entry]
-      .filter((candidate) => at - Date.parse(candidate.at) < NOTIFICATION_HISTORY_MS)
-      .slice(-NOTIFICATION_HISTORY_MAX);
-    persist({ schema: 1, history, entries });
-    return { claimed: true, firstSeenAt, count: entry.count };
+  /**
+   * Drop what no consumer can still ask about: claims older than the history
+   * window (the ledger is read for that long) and history lines outside the rate
+   * window (older ones can suppress nothing). Cheap, and it runs only on a
+   * claim — a resident daemon must not grow one file per banner forever.
+   */
+  function prune(at: number): void {
+    try {
+      for (const file of readdirSync(claimsDir)) {
+        if (!file.endsWith(".json")) continue;
+        const path = join(claimsDir, file);
+        try {
+          const raw = JSON.parse(readFileSync(path, "utf8")) as { at?: unknown };
+          const stamp = typeof raw?.at === "string" ? Date.parse(raw.at) : Number.NaN;
+          if (Number.isFinite(stamp) && at - stamp > NOTIFICATION_HISTORY_MS) rmSync(path, { force: true });
+        } catch { /* leave an unreadable file alone rather than guessing */ }
+      }
+      const kept = readFileSync(historyPath, "utf8")
+        .split("\n")
+        .filter((line) => {
+          if (line.trim() === "") return false;
+          try {
+            const stamp = (JSON.parse(line) as { at?: unknown }).at;
+            return typeof stamp === "string" && at - Date.parse(stamp) < NOTIFY_RATE_WINDOW_MS;
+          } catch {
+            return false;
+          }
+        });
+      writeFileSync(historyPath, kept.length === 0 ? "" : `${kept.join("\n")}\n`, { mode: 0o600 });
+    } catch { /* pruning is housekeeping, never a reason to fail a claim */ }
   }
 }
 
@@ -284,50 +366,6 @@ function notifiableFor(session: { mode: string; kind: string | null }): boolean 
     taskMode: session.mode as TaskMode,
     stateVariant: session.kind === "child" ? "child" : undefined,
   });
-}
-
-/** How long a READ of the ledger may be reused (a claim always re-reads). */
-const LIST_TTL_MS = 5_000;
-
-/** How long a claim lock may live before anyone may take it over. */
-export const CLAIM_LOCK_STALE_MS = 30_000;
-
-type ClaimGuard = { kind: "held"; release: () => void } | { kind: "busy"; reason: string };
-
-/**
- * The lock a claim runs under: an `O_EXCL` file, removed in a `finally`.
- *
- * A lock left behind by a crash is TAKEN OVER once it is older than
- * {@link CLAIM_LOCK_STALE_MS} — otherwise one killed process would refuse every
- * claim forever, and a notification nobody could ever send is worse than one
- * sent twice.
- */
-function claimGuard(lockPath: string, at: number): ClaimGuard {
-  const take = (): boolean => {
-    try {
-      mkdirSync(dirname(lockPath), { recursive: true });
-      writeFileSync(lockPath, `${at}`, { flag: "wx", mode: 0o600 });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (take()) return { kind: "held", release: () => { rmSync(lockPath, { force: true }); } };
-
-  let heldAt = Number.NaN;
-  try {
-    heldAt = Number(readFileSync(lockPath, "utf8"));
-  } catch {
-    heldAt = Number.NaN; // it vanished between the create and the read
-  }
-  if (Number.isFinite(heldAt) && at - heldAt < CLAIM_LOCK_STALE_MS) {
-    return { kind: "busy", reason: "通知台账正被另一个调用方写入 —— 同一条通知同时只能有一个赢家，请重试" };
-  }
-  try {
-    rmSync(lockPath, { force: true });
-  } catch { /* the loser of the takeover race reports busy below */ }
-  if (take()) return { kind: "held", release: () => { rmSync(lockPath, { force: true }); } };
-  return { kind: "busy", reason: "通知台账正被另一个调用方写入 —— 同一条通知同时只能有一个赢家，请重试" };
 }
 
 /** The event kind a state transition deserves, or none. */

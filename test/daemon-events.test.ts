@@ -44,13 +44,15 @@ test("the hub routes to the right subscribers and survives a throwing writer", (
 test("the ledger lets exactly one caller claim a fact", () => {
   const home = scratchHome();
   let at = 1_700_000_000_000;
-  const store = createNotificationStore(join(home, "notifications.json"), { now: () => at });
+  const store = createNotificationStore(join(home, "notifications"), { now: () => at });
   const first = store.claim({ key: "k1", kind: "waiting-input", sessionId: "s1", title: "等你回答", body: "有人问你" });
   assert.equal(first.claimed, true);
+  assert.equal(first.status, "claimed");
   assert.equal(first.count, 1);
 
   const second = store.claim({ key: "k1", kind: "waiting-input", sessionId: "s1", title: "等你回答", body: "有人问你" });
   assert.equal(second.claimed, false);
+  assert.equal(second.status, "duplicate", "the machine-readable verdict, not just the boolean");
   assert.match(second.reason ?? "", /已发过/);
   assert.equal(second.firstSeenAt, first.firstSeenAt);
 
@@ -64,71 +66,37 @@ test("the ledger lets exactly one caller claim a fact", () => {
   assert.equal(store.list().find((entry) => entry.key === "k1")?.count, 2);
 });
 
-test("a claim re-reads the ledger, so a second writer does not erase the first one's claim", () => {
+test("claims for DIFFERENT keys never collide (one file per key, no shared document)", () => {
   const home = scratchHome();
-  const path = join(home, "notifications.json");
-  const first = createNotificationStore(path);
-  const second = createNotificationStore(path);
+  const dir = join(home, "notifications");
+  const first = createNotificationStore(dir);
+  const second = createNotificationStore(dir);
   assert.equal(first.claim({ key: "k1", kind: "done", sessionId: "s", title: "t1", body: "b1" }).claimed, true);
-  // `second` has never read the file: a cached read would decide against an
-  // empty ledger, overwrite it, and drop k1.
+  // Two writers, two keys: neither can erase the other's claim (the earlier
+  // whole-document design could), and both are visible to a fresh reader.
   assert.equal(second.claim({ key: "k2", kind: "done", sessionId: "s", title: "t2", body: "b2" }).claimed, true);
+  assert.equal(first.claim({ key: "k1", kind: "done", sessionId: "s", title: "t1", body: "b1" }).status, "duplicate");
   assert.deepEqual(second.list().map((entry) => entry.key).sort(), ["k1", "k2"]);
-  assert.deepEqual(
-    (JSON.parse(readFileSync(path, "utf8")) as { entries: { key: string }[] }).entries.map((entry) => entry.key).sort(),
-    ["k1", "k2"],
-    "both claims survive on disk",
-  );
 });
 
-test("the ledger is a file: a second reader sees the first reader's claims", () => {
+test("the ledger is a directory: a second store sees the first one's claims", () => {
   const home = scratchHome();
-  const path = join(home, "notifications.json");
-  const first = createNotificationStore(path);
+  const dir = join(home, "notifications");
+  const first = createNotificationStore(dir);
   assert.equal(first.claim({ key: "shared", kind: "done", sessionId: "s", title: "t", body: "b" }).claimed, true);
-  const second = createNotificationStore(path);
+  const second = createNotificationStore(dir);
   assert.equal(second.claim({ key: "shared", kind: "done", sessionId: "s", title: "t", body: "b" }).claimed, false);
   assert.equal(second.list().length, 1);
 });
 
-test("one key cannot be claimed while another caller holds the ledger lock — and a stale lock is taken over", () => {
-  const home = scratchHome();
-  const storeFile = join(home, "notifications.json");
-  const store = createNotificationStore(storeFile);
-  const key = "等你回答 · project\u0000@t1 正在等你回答。";
-  // The lock covers the WHOLE ledger (claims are read-modify-write of one
-  // file): two processes claiming different keys would otherwise each decide
-  // against the same snapshot and the later write would drop the other's entry.
-  const lock = join(home, "notification-claims", "ledger.lock");
-  mkdirSync(dirname(lock), { recursive: true });
-
-  writeFileSync(lock, `${Date.now()}`, "utf8");
-  const busy = store.claim({ key, kind: "waiting-input", sessionId: "s1", title: "t", body: "b" });
-  assert.equal(busy.claimed, false, "a ledger being written by somebody else is not claimed twice");
-  assert.match(busy.reason ?? "", /另一个调用方/);
-
-  // A crash between create and remove must not refuse claims forever.
-  writeFileSync(lock, `${Date.now() - 10 * 60_000}`, "utf8");
-  assert.equal(store.claim({ key, kind: "waiting-input", sessionId: "s1", title: "t", body: "b" }).claimed, true);
-  assert.equal(existsSync(lock), false, "the winner releases the lock");
-
-  // …and two stores claiming DIFFERENT keys keep both entries.
-  const other = createNotificationStore(storeFile);
-  assert.equal(other.claim({ key: "k2", kind: "done", sessionId: "s2", title: "t2", body: "b2" }).claimed, true);
-  assert.equal(store.claim({ key: "k3", kind: "done", sessionId: "s3", title: "t3", body: "b3" }).claimed, true);
-  assert.deepEqual(
-    (JSON.parse(readFileSync(storeFile, "utf8")) as { entries: { key: string }[] }).entries.map((entry) => entry.key).sort(),
-    ["k2", "k3", key].sort(),
-  );
-});
-
 test("an unreadable ledger reads as empty (one extra banner, never silence)", () => {
   const home = scratchHome();
-  const path = join(home, "notifications.json");
-  mkdirSync(home, { recursive: true });
-  writeFileSync(path, "{ truncated");
-  const store = createNotificationStore(path);
+  const dir = join(home, "notifications");
+  mkdirSync(join(dir, "claims"), { recursive: true });
+  writeFileSync(join(dir, "claims", "garbage.json"), "{ truncated");
+  const store = createNotificationStore(dir);
   assert.equal(store.claim({ key: "k", kind: "done", sessionId: "s", title: "t", body: "b" }).claimed, true);
+  assert.equal(store.list().length, 1, "the unreadable file is one missing row, not a failed read");
 });
 
 test("notificationKindFor names only the two transitions that are news", () => {
