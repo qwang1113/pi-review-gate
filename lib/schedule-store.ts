@@ -170,7 +170,8 @@ const isTimestamp = (value: unknown): value is string => isText(value) && Number
  * Enough of a shape check that a hand-edited entry cannot reach a caller as
  * `undefined` or as a value the gate reads but cannot act on: the fields a RULE
  * consumes (`cron` / `enabled` / `lastFiredAt` / `approvedAt`) get their
- * write-side validation run here too.
+ * write-side validation run here too. The display-only `at` fields are only
+ * required to be non-empty — nothing acts on them.
  */
 function isStoredTask(value: unknown): value is ScheduledTask {
   if (!isRecord(value)) return false;
@@ -178,7 +179,8 @@ function isStoredTask(value: unknown): value is ScheduledTask {
   if (!isRecord(contract) || !isRecord(contract.restatement) || !isRecord(contract.goal)) return false;
   const { restatement, goal } = contract;
   return (
-    isText(value.id) && isText(value.name) && isText(value.repo) && parseCron(String(value.cron)).ok &&
+    isText(value.id) && isText(value.name) && isText(value.repo) && isText(value.cron) &&
+    parseCron(value.cron).ok &&
     isText(value.requirement) && typeof value.enabled === "boolean" &&
     isText(value.createdAt) && isText(value.updatedAt) &&
     (value.lastFiredAt === null || isTimestamp(value.lastFiredAt)) &&
@@ -214,12 +216,24 @@ export function readSchedules(home: string): SchedulesRead {
     (parsed.version as number) < 0 || !Array.isArray(parsed.tasks) || !parsed.tasks.every(isStoredTask)) {
     return { ok: false, problem: `${path} 的形状不是 {schema:1, version, tasks[]}（或某个任务缺字段）—— 同上，不覆盖它` };
   }
+  const tasks = parsed.tasks as ScheduledTask[];
+  // id and name share one namespace because `findScheduledTask` answers to
+  // either, and an id is what update / remove address. A hand-edited duplicate
+  // (a copied row whose id was not changed) must be refused rather than handed
+  // to a caller that would then edit or delete the wrong task.
+  const taken = new Set<string>();
+  for (const task of tasks) {
+    if (taken.has(task.id) || taken.has(task.name)) {
+      return { ok: false, problem: `${path} 里有重复的 id / name（${task.id} / ${task.name}）—— id 是寻址键、name 全局唯一，重复会让两者都不确定` };
+    }
+    taken.add(task.id);
+    taken.add(task.name);
+  }
   return {
     ok: true,
-    file: { schema: SCHEDULES_SCHEMA, version: parsed.version as number, tasks: parsed.tasks as ScheduledTask[] },
+    file: { schema: SCHEDULES_SCHEMA, version: parsed.version as number, tasks },
   };
 }
-
 /** Every task, or `[]` when the table cannot be read (a listing never throws). */
 export function listScheduledTasks(home: string): ScheduledTask[] {
   const read = readSchedules(home);
@@ -373,7 +387,8 @@ function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, current?: S
     if (problem) return problem;
   }
   if (has(patch, "cron")) {
-    const parsed = parseCron(String(patch.cron));
+    if (!isText(patch.cron)) return `cron 必须是 5 段表达式字符串：${JSON.stringify(patch.cron)}`;
+    const parsed = parseCron(patch.cron);
     if (!parsed.ok) return `cron 不合法：${parsed.problem}`;
   }
   if (has(patch, "enabled") && typeof patch.enabled !== "boolean") {
@@ -413,10 +428,9 @@ function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, current?: S
 }
 
 function newScheduleId(taken: ReadonlySet<string>): string {
-  for (;;) {
-    const candidate = `sch-${randomBytes(4).toString("hex")}`;
-    if (!taken.has(candidate)) return candidate;
-  }
+  let id = `sch-${randomBytes(4).toString("hex")}`;
+  while (taken.has(id)) id = `sch-${randomBytes(4).toString("hex")}`;
+  return id;
 }
 
 // ---------------------------------------------------------------------------

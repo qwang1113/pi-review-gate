@@ -151,6 +151,17 @@ test("name / repo / cron / contract are all validated before anything is written
   assert.match(badEnabled.problem, /enabled/);
   assert.equal(readSchedules(home).ok, true, "the table is still readable");
 
+  // Same class: a non-string cron (JSON arrays stringify into a legal
+  // expression) would be written as an array and make the table unreadable.
+  const badCron = addScheduledTask(home, taskInput(repo, {
+    name: "bad-cron",
+    cron: ["0 9 * * *"] as unknown as string,
+  }));
+  assert.equal(badCron.ok, false);
+  if (badCron.ok) return;
+  assert.match(badCron.problem, /cron/);
+  assert.equal(readSchedules(home).ok, true);
+
   const duplicate = addScheduledTask(home, taskInput(repo, { cron: "0 10 * * *" }));
   assert.equal(duplicate.ok, false);
   if (duplicate.ok) return;
@@ -427,6 +438,33 @@ test("a hand-edited table missing a contract field is refused, never passed on",
   // as a task that silently never fires.
   const task = file.tasks[0]! as unknown as { cron: string };
   task.cron = "not a cron";
+  writeFileSync(schedulesPath(home), JSON.stringify(file));
+  assert.equal(readSchedules(home).ok, false);
+  assert.deepEqual(listScheduledTasks(home), []);
+});
+
+test("a duplicated id or name is refused — either one addresses the wrong task", () => {
+  const home = scratch();
+  const repo = scratch();
+  const added = addScheduledTask(home, taskInput(repo));
+  assert.equal(added.ok, true);
+  if (!added.ok) return;
+  const raw = readFileSync(schedulesPath(home), "utf8");
+  const file = JSON.parse(raw) as { tasks: Array<Record<string, unknown>> };
+
+  // A copied row whose name was changed but whose id was not: update/remove by
+  // id would then hit whichever one came first.
+  file.tasks.push({ ...file.tasks[0]!, name: "daily-audit-copy" });
+  writeFileSync(schedulesPath(home), JSON.stringify(file));
+  const byId = readSchedules(home);
+  assert.equal(byId.ok, false);
+  if (byId.ok) return;
+  assert.match(byId.problem, /重复的 id \/ name/);
+
+  // …and the mirror image, which makes `findScheduledTask(name)` ambiguous.
+  delete (file.tasks[1] as { id?: string }).id;
+  file.tasks[1]!.id = "sch-11111111";
+  file.tasks[1]!.name = "daily-audit";
   writeFileSync(schedulesPath(home), JSON.stringify(file));
   assert.equal(readSchedules(home).ok, false);
   assert.deepEqual(listScheduledTasks(home), []);
