@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
-import { QuestionCard, draftToAnswer, type QuestionDraft } from "@/components/question-card";
+import { QuestionCard, acceptsDecline, draftToAnswer, type QuestionDraft } from "@/components/question-card";
 import { describeError } from "@/lib/api";
 import { useDaemon } from "@/lib/daemon-context";
 import type { DaemonQuestion } from "@/lib/types";
@@ -56,8 +56,11 @@ export function QuestionBatch({
       questions.filter((question) => {
         const draft = drafts[question.requestId];
         if (draft === undefined) return true;
-        if (draft.chosen.length === 0) return draft.reason.trim() === "";
-        return false;
+        if (draft.chosen.length > 0) return false;
+        // Nothing picked is only an answer when the question carries the gate's
+        // decline row — without it, free text is refused by the daemon and the
+        // user would get a rejection instead of a submitted answer.
+        return !acceptsDecline(question) || draft.reason.trim() === "";
       }),
     [questions, drafts],
   );
@@ -114,7 +117,7 @@ export function QuestionBatch({
         </Button>
         <span className="text-[11px] text-muted-foreground">
           {incomplete.length > 0
-            ? `还有 ${incomplete.length} 题没作答（或写明原因）`
+            ? `还有 ${incomplete.length} 题没作答（没选选项的题需要在理由里写清）`
             : `提交给 ${sessionName}（${sessionId.slice(0, 8)}）`}
         </span>
         <Link to={`/sessions/${sessionId}`} className="ml-auto text-[11px] text-muted-foreground hover:underline">

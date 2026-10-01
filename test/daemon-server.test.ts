@@ -14,6 +14,7 @@ import { createRuntime, type Runtime } from "../lib/daemon/server.ts";
 import { DEFAULT_WEB_DIR, missingBuildPage, safeJoin } from "../lib/daemon/static.ts";
 import { ensureDaemonToken } from "../lib/daemon/state.ts";
 import { questionPath, sessionQuestionsDir } from "../lib/daemon/paths.ts";
+import { MULTI_ANSWER_SEPARATOR } from "../lib/multi-choice-dialog.ts";
 import { sessionInboxPath, sessionRegistryRoot } from "../lib/session-registry.ts";
 import {
   assistantRecord,
@@ -317,6 +318,38 @@ test("questions: an empty data source still answers, and the answer path works e
     const missingSession = await h.call("/api/questions/q-7/answer", { method: "POST", body: JSON.stringify({ answer: "继续" }) });
     assert.equal(missingSession.status, 400);
     assert.deepEqual((await h.json<{ questions: unknown[] }>("/api/questions")).questions, []);
+  } finally {
+    await h.runtime.stop();
+  }
+});
+
+test("questions: a structured answers list is matched row by row, never re-split as text", async () => {
+  const h = await harness();
+  try {
+    mkdirSync(sessionQuestionsDir(h.home, "abc123"), { recursive: true });
+    // The option text holds BOTH separators the free-text parser splits on, so
+    // a list joined into one string and parsed again comes back mangled.
+    const options = ["A 方案 / 主路径", "B, 备选"];
+    writeFileSync(questionPath(h.home, "abc123", "q-8"), JSON.stringify({
+      schema: 1,
+      requestId: "q-8",
+      sessionId: "abc123",
+      sessionName: "t1-work",
+      topic: "ask-user",
+      title: "选哪些？",
+      options,
+      multiple: true,
+      recommended: null,
+      defaultChecked: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }));
+
+    const answered = await h.json<{ ok: boolean; answer: string }>("/api/questions/q-8/answer", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: "abc123", answers: options }),
+    });
+    assert.equal(answered.ok, true);
+    assert.equal(answered.answer, options.join(MULTI_ANSWER_SEPARATOR));
   } finally {
     await h.runtime.stop();
   }

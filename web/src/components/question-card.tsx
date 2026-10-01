@@ -9,16 +9,32 @@ import type { DaemonQuestion } from "@/lib/types";
 const optionLetter = (index: number): string => String.fromCharCode(65 + index);
 
 /**
- * The gate's own escape hatch, part of its dialog template.
+ * The gate's own decline row, part of its dialog template (`lib/choice-dialog.ts`).
  *
- * When a producer also passes it as a regular option — the answer channel’s
- * files carry the gate’s whole option list, hatch included — rendering it twice
- * gives the user two rows that mean the same thing. The hatch is recognised by
- * its own marker and rendered once, as the reason box. The label falls back to
- * the template’s wording when the producer did not send it at all.
+ * `resolveAnswer` (lib/orchestrator-answer-rules.ts) accepts a message that
+ * STARTS WITH this row, verbatim — that is the **only** way to answer a
+ * question whose options the user did not pick: any other non-option text is
+ * refused when the question has options. Two consequences drive this file:
+ *
+ *   1. the row is recognised by its own marker and rendered once (the producer
+ *      also carries it in the option list, so rendering it as a row AND as the
+ *      reason box would offer the same thing twice);
+ *   2. when the producer did NOT send the row, there is no legal way to answer
+ *      with free text at all — so the panel offers the reason box only as a
+ *      NOTE hung off a picked option, and requires an option to be picked.
  */
 const ESCAPE_HATCH_LABEL = "✎ 不选，我说明原因";
 const ESCAPE_HATCH_MARK = "✎";
+
+/** The decline row this question carries, if any. */
+export function declineRowOf(question: DaemonQuestion): string | undefined {
+  return question.options.find((option) => option.trim().startsWith(ESCAPE_HATCH_MARK));
+}
+
+/** Can a written reason answer this question on its own? */
+export function acceptsDecline(question: DaemonQuestion): boolean {
+  return question.options.length > 0 && declineRowOf(question) !== undefined;
+}
 
 /**
  * One question, rendered exactly as the gate's own dialog is: option rows (with
@@ -48,7 +64,8 @@ export function QuestionCard({
   const [reasonOpen, setReasonOpen] = useState(draft.reason !== "");
   const cardRef = useRef<HTMLDivElement>(null);
   const free = question.options.length === 0;
-  const hatch = question.options.find((option) => option.trim().startsWith(ESCAPE_HATCH_MARK));
+  const hatch = declineRowOf(question);
+  const decline = acceptsDecline(question);
   const choices = useMemo(
     () => (hatch === undefined ? question.options : question.options.filter((option) => option !== hatch)),
     [question.options, hatch],
@@ -156,7 +173,7 @@ export function QuestionCard({
           value={draft.reason}
           disabled={disabled === true}
           onChange={(event) => onChange({ ...draft, reason: event.target.value })}
-          placeholder="写明原因（随答案一起回传）"
+          placeholder={decline ? "写明原因（它就是你的回答）" : "附加说明（随答案一起回传）"}
         />
       ) : (
         <button
@@ -182,9 +199,24 @@ export function QuestionCard({
   );
 }
 
-/** Turn a draft into the request the answer endpoint takes (see `docs/daemon/api.md` §7.5). */
-export function draftToAnswer(question: DaemonQuestion, draft: QuestionDraft): { value: string | string[]; reason?: string } {
-  const value = question.multiple ? draft.chosen : (draft.chosen[0] ?? "");
+/**
+ * Turn a draft into the request the answer endpoint takes (`docs/daemon/api.md` §7.5).
+ *
+ * A draft with nothing picked is not "no answer": it is the gate's decline
+ * row answered with the reason, and the daemon only recognises that shape when
+ * the message STARTS WITH the row itself. Sending `answer: ""` (what the panel
+ * used to do when only a reason was written) is refused by `resolveAnswer` —
+ * the user fills in a reason and gets told their answer was empty.
+ */
+export function draftToAnswer(
+  question: DaemonQuestion,
+  draft: QuestionDraft,
+): { value: string | string[]; reason?: string } {
   const reason = draft.reason.trim() === "" ? undefined : draft.reason.trim();
+  if (draft.chosen.length === 0) {
+    const row = declineRowOf(question) ?? ESCAPE_HATCH_LABEL;
+    return { value: `${row}：${reason ?? ""}`, reason };
+  }
+  const value = question.multiple ? draft.chosen : draft.chosen[0]!;
   return { value, reason };
 }

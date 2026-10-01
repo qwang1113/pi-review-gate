@@ -90,9 +90,20 @@ SSE 的 `session` 事件里 `removed` **只带 `sessionId`**（没有 `session` 
 
 ## 联调状态（2026-10-01）
 
-- **answer-channel 已经合入**：门禁侧生产者与消费者都在跑。端到端验证过完整闭环 ——
-  真实会话在门禁里等回答 → `~/.pi/agent/rg-daemon/questions/<sessionId>/…​.json` 出现 →
+- **门禁侧的 answer channel 不在本分支**：生产者与消费者（`lib/external-answer.ts` 等）是
+  `feat/pi-gate-daemon` 分支上的提交（`3f3ee155` / `4191e92a`），**不是本轮工作分支的祖先**。
+  面板按 `docs/daemon/api.md` §7 的契约实现；闭环是在那个环境里验证的 ——
+  真实会话在门禁里等回答 → `~/.pi/agent/rg-daemon/questions/<sessionId>/<requestId>.json` 出现 →
   **从面板**提交答案 → `.answer.json` 落盘 → 门禁消费后两个文件都消失、会话继续（门禁模式被改掉、名字被登记）。
+  在本分支单独跑面板时，「待处理」没有生产者喂它 —— 答题链路要等 answer-channel 合入后才完整。
+- **答题的两种形状**：选了选项 ⇒ `answer` 是选项原文（多选是 `answers` 数组，逐个逐字匹配）；没选选项只写了理由 ⇒ 走门禁模板的退路行，
+  提交的是 `✎ 不选，我说明原因：<理由>` 这一整行 —— `resolveAnswer` 只认以退路行开头的自由文本，其他任何
+  非选项文本都会被拒（`lib/orchestrator-answer-rules.ts`）。所以**问题选项里没有退路行时，面板不把「写理由」
+  当作答**：那一题必须先选一项，理由只能作为附注随答案回传。
+- **本轮顺带修的两个 daemon bug**（面板的两条核心路径各自卡在它们上，用户批准本轮一起修）：
+  `lib/daemon/events.ts` 的订阅书签在 transcript 还不存在时会丢失（发起任务后立刻进详情页 = 永久收不到输出）；
+  `lib/daemon/questions.ts` + `lib/daemon/server.ts` 不再把已拆分的 `answers` 数组拼接后重新当人类文本解析。
+  运行中的 daemon 要**重启**才会加载它们——已跑的那个进程装的是它启动时的代码。
 - 待答问题的轮询间隔是 5 秒；没有 SSE 事件推它（契约里没有 question 帧），所以刚提交完会在本地立刻移除，
   服务端状态由下一次轮询对齐。
 
@@ -101,7 +112,6 @@ SSE 的 `session` 事件里 `removed` **只带 `sessionId`**（没有 `session` 
 ## 契约里没有、因此面板没做的东西
 
 每一条都是**缺口**，不是省事；面板宁可不放那个控件，也不放一个点了没用的按钮。要么 daemon 补字段，要么用户接受现状：
-
 | 想做的事 | 现状 |
 | --- | --- |
 | 给会话发 **interrupt**（立刻打断当前 turn） | `POST /api/sessions/:id/messages` 的 body 只有 `{text}`，写进 inbox 后由接收方门禁以 `deliverAs: "steer"` 注入。面板只提供这一种投递并写明原因，不做假的模式开关（`send-keys` 那条路早已被明确否决）。 |
@@ -128,3 +138,10 @@ SSE 的 `session` 事件里 `removed` **只带 `sessionId`**（没有 `session` 
 - 无 token：显示 token 门页。
 - 渲染异常：一个真实的崩溃（`NotificationEntry.repo` 不存在于 §8.3）被 `ErrorBoundary` 接住，
   侧栏与连接状态存活，页面给出错误原文而不是白屏。
+- **门禁模板的退路行**：从面板只写理由、不选选项提交，落盘的 `answer` 是
+  `✎ 不选，我说明原因：<理由>`（`resolveAnswer` 唯一接受的自由文本形状）；选项列表里没有退路行时，
+  那一题就不允许用「只写理由」作答（提交按钮保持禁用）。
+- **daemon 的两个修复**由新用例覆盖：`test/daemon-events.test.ts`「a subscription made before the
+  transcript exists still receives its first output」、`test/daemon-questions.test.ts`「a structured
+  answers list is read row by row」、`test/daemon-server.test.ts`「a structured answers list is matched
+  row by row, never re-split as text」。

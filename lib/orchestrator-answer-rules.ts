@@ -169,6 +169,36 @@ export function resolveAnswer(
   return "reason" in read ? { ok: false, reason: read.reason } : { ok: true, answer: read.row };
 }
 
+/**
+ * THE STRUCTURED FORM — one element per chosen row, already split by the caller.
+ *
+ * The daemon's HTTP layer receives `answers: ["甲", "乙"]` from the panel, and
+ * those elements ARE the rows (`docs/daemon/api.md` §7.5). Joining them back
+ * into one string and feeding it through the text parser is wrong, and
+ * measurably so (quality round P1, 2026-10-01): an option's own text may
+ * contain the very separators that parser splits on (` / `, `、`, `,`, `+`, a
+ * space), so a question offering `["A 方案", "B 方案"]` either refuses the whole
+ * answer ("同时匹配 N 个选项") or mints a combination nobody picked. Each element
+ * is read on its own — the same row/letter/number reading a single row gets,
+ * exact text first — and the canonical separator is applied once, at the end.
+ */
+export function resolveAnswerList(
+  request: AnswerableRequest,
+  answers: readonly string[],
+): { ok: true; answer: string } | { ok: false; reason: string } {
+  const rows: string[] = [];
+  for (const item of answers) {
+    const read = readRow(item, request.options);
+    if ("reason" in read) return { ok: false, reason: `多选答案里有一段读不出来：${read.reason}` };
+    if (!rows.includes(read.row)) rows.push(read.row);
+  }
+  if (rows.length === 0) return { ok: false, reason: "answers 里没有可读的选项" };
+  if (request.multiple !== true && rows.length > 1) {
+    return { ok: false, reason: "这不是多选题，一次只能给一行答案" };
+  }
+  return { ok: true, answer: rows.join(MULTI_ANSWER_SEPARATOR) };
+}
+
 // ---------------------------------------------------------------------------
 // the proxy CROSSCHECK — what a project manager must say before it approves
 // ---------------------------------------------------------------------------

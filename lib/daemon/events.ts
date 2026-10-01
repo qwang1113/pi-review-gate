@@ -435,6 +435,25 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
   const intervalMs = opts.intervalMs ?? 1_000;
   const seen = new Map<string, Known>();
   const tailer = new TranscriptTailer();
+  /**
+   * Subscriptions for sessions whose transcript does not exist YET.
+   *
+   * A session started seconds ago has written nothing and `transcriptFor`
+   * answers undefined, so the bookmark cannot be planted where it belongs
+   * (quality round P1, 2026-10-01). The intent is remembered instead, and
+   * applied the moment the path is known — WITHOUT this, the tailer's first
+   * sight of the file bookmarks it at its END (`TranscriptTailer.read`) and
+   * every byte written between the subscription and that first sight is lost
+   * for that subscriber, permanently: the panel would show a session that
+   * never says anything, and a reconnect would replay the newest entries while
+   * the tail resumed from the stale bookmark — first lost, then duplicated.
+   *
+   * The value is where reading starts. A missing offset means "do not send me
+   * the past", which for a file that does not exist yet is the same as its
+   * start: everything the file will ever hold is written after this
+   * subscription.
+   */
+  const pendingPrimes = new Map<string, number>();
   let timer: NodeJS.Timeout | undefined;
   let running = false;
 
@@ -472,6 +491,13 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
       return;
     }
     const watched = opts.hub.watched();
+    // A bookmark nobody is waiting for any more is dropped: the subscriber that
+    // asked for it is gone, and its session never produced a file.
+    if (watched !== null) {
+      for (const sessionId of pendingPrimes.keys()) {
+        if (!watched.has(sessionId)) pendingPrimes.delete(sessionId);
+      }
+    }
     const present = new Set<string>();
     for (const session of collection.sessions) {
       present.add(session.sessionId);
@@ -508,6 +534,14 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
       if (watched === null || watched.has(session.sessionId)) {
         const path = opts.observer.transcriptFor(session.sessionId);
         if (path !== undefined) {
+          // THE BOOKMARK IS APPLIED BEFORE THE READ that would otherwise plant
+          // it at the end of the file: this is the first tick that can see the
+          // transcript a subscription was made before.
+          const pending = pendingPrimes.get(session.sessionId);
+          if (pending !== undefined) {
+            tailer.prime(path, pending);
+            pendingPrimes.delete(session.sessionId);
+          }
           const entries: OutputEntry[] = tailer.read(path);
           if (entries.length > 0) {
             opts.hub.emit({ event: "output", data: { sessionId: session.sessionId, entries } }, session.sessionId);
@@ -533,7 +567,14 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
     tick,
     prime(sessionId: string, offset?: number) {
       const path = opts.observer.transcriptFor(sessionId);
-      if (path !== undefined) tailer.prime(path, offset);
+      if (path !== undefined) {
+        tailer.prime(path, offset);
+        return;
+      }
+      // No file yet: remember where this subscriber's replay stopped (its start
+      // when it asked for none) and plant that bookmark on the first tick that
+      // sees the transcript.
+      pendingPrimes.set(sessionId, offset ?? 0);
     },
     start() {
       if (timer !== undefined) return;

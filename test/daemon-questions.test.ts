@@ -18,6 +18,7 @@ import {
   submitAnswer,
 } from "../lib/daemon/questions.ts";
 import { questionAnswerPath, questionPath, sessionQuestionsDir } from "../lib/daemon/paths.ts";
+import { MULTI_ANSWER_SEPARATOR } from "../lib/multi-choice-dialog.ts";
 import { scratchHome } from "./daemon-helpers.ts";
 
 const question = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -176,4 +177,54 @@ test("answering a request that was never written is a refusal with the reason", 
   const outcome = submitAnswer(home, { sessionId: "session-1", requestId: "q-none", answer: "甲" });
   assert.equal(outcome.ok, false);
   assert.match(outcome.problem ?? "", /读不到这个问题/);
+});
+
+test("a structured answers list is read row by row — option text may hold the parser's own separators", () => {
+  const home = scratchHome();
+  // Both rows contain a separator the free-text parser splits on.
+  const options = ["A 方案 / 主路径", "B, 备选", "C 方案"];
+  const at = (requestId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> =>
+    question({ requestId, options, multiple: true, recommended: null, defaultChecked: [], ...overrides });
+  writeQuestion(home, "session-1", "q-list", at("q-list"));
+  writeQuestion(home, "session-1", "q-text", at("q-text"));
+
+  const asList = submitAnswer(home, { sessionId: "session-1", requestId: "q-list", answers: [options[0]!, options[1]!] });
+  assert.equal(asList.ok, true, asList.ok ? "" : asList.problem);
+  assert.equal(asList.answer, [options[0], options[1]].join(MULTI_ANSWER_SEPARATOR));
+
+  // THE SAME TWO ROWS AS ONE STRING cannot survive: the text path has to split
+  // what it is given, and the fragments match several rows. That is exactly
+  // why the list is handed over as a list.
+  const asText = submitAnswer(home, {
+    sessionId: "session-1",
+    requestId: "q-text",
+    answer: [options[0], options[1]].join(MULTI_ANSWER_SEPARATOR),
+  });
+  assert.equal(asText.ok, false);
+
+  // A single-choice question takes one row, however many the caller sends.
+  writeQuestion(home, "session-1", "q-single", at("q-single", { multiple: false, recommended: options[0] }));
+  const tooMany = submitAnswer(home, {
+    sessionId: "session-1",
+    requestId: "q-single",
+    answers: [options[0]!, options[2]!],
+  });
+  assert.equal(tooMany.ok, false);
+
+  // One unreadable row refuses the whole answer — guessing which half was
+  // meant is how a wrong tick gets minted.
+  writeQuestion(home, "session-1", "q-junk", at("q-junk"));
+  const junk = submitAnswer(home, {
+    sessionId: "session-1",
+    requestId: "q-junk",
+    answers: [options[0]!, "不存在的一项"],
+  });
+  assert.equal(junk.ok, false);
+  assert.match(junk.ok ? "" : junk.problem, /读不出来/);
+
+  // The letters a single row would accept still work element by element.
+  writeQuestion(home, "session-1", "q-letters", at("q-letters"));
+  const letters = submitAnswer(home, { sessionId: "session-1", requestId: "q-letters", answers: ["A", "B"] });
+  assert.equal(letters.ok, true, letters.ok ? "" : letters.problem);
+  assert.equal(letters.answer, [options[0], options[1]].join(MULTI_ANSWER_SEPARATOR));
 });
