@@ -70,6 +70,14 @@ import type { TmuxRunner } from "../orchestrator-tmux.ts";
 export const SCHEDULE_TICK_MS = 20_000;
 
 /**
+ * How long a slot / a run that could NOT be written to disk is remembered in
+ * memory (see `unrecordedSlots`). One day is far longer than any real repair
+ * takes, and short enough that a permanently broken home cannot grow the set
+ * without bound.
+ */
+const UNRECORDED_TTL_MS = 24 * 60 * 60 * 1_000;
+
+/**
  * How long a just-started run may be MISSING from the observer's listing before
  * that counts as "it is gone".
  *
@@ -259,24 +267,79 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   const log = deps.log ?? ((): void => { /* silent by default */ });
   let stopTimer: (() => void) | undefined;
   let running = false;
+  /**
+   * The slots this process DEALT WITH but could not record on disk.
+   *
+   * `lastFiredAt` is what normally stops the same cron minute from firing
+   * twice, and it lives in a file — but a home can be read-only or full, and
+   * "the write failed" must not turn into "start another session every 20
+   * seconds, forever": the session cannot be un-started, so the slot it was
+   * started for is remembered HERE and the tick skips it (quality round P1,
+   * 2026-10-02). Entries are dropped once the stamp does land, and pruned by
+   * age so a permanently broken home cannot grow the map without bound.
+   */
+  const unrecordedSlots = new Map<string, number>();
+  /**
+   * Runs that are really running but never reached the ledger, for the same
+   * reason. They hold their repo and they settle exactly like a recorded run —
+   * `tick` folds them into its open list.
+   */
+  const unrecordedRuns = new Map<string, ScheduleRunStarted>();
 
-  /** Stamp the slot as dealt with — fired, skipped or failed alike. */
-  function dealt(task: ScheduledTask, at: Date): void {
-    const stamped = updateScheduledTask(deps.home, task.id, { lastFiredAt: at.toISOString() }, { from: "gate" });
-    if (!stamped.ok) log(`调度任务 ${task.id} 的 lastFiredAt 没写上：${stamped.problem}`);
+  /** Drop what is too old to matter: a resident process must not grow forever. */
+  function pruneUnrecorded(nowMs: number): void {
+    for (const [slot, atMs] of unrecordedSlots) {
+      if (nowMs - atMs > UNRECORDED_TTL_MS) unrecordedSlots.delete(slot);
+    }
+    for (const [runId, run] of unrecordedRuns) {
+      const atMs = Date.parse(run.at);
+      if (Number.isFinite(atMs) && nowMs - atMs > UNRECORDED_TTL_MS) unrecordedRuns.delete(runId);
+    }
   }
 
-  function skipped(task: ScheduledTask, at: Date, reason: string): void {
-    appendScheduleRun(deps.home, { kind: "run-skipped", taskId: task.id, at: at.toISOString(), reason });
-    dealt(task, at);
+  /** Stamp the slot as dealt with — fired, skipped or failed alike. */
+  function dealt(task: ScheduledTask, at: Date, slot: string): void {
+    // REMEMBER FIRST, FORGET AFTER: between these two writes the process can
+    // die, and the disk can refuse both — either way the slot is known to be
+    // dealt with. See `unrecordedSlots` for why that matters.
+    unrecordedSlots.set(slot, at.getTime());
+    // THE VERSION IS READ RIGHT BEFORE THE WRITE and carried into it. The
+    // panel's `PUT` carries the version it read too, so a write that loses a
+    // race is REFUSED rather than silently resurrecting an older `lastFiredAt`
+    // — which would make the same slot due a second time.
+    const current = readSchedules(deps.home);
+    let stamped;
+    try {
+      stamped = updateScheduledTask(deps.home, task.id, { lastFiredAt: at.toISOString() }, {
+        from: "gate",
+        ...(current.ok ? { expectedVersion: current.file.version } : {}),
+      });
+    } catch (error) {
+      log(`调度任务 ${task.id} 的 lastFiredAt 没写上（只记在内存里）：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (!stamped.ok) {
+      log(`调度任务 ${task.id} 的 lastFiredAt 没写上（只记在内存里）：${stamped.problem}`);
+      return;
+    }
+    unrecordedSlots.delete(slot);
+  }
+
+  function skipped(task: ScheduledTask, at: Date, reason: string, slot: string): void {
+    dealt(task, at, slot);
+    try {
+      appendScheduleRun(deps.home, { kind: "run-skipped", taskId: task.id, at: at.toISOString(), reason });
+    } catch (error) {
+      log(`调度任务 ${task.name} 的跳过记录没写进台账：${error instanceof Error ? error.message : String(error)}`);
+    }
     log(`调度任务 ${task.name} 跳过：${reason}`);
   }
 
-  function fire(task: ScheduledTask, at: Date): ScheduleRunStarted | undefined {
+  function fire(task: ScheduledTask, at: Date, slot: string): ScheduleRunStarted | undefined {
     const runId = `run-${randomBytes(4).toString("hex")}`;
     const started = launchTask({ home: deps.home, runTmux: deps.runTmux, now: deps.now }, {
       repo: task.repo,
-      task: runTaskText(task, at),
+      task: runTaskText(task, at, runId),
       mode: "loop",
       // THE CONTRACT'S STATION IS THE CEILING the run may deliver at: the user
       // approved this task at that station, and a run may not ship further.
@@ -284,7 +347,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       env: { [SCHEDULE_ID_ENV]: task.id, [SCHEDULE_RUN_ENV]: runId },
     });
     if (!started.ok || started.sessionId === undefined) {
-      skipped(task, at, `起会话失败：${started.problem ?? "launchTask 没给出 sessionId"}`);
+      skipped(task, at, `起会话失败：${started.problem ?? "launchTask 没给出 sessionId"}`, slot);
       return undefined;
     }
     const run: ScheduleRunStarted = {
@@ -294,8 +357,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       sessionId: started.sessionId,
       at: at.toISOString(),
     };
-    appendScheduleRun(deps.home, run);
-    dealt(task, at);
+    // A SESSION IS ALREADY RUNNING: from here on the slot counts as dealt with
+    // and this run holds its repo, whatever the disk does next.
+    dealt(task, at, slot);
+    try {
+      appendScheduleRun(deps.home, run);
+    } catch (error) {
+      unrecordedRuns.set(runId, run);
+      log(`运行 ${runId} 写不进台账（会话已在跑，先记在内存里）：${error instanceof Error ? error.message : String(error)}`);
+    }
     log(`调度任务 ${task.name} 已发起运行 ${runId}（会话 ${started.sessionId}）`);
     return run;
   }
@@ -310,7 +380,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       return;
     }
     const records = readScheduleRuns(deps.home);
-    const open = openRuns(records);
+    // RUNS THAT NEVER REACHED THE LEDGER ARE STILL RUNNING: the session is
+    // live, so it holds its repo and it must settle like any other run.
+    const open = [...openRuns(records), ...unrecordedRuns.values()];
     const repos = new Map(table.file.tasks.map((task) => [task.id, task.repo] as const));
 
     // SETTLE FIRST: a run that just ended must release its repo in THIS tick,
@@ -336,6 +408,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           unmet: decision.unmet,
         });
         settled.add(run.runId);
+        unrecordedRuns.delete(run.runId);
         log(`运行 ${run.runId}（任务 ${run.taskId}）结算：${decision.outcome}${decision.verdict === null ? "" : `（${decision.verdict}）`}`);
       } catch (error) {
         log(`运行 ${run.runId} 结算失败（下次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
@@ -352,20 +425,29 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       try {
         const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
         if (!decision.due) continue;
+        const slot = slotKey(task.id, decision.scheduledAt);
+        // THE SAME SLOT IS NOT STARTED TWICE, even when nothing can be
+        // written: a session that was started but not recorded would otherwise
+        // be started again on every tick, forever.
+        if (unrecordedSlots.has(slot)) {
+          log(`调度任务 ${task.name} 的这个时间点已经起过会话、只是没能落盘（写不进去），本次不重复启动`);
+          continue;
+        }
         const holder = repoHolder(stillOpen, task.repo, repoOfRun);
         if (holder !== undefined) {
-          skipped(task, at, `repo ${task.repo} 上还有未结算的运行 ${holder.runId}（任务 ${holder.taskId}，${holder.at} 起）—— 两个写者不能同时进同一个 checkout`);
+          skipped(task, at, `repo ${task.repo} 上还有未结算的运行 ${holder.runId}（任务 ${holder.taskId}，${holder.at} 起）—— 两个写者不能同时进同一个 checkout`, slot);
           continue;
         }
         // A RUN STARTED IN THIS TICK IS OPEN TOO: without adding it, two tasks in
         // one repo that are both due would both start here — the second seeing a
         // `stillOpen` computed before the first one existed.
-        const run = fire(task, at);
+        const run = fire(task, at, slot);
         if (run !== undefined) stillOpen.push(run);
       } catch (error) {
         log(`调度任务 ${task.id} 处理失败（下次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    pruneUnrecorded(at.getTime());
   }
 
   return {
@@ -403,10 +485,19 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   }
 }
 
+/**
+ * A slot's identity: the task plus the CRON INSTANT, never the tick's clock.
+ * Two ticks inside one minute must name the same slot — that is the whole
+ * point of remembering it — while the next cron minute is a different slot.
+ */
+function slotKey(taskId: string, scheduledAt: Date | null): string {
+  return `${taskId}@${scheduledAt === null ? "" : scheduledAt.getTime()}`;
+}
+
 /** The opening message a scheduled run starts with. */
-export function runTaskText(task: ScheduledTask, at: Date): string {
+export function runTaskText(task: ScheduledTask, at: Date, runId: string): string {
   return [
-    `这是定时任务 ${task.name} 的一次运行（${at.toISOString()} 发起）：${task.requirement}`,
+    `这是定时任务 ${task.name} 的一次运行（${runId}，${at.toISOString()} 发起）：${task.requirement}`,
     "",
     "本次运行的契约（用户已批准）见 `.pi/loop-goal.md`（门禁会在 session_start 继承它）。" +
       "干完活按门禁流程走：有代码改动就 `judge_submit` 送 reviewer，READY 之后才 `declare_done`。",

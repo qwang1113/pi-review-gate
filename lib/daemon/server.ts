@@ -389,7 +389,13 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
             ? `面板只能改 ${PANEL_SCHEDULE_FIELDS.join(" / ")}（收到 ${extra.join("、")}）—— 需求、repo 与契约请走 POST /api/schedules/author`
             : verdict.problem);
         }
-        const outcome = updateScheduledTask(opts.home, found.task.id, patch, { from: "panel" });
+        // THE VERSION WE JUST READ GOES INTO THE WRITE: the scheduler stamps
+        // `lastFiredAt` on the same document, and a panel edit that lost that
+        // race must be refused ("请重读") rather than overwrite a newer slot.
+        const outcome = updateScheduledTask(opts.home, found.task.id, patch, {
+          from: "panel",
+          expectedVersion: found.version,
+        });
         if (!outcome.ok) return bad(400, outcome.problem);
         return ok({ ok: true, task: outcome.value, version: outcome.version });
       },
@@ -400,7 +406,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
       handler: (ctx): Reply => {
         const found = taskById(opts.home, ctx.params.id!);
         if ("reply" in found) return found.reply;
-        const removed = removeScheduledTask(opts.home, found.task.id);
+        const removed = removeScheduledTask(opts.home, found.task.id, { expectedVersion: found.version });
         if (!removed.ok) return bad(400, removed.problem);
         return ok({ ok: true, task: removed.value, version: removed.version });
       },
@@ -734,12 +740,12 @@ function isTarget(value: string): value is ConfigTargetName {
  * quotes an id back, and a name that happens to be another task's id must not
  * make a `PUT` land on the wrong row).
  */
-function taskById(home: string, id: string): { task: ScheduledTask } | { reply: Reply } {
+function taskById(home: string, id: string): { task: ScheduledTask; version: number } | { reply: Reply } {
   const read = readSchedules(home);
   if (!read.ok) return { reply: bad(500, read.problem) };
   const task = read.file.tasks.find((candidate) => candidate.id === id);
   if (task === undefined) return { reply: bad(404, `没有这个调度任务：${id}`) };
-  return { task };
+  return { task, version: read.file.version };
 }
 
 /**

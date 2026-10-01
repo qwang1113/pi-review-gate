@@ -261,6 +261,7 @@ test("a tick fires a due task once, and a restart does not fire it again", () =>
   assert.ok(creation.includes("RG_GATE_MODE=loop"), creation.join(" "));
   const opening = creation.slice(creation.indexOf("--") + 1).join(" ");
   assert.match(opening, new RegExp(`这是定时任务 ${scheduled.name} 的一次运行`));
+  assert.match(opening, /run-[0-9a-f]{8}/, "the run id names WHICH run this is");
   assert.match(opening, /每天跑一次审计/);
   assert.match(opening, /\.pi\/loop-goal\.md/);
   assert.match(opening, /judge_submit/);
@@ -367,6 +368,28 @@ test("the tick does nothing at all when the table cannot be read", () => {
   assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0);
 });
 
+test("a ledger that cannot be written starts ONE session for a slot, never one per tick", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  dueTask(home, repo, { name: "task-a" });
+  // The ledger path as a DIRECTORY: `appendScheduleRun` throws EISDIR on every
+  // tick, while the table still writes. The session that got started cannot be
+  // un-started, so the SLOT must count as dealt with regardless — otherwise
+  // every 20-second tick starts another real session, forever (quality round
+  // P1, 2026-10-02; `dealt` therefore runs BEFORE the append, and the slot is
+  // also remembered in memory in case the stamp itself fails).
+  mkdirSync(scheduleRunsPath(home), { recursive: true });
+  const tmux = fakeTmux();
+  const scheduler = createScheduler({ home, runTmux: tmux, observer: fakeObserver([]) });
+  scheduler.tick();
+  scheduler.tick();
+  scheduler.tick();
+  const launches = tmux.calls.filter((argv) => argv[0] === "new-session" || argv[0] === "new-window").length;
+  assert.equal(launches, 1, "one slot, one session — a failed ledger write is not a reason to start another");
+  const table = readSchedules(home);
+  assert.equal(table.ok && table.file.tasks[0]!.lastFiredAt !== null, true, "the stamp landed, so the slot is dealt with on disk too");
+});
+
 test("one task's failure does not take the tick with it, and neither does a broken clock", () => {
   const home = scratchHome();
   const repo = scratchRepo();
@@ -390,9 +413,9 @@ test("one task's failure does not take the tick with it, and neither does a brok
   assert.doesNotThrow(() => broken.start());
 });
 
-test("runTaskText names the task, its requirement and the gate's own steps", () => {
-  const text = runTaskText(task({ name: "nightly" }), new Date(2026, 9, 1, 9, 0));
-  assert.match(text, /这是定时任务 nightly 的一次运行/);
+test("runTaskText names the task, its requirement, this run and the gate's own steps", () => {
+  const text = runTaskText(task({ name: "nightly" }), new Date(2026, 9, 1, 9, 0), "run-abc12345");
+  assert.match(text, /这是定时任务 nightly 的一次运行（run-abc12345/);
   assert.match(text, /每天 09:00 跑一次审计/);
   assert.match(text, /\.pi\/loop-goal\.md/);
   assert.match(text, /judge_submit/);
