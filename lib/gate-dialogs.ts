@@ -43,6 +43,7 @@ import {
 } from "./multi-choice-dialog.ts";
 import { editorTextOf, hostEditorFallback, hostReasonEditor, REASON_EDITOR_BACK, type CustomDialogHost } from "./reason-editor.ts";
 import { raceWithUserProxy } from "./user-proxy.ts";
+import { createExternalAnswers, type ExternalAnswerChannel } from "./external-answer.ts";
 import type { UserNotifyKind } from "./user-notify.ts";
 import type { DialogProxy } from "./dialog-proxy.ts";
 import type { Ref, SessionHost } from "./session-host.ts";
@@ -50,8 +51,21 @@ import type { Ref, SessionHost } from "./session-host.ts";
 /** pi's editor component CLASS, as a type — see `loadEditorComponent`. */
 type EditorComponentCtor = (typeof import("@earendil-works/pi-coding-agent"))["ExtensionEditorComponent"];
 
-/** The options every dialog call site may pass — the one shared shape. */
-export type AskOpts = AskChoiceOpts;
+/**
+ * The options every dialog call site may pass — the one shared shape, plus
+ * the two things ONLY the external answer channel reads.
+ *
+ * THEY ARE NOT ON `AskChoiceOpts` (lib/choice-dialog.ts is pure rendering and
+ * owns nothing about a channel), and they are OPTIONAL: a caller that says
+ * nothing still gets a describable question — `topic` falls back to `other`
+ * and a question with no batch stamp is simply not part of an interview.
+ */
+export interface AskOpts extends AskChoiceOpts {
+  /** The channel's topic word for this question (docs/daemon/api.md §7.2). */
+  topic?: string;
+  /** This question is one of an interview batch; the stamp groups them on the panel. */
+  batch?: { id: string; index: number; total: number };
+}
 
 type UiCtx = { ui?: ChoiceUi; signal?: AbortSignal };
 
@@ -269,6 +283,13 @@ export interface GateDialogDeps {
   lastUserInteractionAt: Ref<string | undefined>;
   /** How long a box waits for the user before the stand-in (`userProxy.waitMinutes`). */
   proxyWaitMs(): number;
+  /**
+   * THE THIRD ANSWER SOURCE (lib/external-answer.ts): the daemon's
+   * pending-question protocol. Built below from this session's own identity by
+   * default; injected to point it at a scratch home (tests), or to leave the
+   * dialogs exactly as they were before the channel existed.
+   */
+  externalAnswers?: ExternalAnswerChannel;
 }
 
 export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
@@ -283,6 +304,31 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
    * here and covers all of them at once.
    */
   const scheduleDialog = createDialogQueue();
+
+  /**
+   * THE THIRD ANSWER SOURCE, built from this session's own identity.
+   *
+   * It is READ LAZILY (a question can be raised before the first state
+   * exists) and it is ALLOWED TO FAIL: a host that cannot say which session it
+   * is has no external channel, which is precisely the behavior every dialog
+   * had before this channel existed.
+   */
+  const externalAnswers: ExternalAnswerChannel = deps.externalAnswers ?? createExternalAnswers({
+    identity: () => {
+      try {
+        const sessionId = host.state().sessionId;
+        return sessionId ? { sessionId } : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    // A channel that stops working must not stop the dialogs — but it should
+    // not be invisible either: the audit log is where "why is my question not
+    // on the panel" gets an answer.
+    log: (message) => {
+      try { host.log(message); } catch { /* the audit log is best-effort */ }
+    },
+  });
 
   /**
    * How many boxes are ON SCREEN right now — the one fact behind the pane's
@@ -354,6 +400,18 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
     // the queue work below, which is the moment this dialog owns the screen.
     let markDisplayed: (() => void) | undefined;
     const displayed = new Promise<void>((resolve) => { markDisplayed = resolve; });
+    // THE QUESTION GOES ON THE WIRE BEFORE THE BOX IS QUEUED (lib/external-
+    // answer.ts). Published here rather than inside the queue work so the
+    // panel can answer a question that is still waiting for its turn — the
+    // answer then settles the dialog before a box was ever drawn, and the
+    // queue drops the waiter on the same signal the other outcomes use.
+    const external = externalAnswers.open({
+      spec,
+      multiple: checkbox,
+      ...(opts.body === undefined ? {} : { body: opts.body }),
+      ...(opts.topic === undefined ? {} : { topic: opts.topic }),
+      ...(opts.batch === undefined ? {} : { batch: opts.batch }),
+    });
     // WHICH REPO, BOUND WHEN THE BOX APPEARS (review round 3 P1). The answer
     // belongs to the work this session was doing when the user would have SEEN
     // the question — and the active repo follows the edits, so a dialog
@@ -444,12 +502,20 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
     // user's place, and what it answers is recorded as a proxy decision (see
     // lib/dialog-proxy.ts) so the user can find it afterwards.
     //
+    // THE THIRD ANSWER IS RACED HERE, AND IT IS A USER (2026-10-01): an answer
+    // written from the web panel (lib/external-answer.ts) goes in as `direct`
+    // beside the box, so it beats the stand-in exactly as the human does — it
+    // is not a proxy decision, it raises no `byProxy`, and its arrival is what
+    // "the user answered" means on this side of the gate. A channel that never
+    // answers leaves its promise pending, so this stays the two-way race it
+    // always was.
+    //
     // THE RACE IS NOT WRITTEN HERE. Timing, the row check and the
     // human-always-wins rule live in lib/user-proxy.ts, the only arrangement
     // that makes them testable without waiting out the window — this function is
     // the single render point for all twelve dialogs and stays wiring.
     const decided = await raceWithUserProxy<string>({
-      direct: asked,
+      direct: Promise.race([asked, external.answer]),
       displayed,
       // EVERY BOX, NO EXCEPTIONS (2026-09-29, user decision): the stage
       // checklist, authorization questions and the relocation offer used to opt
@@ -459,8 +525,14 @@ export function createGateDialogs(host: SessionHost, deps: GateDialogDeps) {
       startProxy: (signal) => deps.proxy.answerFor(spec, opts.body, dialogRoot, signal),
       timeoutMs: deps.proxyWaitMs(),
     });
-    // Whatever settled it, the box is done — see `settledBy` above.
+    // Whatever settled it, the box is done — see `settledBy` above — and so is
+    // the question on the panel: the files go away in the same instant, so
+    // nobody is ever offered an answer to a dialog that is already closed.
     settledBy.abort();
+    external.close();
+    // An answer that came in from the panel IS the user answering (it is not a
+    // stand-in), so the stall breaker must read it as such.
+    if (external.answered()) deps.lastUserInteractionAt.current = new Date().toISOString();
     if (decided.byProxy !== undefined && decided.answer !== undefined) {
       deps.proxy.record(spec, decided.answer, decided.byProxy, dialogRoot);
       try { opts.onProxyAnswer?.(); } catch { /* the caller's own bookkeeping */ }

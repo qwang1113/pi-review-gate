@@ -339,6 +339,14 @@ export async function doAskUser(
         // Only the anchored question's answer settles its channel request; a
         // stand-in answer to a walked-back question is not that settlement.
         ...(cursor === anchor ? { onProxyAnswer } : {}),
+        // WHAT THE EXTERNAL CHANNEL NEEDS TO KNOW (lib/external-answer.ts):
+        // the topic word and the batch stamp the panel groups questions by.
+        // They travel structurally — `AskChoiceOpts` owns no channel concern —
+        // so a host that ignores them behaves exactly as before.
+        topic: "ask-user",
+        ...(batchId === undefined
+          ? {}
+          : { batch: { id: batchId, index: cursor, total: questions.length } }),
       };
       const picked = q.multiple
         ? await deps.askMultiChoice(uiCtx, spec, opts)
