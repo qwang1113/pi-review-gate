@@ -271,6 +271,48 @@ test("a session that disappears notifies — but only when the gate would have (
   }
 });
 
+test("a session that already finished is not reported as 异常结束 when it goes away (round-2 P1)", () => {
+  // THE OTHER HALF OF THE SAME FIX (quality round 2, 2026-10-01). `done` is a
+  // PANE word and the pane is what disappears first: the moment it is gone the
+  // word degrades to the registry's coarse `idle` (extensions/review-gate.ts
+  // writes only idle/working), while liveness flips 180 s later. Reading the
+  // death tick's own word therefore called a normally finished session
+  // "异常结束" — the one event the contract excludes (docs/daemon/api.md §8.2),
+  // and the exact shape of the round-1 fix's own regression.
+  const steps = [
+    daemonSession({ state: "done", stateSource: "pane" }),
+    daemonSession({ state: "idle", stateSource: "registry" }),
+  ];
+  // (a) it dies in place; (b) it is swept out of the list.
+  let live: DaemonSession[] = [steps[0]!];
+  const inPlace = watcherOver(() => live);
+  inPlace.tick();
+  live = [steps[1]!];
+  inPlace.tick();
+  live = [daemonSession({ state: "idle", stateSource: "registry", alive: false })];
+  inPlace.tick();
+  assert.equal(
+    inPlace.events.filter((event) => event.event === "notification").length,
+    0,
+    "a finished session that is exited later is not a crash",
+  );
+  inPlace.stop();
+
+  live = [steps[0]!];
+  const removed = watcherOver(() => live);
+  removed.tick();
+  live = [steps[1]!];
+  removed.tick();
+  live = [];
+  removed.tick();
+  assert.equal(
+    removed.events.filter((event) => event.event === "notification").length,
+    0,
+    "…and neither is one that leaves the list after finishing",
+  );
+  removed.stop();
+});
+
 test("a session that dies IN PLACE notifies on the liveness flip alone (review round 1 P1)", () => {
   // MEASURED (2026-10-01, quality round): the state word and liveness flip on
   // DIFFERENT polls. `working → idle` is not news, and the session's `alive`

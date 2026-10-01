@@ -429,6 +429,36 @@ interface Known {
   repo: string;
   mode: string;
   kind: string | null;
+  /**
+   * HAD THIS SESSION FINISHED by the last moment anything could say so — see
+   * `finishedSoFar`. Read here rather than off the current tick because the
+   * word that answers it is the FIRST thing a dying session loses.
+   */
+  finished: boolean;
+}
+
+/**
+ * DID THIS SESSION FINISH — asked the only way that stays true across ticks.
+ *
+ * WHY IT CANNOT BE READ OFF THE DEATH TICK (quality round 2, 2026-10-01; the
+ * real observer was driven to find it). Three clocks answer three different
+ * questions: `done` is a PANE word and leaves the moment the pane does (the
+ * registry's coarse `idle`/`working` takes its place — extensions/review-gate.ts
+ * writes only those two), the pane's own word turns `stalled` after 90 s, and
+ * liveness only flips after 180 s. So "it had finished" and "it is gone" are
+ * never the same tick, and the tick that reports the exit has already lost the
+ * word that would have said so: a normally finished session that is exited
+ * later came out as 异常结束, the one reading the contract excludes
+ * (docs/daemon/api.md §8.2).
+ *
+ * A FRESH word from the session's OWN pane is therefore the only source that
+ * can answer; whenever that is missing (registry / transcript fallback, or the
+ * pane's word gone stale) the answer is the last one the pane gave.
+ */
+function finishedSoFar(session: DaemonSession, previous: boolean | undefined): boolean {
+  if (previous === undefined) return session.state === "done";
+  if (!session.alive || session.stateSource !== "pane" || session.state === "stalled") return previous;
+  return session.state === "done";
 }
 
 export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatcher {
@@ -483,6 +513,7 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
         repo: session.repo,
         mode: session.mode,
         kind: session.kind,
+        finished: finishedSoFar(session, previous?.finished),
       };
       // A notification only ever follows a TRANSITION, and only for sessions the
       // gate itself would raise a banner for: a child, a judge or a worker asks
@@ -500,7 +531,7 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
           if (kind !== undefined) {
             const where = session.name === null ? session.sessionId : `@${session.name}`;
             notify(session, kind, kind === "needs-user" ? `${where} 正在等你回答。` : `${where} 已完成。`);
-          } else if (previous.alive && !session.alive && previous.state !== "done") {
+          } else if (previous.alive && !session.alive && !previous.finished) {
             // AN EXIT IS ITS OWN TRANSITION (review round 1, 2026-10-01). The
             // state word and liveness flip on DIFFERENT polls: `working → idle`
             // is not news, and `alive` only goes true → false on a LATER tick —
@@ -508,6 +539,10 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
             // nested under the state guard, the contract's own `exited` event
             // (docs/daemon/api.md §8.2) was unreachable on the ordinary path
             // (measured: zero notifications while the session died in place).
+            //
+            // …AND "NOT FINISHED" IS THE REMEMBERED ANSWER, never this tick's
+            // word (quality round 2 P1): by the time liveness flips, a finished
+            // session's `done` has long been replaced by the registry's `idle`.
             notify(session, "failed", `${session.name === null ? session.sessionId : `@${session.name}`} 异常结束。`);
           }
         }
@@ -526,7 +561,7 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
       if (present.has(sessionId)) continue;
       seen.delete(sessionId);
       opts.hub.emit({ event: "session", data: { kind: "removed", sessionId } }, sessionId);
-      if (previous.alive && previous.state !== "done" && notifiableFor(previous)) {
+      if (previous.alive && !previous.finished && notifiableFor(previous)) {
         notify(
           { sessionId, name: previous.name, repo: previous.repo },
           "failed",
