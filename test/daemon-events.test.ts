@@ -285,13 +285,21 @@ test("the watcher does not read a transcript nobody is watching", async () => {
   watcher.stop();
 });
 
-test("a subscription made before the transcript exists still receives its first output", () => {
-  const home = scratchHome();
-  const sessionId = "abc123";
-  const transcript = join(agentHome(home), "sessions", "--repo--", `2026-01-01T00-00-00-000Z_${sessionId}.jsonl`);
-  let exists = false;
+/**
+ * A watcher over ONE synthetic session whose transcript appears only when the
+ * returned `state.exists` is flipped — the panel's own moment, right after
+ * `POST /api/tasks`.
+ */
+function watcherOverAPendingTranscript(options: { home: string; sessionId: string; now?: () => number }) {
+  const state = { exists: false };
+  const transcript = join(
+    agentHome(options.home),
+    "sessions",
+    "--repo--",
+    `2026-01-01T00-00-00-000Z_${options.sessionId}.jsonl`,
+  );
   const session: DaemonSession = {
-    sessionId,
+    sessionId: options.sessionId,
     name: null,
     kind: "loop",
     repo: "/repo",
@@ -314,13 +322,25 @@ test("a subscription made before the transcript exists still receives its first 
   };
   const observer = {
     collect: () => ({ now: new Date().toISOString(), tmuxReadable: true, problems: [], sessions: [session] }),
-    transcriptFor: (id: string) => (id === sessionId && exists ? transcript : undefined),
+    transcriptFor: (id: string) => (id === options.sessionId && state.exists ? transcript : undefined),
     outputFor: () => [],
   } as unknown as SessionObserver;
   const hub = createSseHub();
   const events: DaemonEvent[] = [];
-  hub.add((event) => events.push(event), sessionId);
-  const watcher = createSessionWatcher({ observer, hub, intervalMs: 60_000 });
+  hub.add((event) => events.push(event), options.sessionId);
+  const watcher = createSessionWatcher({
+    observer,
+    hub,
+    intervalMs: 60_000,
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
+  return { state, events, watcher };
+}
+
+test("a subscription made before the transcript exists still receives its first output", () => {
+  const home = scratchHome();
+  const sessionId = "abc123";
+  const { state, events, watcher } = watcherOverAPendingTranscript({ home, sessionId });
 
   // THE PANEL'S OWN MOMENT: a session started seconds ago has written nothing
   // yet (`POST /api/tasks` then straight into the detail page).
@@ -330,12 +350,34 @@ test("a subscription made before the transcript exists still receives its first 
 
   // Everything the file will hold was written AFTER the subscription.
   writeTranscript(home, { sessionId, cwd: "/repo", records: [assistantRecord("第一句话")] });
-  exists = true;
+  state.exists = true;
 
   watcher.tick();
   const output = events.find((event) => event.event === "output");
   assert.ok(output, "the first output written after the subscription must reach it, not be bookmarked away");
   const entries = (output.data as { entries: { text: string }[] }).entries;
   assert.equal(entries[0]?.text, "第一句话");
+  watcher.stop();
+});
+
+test("a bookmark for a transcript that never appears expires instead of accumulating", () => {
+  const home = scratchHome();
+  const sessionId = "never-writes";
+  let clock = 1_700_000_000_000;
+  const { state, events, watcher } = watcherOverAPendingTranscript({ home, sessionId, now: () => clock });
+
+  // A stale deep link (or a session that disappeared before the subscription)
+  // parks a bookmark nobody will ever use. The panel keeps one global
+  // subscription alive, so "the subscriber is gone" cannot be observed — time
+  // is the bound, and the trade-off is deliberate: past the TTL the transcript
+  // is treated as history rather than as output written after the subscription.
+  watcher.prime(sessionId);
+  clock += 61_000;
+  watcher.tick();
+
+  writeTranscript(home, { sessionId, cwd: "/repo", records: [assistantRecord("迟到的话")] });
+  state.exists = true;
+  watcher.tick();
+  assert.equal(events.filter((event) => event.event === "output").length, 0, "an expired bookmark does not replay history");
   watcher.stop();
 });

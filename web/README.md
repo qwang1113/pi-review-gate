@@ -122,6 +122,8 @@ SSE 的 `session` 事件里 `removed` **只带 `sessionId`**（没有 `session` 
 | 候选仓库的**当前分支 / dirty** | `GET /api/repos` 只给 `path/name/source/lastSeenAt`。分支取自该 repo 上活跃会话报告的 `branch`（界面上标注了来源）；dirty 没有来源，不显示。 |
 | 已批准 goal / precommit 明细 / 模型健康 | 契约对门禁只暴露 `rounds`（sent/recorded/lastVerdict）、`unmet`、`gateStateFound`。门禁栏只渲染这些，没有凭空造的三张卡。 |
 | 启动失败的 stderr | 面板看不到 pane 里的输出，启动跟踪条只能给 tmux 跳转命令让用户自己去看。 |
+| 全局 SSE 会带上每个会话的 output | 契约的 `?sessionId=` 只能收窄到**一个**会话，收窄不到「只要 session 事件」—— 面板的全局订阅是为了会话列表，因此 daemon 会把每个会话的 output 增量也推过来（前端直接丢弃，但字节已经发出来了）。本地回环、会话数量有限，暂时接受。 |
+| `GET /api/repos` 从不返回 `source: "history"` | 契约 §5.6 声明 `session`/`history`/`root` 三种来源，daemon 实际只产出 `session` 与 `root`（`lib/daemon/control.ts`），所以「最近使用」分组在当前 daemon 上永不出现，且已退出会话的仓库被列进「正在运行」。面板按契约实现了三个分组。 |
 
 ---
 

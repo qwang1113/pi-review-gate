@@ -186,8 +186,18 @@ export function resolveAnswerList(
   request: AnswerableRequest,
   answers: readonly string[],
 ): { ok: true; answer: string } | { ok: false; reason: string } {
+  // THE DECLINE ROW IS ONE ANSWER, NOT A ROW AMONG ROWS (quality round P2,
+  // 2026-10-01): the text path accepts it verbatim (`resolveAnswer`), so this
+  // path must not refuse the same intent — and it must not silently drop the
+  // rows next to it either, hence the refusal when it arrives in company.
+  const decline = request.options.find(looksLikeDeclineRow);
   const rows: string[] = [];
   for (const item of answers) {
+    const text = item.trim();
+    if (decline !== undefined && text.startsWith(decline)) {
+      if (answers.length > 1) return { ok: false, reason: "退路行不能和别的选项一起提交" };
+      return { ok: true, answer: text };
+    }
     const read = readRow(item, request.options);
     if ("reason" in read) return { ok: false, reason: `多选答案里有一段读不出来：${read.reason}` };
     if (!rows.includes(read.row)) rows.push(read.row);

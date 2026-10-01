@@ -23,8 +23,7 @@ const SKELETON = `目标：
 验收：
 边界：`;
 
-export type Station = "precommit" | "commit" | "pr";
-export type GateMode = "loop" | "explore" | "normal" | "orchestrator";
+export type Station = "precommit" | "commit" | "pr";export type GateMode = "loop" | "explore" | "normal" | "orchestrator";
 
 interface Draft {
   repo: string;
@@ -144,7 +143,7 @@ export function NewTaskForm({ onLaunched }: { onLaunched: (sessionId: string, wi
                     这个 repo 已经有 {liveHere.length} 个活会话（{liveHere
                       .map((session) => session.name ?? session.sessionId.slice(0, 8))
                       .join("、")}
-                    ）。daemon 起的会话与它们**共用同一个 checkout** —— 面板不能替它开隔离 worktree，改动会互相看见。
+                    ）。daemon 起的会话与它们 <span className="font-medium">共用同一个 checkout</span> —— 面板不能替它开隔离 worktree，改动会互相看见。
                   </div>
                 )}
                 <div className="text-[11px] text-muted-foreground">

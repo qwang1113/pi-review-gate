@@ -136,8 +136,7 @@ export function QuestionCard({
           disabled={disabled === true}
           onChange={(event) => onChange({ ...draft, chosen: [event.target.value] })}
           placeholder="写下你的回答"
-        />
-      ) : (
+        />      ) : (
         <div className="mt-2 flex flex-col gap-1">
           {choices.map((option, index) => {
             const active = draft.chosen.includes(option);
@@ -213,10 +212,12 @@ export function draftToAnswer(
   draft: QuestionDraft,
 ): { value: string | string[]; reason?: string } {
   const reason = draft.reason.trim() === "" ? undefined : draft.reason.trim();
-  if (draft.chosen.length === 0) {
+  // A blank row is not a choice: a cleared free-text box arrives as `[""]`.
+  const chosen = draft.chosen.filter((item) => item.trim() !== "");
+  if (chosen.length === 0) {
     const row = declineRowOf(question) ?? ESCAPE_HATCH_LABEL;
     return { value: `${row}：${reason ?? ""}`, reason };
   }
-  const value = question.multiple ? draft.chosen : draft.chosen[0]!;
+  const value = question.multiple ? chosen : chosen[0]!;
   return { value, reason };
 }

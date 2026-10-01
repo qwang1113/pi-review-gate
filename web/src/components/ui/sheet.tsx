@@ -39,10 +39,6 @@ function SheetHeader({ className, ...props }: ComponentProps<"div">) {
   return <div data-slot="sheet-header" className={cn("flex flex-col gap-1 border-b px-5 py-4", className)} {...props} />;
 }
 
-function SheetBody({ className, ...props }: ComponentProps<"div">) {
-  return <div data-slot="sheet-body" className={cn("flex-1 overflow-y-auto px-5 py-4", className)} {...props} />;
-}
-
 function SheetFooter({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
@@ -53,4 +49,4 @@ function SheetFooter({ className, ...props }: ComponentProps<"div">) {
   );
 }
 
-export { Sheet, SheetContent, SheetHeader, SheetBody, SheetFooter, SheetTitle, SheetDescription };
+export { Sheet, SheetContent, SheetHeader, SheetFooter, SheetTitle, SheetDescription };

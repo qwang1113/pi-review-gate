@@ -42,6 +42,7 @@ export function OutputStream({ sessionId }: { sessionId: string }) {
     setEntries([]);
     let disposed = false;
     let retry: number | undefined;
+    let failures = 0;
     let source: EventSource | null = null;
 
     const open = () => {
@@ -51,6 +52,7 @@ export function OutputStream({ sessionId }: { sessionId: string }) {
       source = next;
       next.onopen = () => {
         if (disposed) return;
+        failures = 0;
         setConnected(true);
         setFailed(false);
       };
@@ -58,11 +60,23 @@ export function OutputStream({ sessionId }: { sessionId: string }) {
         if (disposed) return;
         const payload = parseOutputFrame((event as MessageEvent<string>).data);
         if (payload === null || payload.entries.length === 0) return;
-        setEntries((current) => [...current, ...payload.entries].slice(-MAX_ENTRIES));
+        setEntries((current) =>
+          // A reconnect REPLAYS the tail, so appending it would leave the same
+          // entries in the stream twice (reviewer P2, 2026-10-01). A replay is
+          // a re-sync: it replaces what is on screen.
+          payload.replay === true
+            ? payload.entries.slice(-MAX_ENTRIES)
+            : [...current, ...payload.entries].slice(-MAX_ENTRIES),
+        );
       });
       next.onerror = () => {
         if (disposed) return;
+        failures += 1;
         setConnected(false);
+        // A stream that cannot reconnect must not look like “nothing has
+        // happened yet”: after a few tries the panel says it cannot read this
+        // session (reviewer P2, 2026-10-01 — `failed` was never set before).
+        if (failures >= 3) setFailed(true);
         next.close();
         retry = window.setTimeout(open, 2000);
       };

@@ -189,7 +189,7 @@ test("a structured answers list is read row by row — option text may hold the 
   writeQuestion(home, "session-1", "q-text", at("q-text"));
 
   const asList = submitAnswer(home, { sessionId: "session-1", requestId: "q-list", answers: [options[0]!, options[1]!] });
-  assert.equal(asList.ok, true, asList.ok ? "" : asList.problem);
+  assert.equal(asList.ok, true, asList.problem ?? "结构化列表应当被接受");
   assert.equal(asList.answer, [options[0], options[1]].join(MULTI_ANSWER_SEPARATOR));
 
   // THE SAME TWO ROWS AS ONE STRING cannot survive: the text path has to split
@@ -220,11 +220,31 @@ test("a structured answers list is read row by row — option text may hold the 
     answers: [options[0]!, "不存在的一项"],
   });
   assert.equal(junk.ok, false);
-  assert.match(junk.ok ? "" : junk.problem, /读不出来/);
+  assert.match(junk.problem ?? "", /读不出来/);
 
   // The letters a single row would accept still work element by element.
   writeQuestion(home, "session-1", "q-letters", at("q-letters"));
   const letters = submitAnswer(home, { sessionId: "session-1", requestId: "q-letters", answers: ["A", "B"] });
-  assert.equal(letters.ok, true, letters.ok ? "" : letters.problem);
+  assert.equal(letters.ok, true, letters.problem ?? "字母也应当被认出来");
   assert.equal(letters.answer, [options[0], options[1]].join(MULTI_ANSWER_SEPARATOR));
+});
+
+test("a decline row is one answer on both paths, and never travels with a picked row", () => {
+  const home = scratchHome();
+  const options = ["甲", "乙", "✎ 不选，我说明原因"];
+  const at = (requestId: string): Record<string, unknown> => question({ requestId, options, recommended: options[0] });
+  const line = "✎ 不选，我说明原因：理由写在这里";
+
+  writeQuestion(home, "session-1", "q-decline-list", at("q-decline-list"));
+  const asList = submitAnswer(home, { sessionId: "session-1", requestId: "q-decline-list", answers: [line] });
+  assert.equal(asList.ok, true, asList.problem ?? "退路行应当被接受");
+  assert.equal(asList.answer, line);
+
+  writeQuestion(home, "session-1", "q-decline-text", at("q-decline-text"));
+  const asText = submitAnswer(home, { sessionId: "session-1", requestId: "q-decline-text", answer: line });
+  assert.equal(asText.answer, line, "两种形状对同一个意图给出同一个答案");
+
+  writeQuestion(home, "session-1", "q-decline-mixed", at("q-decline-mixed"));
+  const mixed = submitAnswer(home, { sessionId: "session-1", requestId: "q-decline-mixed", answers: ["甲", line] });
+  assert.equal(mixed.ok, false, "退路行不能和别的选项一起提交");
 });

@@ -56,7 +56,10 @@ export function QuestionBatch({
       questions.filter((question) => {
         const draft = drafts[question.requestId];
         if (draft === undefined) return true;
-        if (draft.chosen.length > 0) return false;
+        // The text a free-text question carries is `chosen[0]`, so clearing the
+        // box leaves `[""]` behind — a length nobody should read as "answered"
+        // (the daemon would refuse the empty answer).
+        if (draft.chosen.some((item) => item.trim() !== "")) return false;
         // Nothing picked is only an answer when the question carries the gate's
         // decline row — without it, free text is refused by the daemon and the
         // user would get a rejection instead of a submitted answer.

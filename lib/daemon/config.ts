@@ -100,6 +100,11 @@ export function configPath(target: ConfigTargetName, home: string, repo?: string
   if (target === "gate-global") return join(home, ".pi", "review-gate.json");
   const root = (repo ?? "").trim();
   if (root === "") throw new Error("gate-project 目标必须带 repo 参数");
+  // ANY ABSOLUTE DIRECTORY IS ACCEPTED, and that is the contract rather than an
+  // oversight — `docs/daemon/api.md` §5.7 「repo 的边界（明写）」: the caller holds
+  // the token, is the same user on this machine, and could start pi in that
+  // directory anyway; restricting this to `GET /api/repos` would be a boundary
+  // in name only. The panel still offers candidates only.
   return join(root, ".pi", "review-gate.json");
 }
 
