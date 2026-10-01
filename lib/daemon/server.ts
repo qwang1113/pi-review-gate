@@ -61,7 +61,7 @@ import type { TmuxRunner } from "../orchestrator-tmux.ts";
 /** Bodies are configuration and messages: small, and never a file upload. */
 export const MAX_BODY_BYTES = 512 * 1024;
 
-/** `GET /api/schedules/:id/runs` — the ledger window the panel asks for by default. */
+/** `GET /api/schedules/:id/runs` — the ledger window a caller gets when it names no `limit`. */
 export const DEFAULT_RUNS_LIMIT = 50;
 export const MAX_RUNS_LIMIT = 500;
 

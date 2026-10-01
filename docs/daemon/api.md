@@ -13,7 +13,7 @@
 - 它观测本机**所有** pi 会话（三个数据源见 §5），并对外提供：会话观测、发消息、发起任务、
   配置读写、待答问题、通知去重、静态面板。
 
-启动方式：`pi-gate daemon start`（`npm run daemon:start` 等价）。CLI 见 §9。
+启动方式：`pi-gate daemon start`（`npm run daemon:start` 等价）。CLI 见 §12。
 
 ---
 
@@ -38,7 +38,7 @@ token 由 daemon 首次启动时生成，写在 **`~/.pi/agent/rg-daemon.token`�
 | --- | --- | --- |
 | 缺 token / token 错 | `401` | `{"error":"缺少或错误的 token —— Authorization: Bearer <token>（SSE 可用 ?token=）"}` |
 | 未知 endpoint | `404` | `{"error":"没有这个 endpoint：…"}` |
-| 方法不对 | `405` | `{"error":"<METHOD> 不被这个 endpoint 支持"}` |
+| 方法不对 | `405` | `{"error":"<METHOD> 不被这个 endpoint 支持"}`（SSE 那一条是 `{"error":"SSE 只支持 GET"}`） |
 | 请求体不是合法 JSON | `400` | `{"error":"请求体不是合法 JSON"}` |
 | 请求体超过 512 KiB | `400` | `{"error":"请求体超过 524288 字节"}` |
 
@@ -240,7 +240,7 @@ peer 消息」，要回答用户就去问用户（`ask_user`）或在会话里�
 （`mode` 默认 `loop`，`station`/`name` 可省。）
 
 成功 `200`：`{ "ok": true, "sessionId": "<pi session id>", "scopeSession": "rg-…",
-"windowId": "@3", "paneId": "%9", "windowName": "kebab-name" }`
+"windowId": "@3", "paneId": "%9" }` —— 请求带了 `name` 时**多一个** `windowName`；没带 `name` 时这个键不存在
 
 实现：在自己**专属的 tmux session**（`rg-<slug>-daemon-<id尾>`，复用
 `lib/session-tmux-scope.ts` 的派生与归属标记）里 `tmux new-window` 起交互式 `pi`：
@@ -251,7 +251,7 @@ pi --session-id <uuid> [--name <name>] -- <任务描述> [+ 起名提示]
 
 环境变量：`RG_GATE_MODE=<mode>`、`RG_STATION_CAP=<station>`（交付站点上限）。
 
-**`mode` 只对 `loop` / `orchestrator` 真的生效（2026-10-01 实测）**：`RG_GATE_MODE` 是**spawner 交底**的通道，门禁只接受更**严**的起点（`lib/task-mode.ts` 的 `requestedModeFromEnv` 只认 enforced 模式；`explore` 只对一个 worker pane 生效）。所以用 `mode: "normal"` 起出来的会话**不是** normal：它起步时是 undecided（行为等于 loop，fail-closed），要降级得由会话里的 agent 自己走确认框问用户（或用户 `/gate-mode`）。daemon 不自行加限制，也不假称已经生效；面板对这两个值如实标注。
+**`mode` 只对 `loop` / `orchestrator` 真的生效（2026-10-01 实测）**：`RG_GATE_MODE` 是**spawner 交底**的通道，门禁只接受更**严**的起点（`lib/task-mode.ts` 的 `requestedModeFromEnv` 只把变量归一成四种模式之一，「非 enforced 不生效」的过滤在会话起步处 `lib/session-lifecycle.ts`；`explore` 只对一个 worker pane 生效）。所以用 `mode: "normal"` 起出来的会话**不是** normal：它起步时是 undecided（行为等于 loop，fail-closed），要降级得由会话里的 agent 自己走确认框问用户（或用户 `/gate-mode`）。daemon 不自行加限制，也不假称已经生效；面板对这两个值如实标注。
 
 拒绝（`400`，附具体原因）：repo 不是存在的目录 / 任务描述为空 / mode 或 station 不认识 /
 名字不合法（kebab-case，2–32）/ 名字已被活会话或生死不明者占用 / tmux 读不到。
@@ -370,11 +370,11 @@ daemon 据此不再列出它。
 | `schema` | ✅ | 必须是 `1` |
 | `requestId` / `sessionId` | ✅ | 与路径一致，且能定位到一次询问 |
 | `sessionName` | ✖ | 展示用；没有名字时 `null` |
-| `topic` | ✖ | 默认 `other`；与门禁渠道的 topic 词表一致（`ask-user`/`goal-approval`/…） |
+| `topic` | ✖ | 默认 `other`；生产方知道时给门禁自己的 topic 词（如 `ask-user`）。**不是每个门禁对话框都带**：需求反述与 goal 批准这两个目前落在默认值 `other` 上，消费方别拿它区分对话框 |
 | `title` | ✅ | 非空；对话框正文 |
 | `options` | ✖ | 选项文本（**不带** `A. ` 前缀；门禁自己渲染编号）。空数组 = 自由文本题 |
 | `multiple` | ✖ | 默认 `false`；`true` 时是复选框题 |
-| `recommended` | ✅(单选) | 单选必填且必须**逐字**等于 `options` 之一；多选可省 |
+| `recommended` | ✅(单选) | 单选**且 `options` 非空**时必填，且必须**逐字**等于 `options` 之一；多选可省（`options: []` 是自由文本题，没有可推荐的项） |
 | `defaultChecked` | ✖ | 多选默认勾选项（必须是 `options` 的子集） |
 | `payload` / `payloadRef` | ✖ | 长正文；超长时用 `payloadRef` 指向旁文件 |
 | `batchId`/`batchIndex`/`batchTotal` | ✖ | 一次采访的分组信息（与渠道的批量字段同义） |
@@ -479,12 +479,14 @@ daemon 在会话状态**发生迁移**时推出 `notification` 事件（不是�
 }
 ```
 
-`title`/`body`/`key` 由门禁自己的 `buildUserNotifyMessage` + `notifyKey` 生成 ——
-**与终端侧 `terminal-notifier` 对同一条事实算出的 key 完全相同**（这正是去重能跨两个发送方生效的原因）。
+`title`/`body`/`key` 由门禁自己的 `buildUserNotifyMessage` + `notifyKey` 生成（拼法两边同源），但
+**两边对同一条事实算出的 key 并不相同** —— 正文那一句一边是「@名字 正在等你回答。」、一边是「对话框标题 · 正文」。
+因此**跨发送方不去重**：两个发送方不会各发一条，靠的是 §8.1 的在场选举（app 在跑且发得出来时终端侧整体抑制）；
+这份台账只管**app 自己**的重复（终端侧用会话 sidecar 里自己的历史）。
 
 ### 8.3 去重存储
 
-`~/.pi/agent/rg-daemon/notifications/`（0600）：一目录，每 key 一个 claim 文件 + 一份追加式历史（形状见下）。
+`~/.pi/agent/rg-daemon/notifications/`（0700 —— 目录要 x 位才进得去；里面的文件才是 0600）：一目录，每 key 一个 claim 文件 + 一份追加式历史（形状见下）。
 去重窗口与频率上限**用门禁自己的规则**：`decideNotify`（`lib/user-notify.ts`）——本模块只把那条规则要读的 history
 现读出来（该 key 上次 claim 的时间 + 速率窗口内最近几次发送），不重写判定；`NOTIFY_DEDUP_MS` = 10 分钟、
 `NOTIFY_RATE_MAX` = 5 / 5 分钟。历史保留 **24 小时**（按龄清理，没有条数上限）。
@@ -518,8 +520,9 @@ claims/<sha256(key) 前 32 位>.json   每个 key 一个文件：谁声明的、
 history.jsonl                        只追加：每个已发的 claim 一行
 ```
 
-每个 key 的决定是**那个文件自己的 `link(2)`**（原子且互斥，不需要锁）；历史是追加写，两个进程的
-claim 不会互相覆盖。去重窗口与频率上限仍用门禁自己的 `NOTIFY_DEDUP_MS` / `NOTIFY_RATE_MAX`。
+每个 key 的决定就是**那个文件**：该 key 还没有记录时用 `link(2)` 建（原子且互斥，不需要锁），
+已有记录时用 `rename(2)` **原子替换**（去重窗口过后这条事实必须还能发出去，而 `link` 会永远撞在自己的旧文件上）；
+历史是追加写，两个进程的 claim 不会互相覆盖。去重窗口与频率上限仍用门禁自己的 `NOTIFY_DEDUP_MS` / `NOTIFY_RATE_MAX`。
 24 小时以前的 claim 与速率窗口以外的历史行在每次 claim 时清理。
 
 #### `GET /api/notifications?since=<ISO>&limit=<n>`
@@ -646,7 +649,7 @@ pi-gate daemon uninstall
 | 文件 | 内容 |
 | --- | --- |
 | `~/.pi/agent/rg-daemon/schedules.json` | `{schema, version, tasks[]}`：**该跑什么**。原子写、0600、每次写入 version +1 |
-| `~/.pi/agent/rg-daemon/schedule-runs.jsonl` | 追加式台账：**实际跑过什么**。0600，三个进程都写、没人重写；末尾的半行会被跳过 |
+| `~/.pi/agent/rg-daemon/schedule-runs.jsonl` | 追加式台账：**实际跑过什么**。0600，只追加、没人重写（写入方只有 daemon 的调度 tick；会话与面板只读它）；末尾的半行会被跳过 |
 
 ### 13.1 `ScheduledTask`（`GET /api/schedules` 里每个任务的字段）
 
@@ -661,7 +664,7 @@ pi-gate daemon uninstall
 | `enabled` | boolean | 关了就不触发 |
 | `createdAt` / `updatedAt` | string | ISO |
 | `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、跳过、起不来都算）—— 下一个时间点从这里数 |
-| `nextRunAt` | string \| null | **派生**：调度器正要处理的**那一个** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**落在过去有两解**：该任务确实欠着（下一个 tick 就处理），或它还有一次未结算的运行在跑（`GET /api/schedules/:id/runs` 里最后一条 `run-started` 没有对应的 `run-settled`）—— 后一种情况下它会一直停在过去，直到那次运行结算。`enabled:false` 或 cron 非法时是 `null` |
+| `nextRunAt` | string \| null | **派生**：调度器正要处理的**那一个** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**落在过去有两解**：该任务确实欠着（下一个 tick 就处理），或它还有一次未结算的运行在跑（`GET /api/schedules/:id/runs` 里最后一条 `run-started` 没有对应的 `run-settled`）—— 后一种情况下它会一直停在过去，直到那次运行结算。`enabled:false`、cron 非法、或 `createdAt` 读不出时间时是 `null` |
 | `describe` | string | **派生**：`describeCron` 的一行人话，如 `每天 09:00` |
 | `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-started` 不是结果，不列） |
 
@@ -670,13 +673,15 @@ pi-gate daemon uninstall
 `200`：`{ schema: 1, now, tasks: [{ …ScheduledTask, nextRunAt, describe, lastRuns }] }`。
 
 `500`：调度表读不了（损坏、权限、形状不对）。**不当作「没有任务」** —— 那会让一次人工修复
-变成一次静默停摆（store 的读侧同一条规则）。
+变成一次静默停摆（`readSchedules` 是同一条规则；给「有哪些任务」用的 `listScheduledTasks` /
+`findScheduledTask` 是另一回事 —— 它们把读不出来的表折成空表/未命中，调用方各自 fail-closed）。
 
 ### 13.3 `POST /api/schedules/author`
 
 请求：`{ "action": "create" | "update", "id"?, "name", "repo", "cron", "requirement" }`
 
-成功 `200`：`{ ok: true, sessionId, scopeSession, windowId, paneId }`（与 §5.7 同形）。
+成功 `200`：`{ ok: true, sessionId, scopeSession, windowId, paneId }`（§5.7 那四个字段；author 不带 `name`，
+所以不会有 `windowName`）。
 
 **这个 endpoint 自己不写调度表**：它按 §5.7 的同一套 tmux 机制起一个 loop 会话，首条消息要求它用
 `schedule_task({action:"create", …})` 把契约谈定 —— 那个工具会先弹需求反述、跑 goal 审计、
@@ -692,10 +697,12 @@ pi-gate daemon uninstall
 请求：**只接受 `cron` / `enabled` / `name`** 的任意子集。成功 `200`：`{ ok: true, task, version }`。
 
 - body 里出现 `requirement` / `repo` / `contract` ⇒ **`400`**，文案指向 `POST /api/schedules/author`
-  （判定是 store 的 `applyScheduleEdit({from:"panel"})`，server 不复写这条规则）。
-- 其它字段（含 `lastFiredAt`）⇒ `400`，文案列出面板能改的三个字段。
+  （这一条由 store 的 `applyScheduleEdit({from:"panel"})` 判）。
+- 其它字段（含 `lastFiredAt`）⇒ **`400`**，文案列出面板能改的三个字段。**「只有这三个」的白名单在 endpoint
+  自己手里**（`PANEL_SCHEDULE_FIELDS`）：store 的 panel 规则（`applyScheduleEdit`）只挡 authored 字段，
+  `lastFiredAt` 它仍认（gate 盖戳靠的就是它）—— 这两条清单目前不一致。
 - 未知 `id` ⇒ `404`；值不合法（cron 解析失败、name 形状或重名）⇒ `400`。
-- **`version` 冲突 ⇒ `400`**（「version 不匹配……有人同时改过，请重读」）：这次写入带走 handler 刚读到的 `version`（乐观锁）—— 期间调度器 stamp 过 `lastFiredAt`、或另一个面板写过，store 就拒绝而不是把更早的 `lastFiredAt` 写回去（那会让同一个时间点重复触发）。重读后再提交即可。
+- **`version` 冲突 ⇒ `400`**（「version 不匹配……有人同时改过，请重读」）：这次写入带走 handler 刚读到的 `version`（乐观锁）。PUT handler 从读到写是同步的，所以真正的窗口只有一个 —— **另一个进程**（会话里的 `schedule_task`、或另一个 daemon）在中间写过：那时 store 拒绝这次写入，而不是把两边合并。重读后再提交即可。
 
 ### 13.5 `DELETE /api/schedules/:id`
 
@@ -720,8 +727,11 @@ pi-gate daemon uninstall
 ### 13.7 调度器的行为（不在 HTTP 面上，但同属契约）
 
 - **到点才跑**：`enabled`、下一个 cron 时刻 ≤ now、且该任务没有未结算的运行。
-  **同一个时间点只处理一次** —— daemon 重启、tick 抖动都不重复跑（`lastFiredAt` 写在文件里，
-  不是内存里）。错过的时间点**不补跑**：离线一周的任务上线后只跑一次，然后按下一个时间点走。
+  **同一个时间点只处理一次** —— daemon 重启、tick 抖动都不重复跑（`lastFiredAt` 落在文件里，
+  那是跨进程、跨重启的那一份）。写盘失败（只读 home、磁盘满）时本次进程还会把那个 slot / 那次运行
+  记在内存里（`unrecordedSlots` / `unrecordedRuns`，按龄回收）：已经起出去的会话收不回来，
+  「同一个时间点不重复起」因此在坏盘上也成立。错过的时间点**不补跑**：离线一周的任务上线后只跑一次，
+  然后按下一个时间点走。
 - **一个 repo 同时只有一个运行**：该 repo 上还有未结算运行时本次不启动，写一条 `run-skipped`，
   `reason` 点名占着它的 `runId`（两个写者进同一个 checkout 会互相覆盖）。
 - **运行就是普通 loop 会话**：`RG_GATE_MODE=loop`、`RG_STATION_CAP=<契约里的 station>`、

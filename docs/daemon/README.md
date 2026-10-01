@@ -20,9 +20,12 @@
 | **手动** | `pi-gate daemon start` / `stop` / `status` | 一次性控制、调试 |
 | **会话自动拉起** | 什么都不用做 | 门禁在 `session_start` 时发现它不在线，就在后台把它拉起来 |
 
-三者共用同一份实现与同一把锁（`~/.pi/agent/rg-daemon/start.lock`），所以**永远只有一份**：
-已经在跑时再 `start` 只会打印它、退 0；两个进程同时启动也只有一个会 spawn。
-自动拉起失败只写日志（`review-gate[daemon] …`），**绝不阻塞、也绝不影响你的会话**。
+手动 `start` 与会话自动拉起共用同一份实现（探测 → 抢 `~/.pi/agent/rg-daemon/start.lock` → 起
+`daemon run`）：已经在跑时再 `start` 只会打印它、退 0；两个进程同时启动也只有一个会 spawn。
+launchd 那一份直接跑同一个 `daemon run`，它**不抢锁** —— 不会打架靠的是两件事：`run` 绑端口前先探测、
+已有一份在答就以 0 退出（否则在 `KeepAlive.SuccessfulExit=false` 下会变成每 30 s 重起的失败循环），
+以及端口本身（绑不上的那一份以 1 退出）。自动拉起失败只写日志（`review-gate[daemon] …`），
+**绝不阻塞、也绝不影响你的会话**。
 
 ```bash
 pi-gate daemon status     # 在线判定结果与理由（在线退 0，离线退 1）
@@ -80,7 +83,9 @@ daemon 自己带一个调度器：**到点起一个普通 loop 会话**去执行
 
 - **面板**：「新建定时任务」填 name / repo / cron / 需求 → 面板调 `POST /api/schedules/author`，
 daemon 起一个 authoring 会话跟你谈；
-- **会话**：在任何 pi 会话里直接说「每天 9 点跑一次 X」，agent 调 `schedule_task` 工具。
+- **会话**：在 loop / orchestrator 会话里直接说「每天 9 点跑一次 X」，agent 调 `schedule_task` 工具
+（judge / worker / 编排子会话 / normal 模式里这个工具只允许 `list` —— 契约协商要对话框，
+那四类会话没有可拿来当调度契约的本会话契约）。
 
 两条路是同一条：**先反述需求 → 你确认 → goal 审计 → 你批准 goal → 契约落表**。
 面板的写路径（`PUT /api/schedules/:id`）只接受 `name` / `cron` / `enabled`；当前面板 UI 提供
@@ -161,7 +166,9 @@ open menubar/build/PiGate.app
 - 菜单栏订阅 daemon 的 SSE `notification` 事件，事件里带着**门禁自己算好的**标题、正文与 key，
   发送前先 `POST /api/notifications/claim`：只有 `claimed: true` 才真的发；`duplicate`
   （10 分钟内同一条事实已发过）与 `throttled`（5 分钟最多 5 条）都不发。
-  台账是共享的，所以两个发送方不会各发一条同样的消息。
+  台账是**app 自己**的：终端侧走的是会话 sidecar 里它自己的历史，而且两边对同一条事实算出的 `key`
+  并不相同 —— 两个发送方不会各发一条，靠的是上面那条选举（app 在场时终端侧整体抑制），
+  不是这份台账。
 - 点击通知跳到该会话的面板页（`/sessions/<id>`）。
 - **通知权限被拒绝时静默降级**：菜单栏与其他功能照常，只是没有横幅 —— 而且**终端侧会接管**：
   app 把系统的授权状态写进心跳（`canPost`，每次都重新问 `getNotificationSettings`），

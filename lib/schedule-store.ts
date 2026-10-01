@@ -9,9 +9,10 @@
  * The table is one JSON document with a `version` that increments on every
  * write, and `update` / `remove` refuse an `expectedVersion` that does not
  * match what is on disk; a missing file is an empty table, an unreadable one is
- * a refusal. The ledger is append-only: three processes (the daemon's tick, a
- * gate session, the panel) can add a line without reading the others', and a
- * torn final line is skipped rather than fatal. Every path comes from an
+ * a refusal. The ledger is append-only: the daemon's tick is its only writer,
+ * and it never rewrites the file — so a gate session or the panel can read a
+ * line while the next one is being appended, and a torn final line is skipped
+ * rather than fatal. Every path comes from an
  * explicit `home` (the convention `lib/daemon/paths.ts` uses), so a test points
  * the whole store at a scratch directory.
  *
@@ -584,10 +585,12 @@ export function removeScheduledTask(
 // ---------------------------------------------------------------------------
 
 /**
- * Append one line to `schedule-runs.jsonl` (0600). Append-only on purpose: the
- * file three processes write and nobody rewrites, so there is no
- * read-modify-write window to lose an entry in. It throws on an unreadable
- * home or an unknown record kind — both are call-site bugs, not states.
+ * Append one line to `schedule-runs.jsonl` (0600). Append-only on purpose:
+ * only the daemon's tick writes this file and nothing ever rewrites it, so a
+ * session (or the panel) reading the ledger cannot lose an entry to a
+ * read-modify-write, and there is no window in which the file is half-rewritten.
+ * It throws on an unreadable home or an unknown record kind — both are
+ * call-site bugs, not states.
  */
 export function appendScheduleRun(home: string, record: ScheduleRunRecord): void {
   if (!isRecord(record) || !RUN_KINDS.includes(String(record.kind))) {

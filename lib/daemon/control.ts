@@ -228,7 +228,11 @@ export function daemonTmuxScope(opts: {
     } catch { /* first launch */ }
     try {
       mkdirSync(daemonHome(opts.home), { recursive: true });
-      writeFileAtomic(repoPath, `${opts.anchorRepo}\n`);
+      // 0600 AT CREATION, like every other file the daemon keeps here: the
+      // contract's §11 file table says so for both of these
+      // (docs/daemon/api.md), and a mode is the one thing a later reader can
+      // check — not leaving it to the process umask.
+      writeFileAtomic(repoPath, `${opts.anchorRepo}\n`, { mode: 0o600 });
     } catch { /* best effort: a missing anchor only costs a second scope session */ }
     return opts.anchorRepo;
   };
@@ -241,7 +245,7 @@ export function daemonTmuxScope(opts: {
     write: (record) => {
       try {
         mkdirSync(daemonHome(opts.home), { recursive: true });
-        writeFileAtomic(recordPath, `${JSON.stringify(record, null, 2)}\n`);
+        writeFileAtomic(recordPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
       } catch { /* the marker in tmux is what makes reuse work; the record is a shortcut */ }
     },
     now: () => new Date().toISOString(),

@@ -1012,8 +1012,11 @@ this machine over loopback HTTP + SSE, and it is the one backend the web panel a
 bar app talk to. Its HTTP contract is frozen in `docs/daemon/api.md`; the user-facing guide is
 `docs/daemon/README.md`.
 
-**Three ways to start it, and they never fight** — all three go through the same `start.lock` and the
-same spawn (one implementation), so there is never a second daemon:
+**Three ways to start it, and they never fight** — the manual `start` and the session auto-start
+share one implementation (probe → `~/.pi/agent/rg-daemon/start.lock` → spawn `daemon run`), and the
+launchd job runs that same `daemon run`, which probes before binding and exits 0 when a daemon
+already answers (a bind that loses the port race exits 1, which `KeepAlive.SuccessfulExit=false`
+would otherwise turn into a restart loop) — so there is never a second daemon:
 
 | Way | How | What it is for |
 |---|---|---|

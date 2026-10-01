@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -272,4 +272,11 @@ test("a launch leaves no stray files in the agent home beyond its own scope reco
   const entries = readdirSync(join(home, ".pi", "agent", "rg-daemon"));
   assert.deepEqual(entries.sort(), ["identity", "scope-repo", "scope.json"]);
   assert.ok(readFileSync(join(home, ".pi", "agent", "rg-daemon", "scope-repo"), "utf8").includes(process.cwd()));
+  // …AND THE MODE THE CONTRACT PROMISES (docs/daemon/api.md §11 的文件表): 0600
+  // on both, not whatever the process umask happens to be — the record and the
+  // anchor repo are the daemon's own business, not every user on the machine's.
+  for (const name of ["scope.json", "scope-repo"]) {
+    const mode = statSync(join(home, ".pi", "agent", "rg-daemon", name)).mode & 0o777;
+    assert.equal(mode, 0o600, `${name} must be 0600 (§11), got 0o${mode.toString(8)}`);
+  }
 });

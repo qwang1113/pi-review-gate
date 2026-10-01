@@ -151,9 +151,10 @@ export function schedulesPath(home: string = homedir()): string {
 /**
  * The scheduled-run ledger (0600, append-only JSONL): what actually ran.
  *
- * Separate from the table on purpose — three processes append to it and none
- * of them rewrites it, so a run that started while another one settled cannot
- * lose an entry. The record shapes are `ScheduleRunRecord` in
+ * Separate from the table on purpose — only the daemon's tick appends to it
+ * and nothing ever rewrites it, so a run that started while another one settled
+ * cannot lose an entry, and a reader can read the file while it is being
+ * appended to. The record shapes are `ScheduleRunRecord` in
  * `lib/schedule-store.ts`.
  */
 export function scheduleRunsPath(home: string = homedir()): string {

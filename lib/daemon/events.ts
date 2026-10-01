@@ -256,7 +256,7 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
       let won = false;
       let lostToWriter = false;
       try {
-        mkdirSync(claimsDir, { recursive: true });
+        mkdirSync(claimsDir, { recursive: true, mode: 0o700 });
         const tmp = `${claimPathFor(input.key)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
         writeFileSync(tmp, `${JSON.stringify(entry)}\n`, { flag: "wx", mode: 0o600 });
         try {
@@ -300,7 +300,7 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
         };
       }
       try {
-        mkdirSync(dir, { recursive: true });
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
         // 0600 at CREATION, and `prune` re-asserts it: each line here is a
         // notification key, which is the rendered title+body (session names,
         // task names) — not something for every user on the machine (reviewer
