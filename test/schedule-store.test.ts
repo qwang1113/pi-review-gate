@@ -25,7 +25,6 @@ import {
   type NewScheduledTask,
   type ScheduleContract,
   type ScheduleEditPatch,
-  type ScheduledTask,
 } from "../lib/schedule-store.ts";
 import { scheduleRunsPath, schedulesPath } from "../lib/daemon/paths.ts";
 import { goalTextHash, normalizeGoalText } from "../lib/loop-goal.ts";

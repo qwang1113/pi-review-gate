@@ -166,6 +166,12 @@ function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], n
   // because the answer has to be what the scheduler will DO: a task with an
   // unsettled run is not dealt with until that run settles, so promising
   // 「下一个 tick 就会跑」 would be a lie for exactly that case.
+  //
+  // ONE LINE IS ENOUGH, unlike the daemon's own `openRuns()` (a started-minus-
+  // settled set difference): a task can never have two runs in flight —
+  // `dueDecision` refuses to start one while `openRun` is true — so "the newest
+  // line is a `run-started`" and "this task has an unsettled run" cannot
+  // diverge. `run-skipped` lines carry no run, so they are not part of the answer.
   const lastRun = runs.filter((r) => r.kind !== "run-skipped").at(-1);
   const openRun = lastRun?.kind === "run-started";
   const slot = dueDecision({ task, now, openRun }).scheduledAt;
