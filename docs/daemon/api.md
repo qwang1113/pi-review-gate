@@ -661,7 +661,7 @@ pi-gate daemon uninstall
 | `enabled` | boolean | 关了就不触发 |
 | `createdAt` / `updatedAt` | string | ISO |
 | `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、跳过、起不来都算）—— 下一个时间点从这里数 |
-| `nextRunAt` | string \| null | **派生**：调度器正要处理的**那一个** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**落在过去 = 已经欠着**（下一个 tick 就处理），不是「今天不跑了」；`enabled:false` 或 cron 非法时是 `null` |
+| `nextRunAt` | string \| null | **派生**：调度器正要处理的**那一个** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**落在过去有两解**：该任务确实欠着（下一个 tick 就处理），或它还有一次未结算的运行在跑（`GET /api/schedules/:id/runs` 里最后一条 `run-started` 没有对应的 `run-settled`）—— 后一种情况下它会一直停在过去，直到那次运行结算。`enabled:false` 或 cron 非法时是 `null` |
 | `describe` | string | **派生**：`describeCron` 的一行人话，如 `每天 09:00` |
 | `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-started` 不是结果，不列） |
 

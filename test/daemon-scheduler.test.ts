@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 import {
   createScheduler,
@@ -32,6 +32,7 @@ import {
   type ScheduledTask,
 } from "../lib/schedule-store.ts";
 import type { DaemonSession, SessionObserver } from "../lib/daemon/sessions.ts";
+import { scheduleRunsPath } from "../lib/daemon/paths.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import { fakeRunner, scheduleContract, scheduleTaskInput, scratchHome, scratchRepo } from "./daemon-helpers.ts";
 
@@ -364,6 +365,29 @@ test("the tick does nothing at all when the table cannot be read", () => {
   scheduler.tick();
   assert.equal(readScheduleRuns(home).length, 0);
   assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0);
+});
+
+test("one task's failure does not take the tick with it, and neither does a broken clock", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  dueTask(home, repo);
+  // The ledger path as a DIRECTORY: `appendFileSync` throws EISDIR on it — a
+  // write that THROWS, which is exactly what a resident daemon must survive.
+  mkdirSync(scheduleRunsPath(home), { recursive: true });
+  const scheduler = createScheduler({ home, runTmux: fakeTmux(), observer: fakeObserver([]) });
+  assert.doesNotThrow(() => scheduler.tick(), "one task's failure must not escape the tick");
+
+  // And the outermost guard: a tick that throws on its first line is logged,
+  // not an uncaught exception out of a timer callback (that is a daemon that
+  // dies and does not come back by itself).
+  const broken = createScheduler({
+    home,
+    runTmux: fakeTmux(),
+    observer: fakeObserver([]),
+    now: () => { throw new Error("clock broke"); },
+    clock: { every: () => (() => { /* nothing to cancel */ }) },
+  });
+  assert.doesNotThrow(() => broken.start());
 });
 
 test("runTaskText names the task, its requirement and the gate's own steps", () => {

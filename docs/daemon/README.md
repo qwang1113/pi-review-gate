@@ -102,7 +102,7 @@ daemon 起一个 authoring 会话跟你谈；
 
 | 症状 | 看哪里 |
 | --- | --- |
-| 到点没动静 | `GET /api/schedules` 的 `nextRunAt`：落在**过去**说明欠着（下一个 tick 就处理）；`enabled:false` 则根本没有下一次 |
+| 到点没动静 | `GET /api/schedules` 的 `nextRunAt`：落在**过去**说明欠着（下一个 tick 就处理）—— 但如果 `GET /api/schedules/:id/runs` 里最后一条 `run-started` 没有对应的 `run-settled`，它是在等那次运行结束；`enabled:false` 则根本没有下一次 |
 | 没跑起来 | `GET /api/schedules/:id/runs`：`run-skipped` 的 `reason` 说清为什么（repo 被占、起会话失败） |
 | 会话起来了但不干活 | 面板打开那个会话（`GET /api/sessions` 里找 `RG_SCHEDULE_RUN` 对应的那条）—— 它就是一个普通会话，等回答 / 卡住都照旧显示 |
 | outcome 看不懂 | `passed` 只来自 READY；`gone` = 读不到门禁 state 或会话异常消失；`failed` = 结束了但结论不是 READY/BLOCKED |

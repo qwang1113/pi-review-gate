@@ -318,20 +318,28 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     const collection = open.length === 0 ? undefined : deps.observer.collect();
     const settled = new Set<string>();
     for (const run of open) {
-      const session = collection?.sessions.find((candidate) => candidate.sessionId === run.sessionId);
-      const decision = settlementFor({ run, session, now: at });
-      if (!decision.settle) continue;
-      appendScheduleRun(deps.home, {
-        kind: "run-settled",
-        runId: run.runId,
-        taskId: run.taskId,
-        at: at.toISOString(),
-        outcome: decision.outcome ?? "failed",
-        verdict: decision.verdict,
-        unmet: decision.unmet,
-      });
-      settled.add(run.runId);
-      log(`运行 ${run.runId}（任务 ${run.taskId}）结算：${decision.outcome}${decision.verdict === null ? "" : `（${decision.verdict}）`}`);
+      // ONE RUN'S FAILURE MUST NOT TAKE THE TICK WITH IT: a home that went
+      // read-only, a full disk, a store that refuses a write — the daemon is
+      // resident, and the run is retried on the next tick against the same
+      // durable ledger.
+      try {
+        const session = collection?.sessions.find((candidate) => candidate.sessionId === run.sessionId);
+        const decision = settlementFor({ run, session, now: at });
+        if (!decision.settle) continue;
+        appendScheduleRun(deps.home, {
+          kind: "run-settled",
+          runId: run.runId,
+          taskId: run.taskId,
+          at: at.toISOString(),
+          outcome: decision.outcome ?? "failed",
+          verdict: decision.verdict,
+          unmet: decision.unmet,
+        });
+        settled.add(run.runId);
+        log(`运行 ${run.runId}（任务 ${run.taskId}）结算：${decision.outcome}${decision.verdict === null ? "" : `（${decision.verdict}）`}`);
+      } catch (error) {
+        log(`运行 ${run.runId} 结算失败（下次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     const stillOpen = open.filter((run) => !settled.has(run.runId));
     const repoOfRun = (run: ScheduleRunStarted): string | undefined =>
@@ -341,18 +349,22 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       collection?.sessions.find((candidate) => candidate.sessionId === run.sessionId)?.repo;
 
     for (const task of table.file.tasks) {
-      const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
-      if (!decision.due) continue;
-      const holder = repoHolder(stillOpen, task.repo, repoOfRun);
-      if (holder !== undefined) {
-        skipped(task, at, `repo ${task.repo} 上还有未结算的运行 ${holder.runId}（任务 ${holder.taskId}，${holder.at} 起）—— 两个写者不能同时进同一个 checkout`);
-        continue;
+      try {
+        const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
+        if (!decision.due) continue;
+        const holder = repoHolder(stillOpen, task.repo, repoOfRun);
+        if (holder !== undefined) {
+          skipped(task, at, `repo ${task.repo} 上还有未结算的运行 ${holder.runId}（任务 ${holder.taskId}，${holder.at} 起）—— 两个写者不能同时进同一个 checkout`);
+          continue;
+        }
+        // A RUN STARTED IN THIS TICK IS OPEN TOO: without adding it, two tasks in
+        // one repo that are both due would both start here — the second seeing a
+        // `stillOpen` computed before the first one existed.
+        const run = fire(task, at);
+        if (run !== undefined) stillOpen.push(run);
+      } catch (error) {
+        log(`调度任务 ${task.id} 处理失败（下次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
       }
-      // A RUN STARTED IN THIS TICK IS OPEN TOO: without adding it, two tasks in
-      // one repo that are both due would both start here — the second seeing a
-      // `stillOpen` computed before the first one existed.
-      const run = fire(task, at);
-      if (run !== undefined) stillOpen.push(run);
     }
   }
 
@@ -360,22 +372,35 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     tick,
     start() {
       if (stopTimer !== undefined) return;
-      tick();
-      stopTimer = clock.every(intervalMs, () => {
-        if (running) return;
-        running = true;
-        try {
-          tick();
-        } finally {
-          running = false;
-        }
-      });
+      guardTick();
+      stopTimer = clock.every(intervalMs, guardTick);
     },
     stop() {
       if (stopTimer !== undefined) stopTimer();
       stopTimer = undefined;
     },
   };
+
+  /**
+   * A tick a RESIDENT process can survive.
+   *
+   * The store's append-only ledger throws on a home it cannot write, and an
+   * uncaught throw out of a timer callback is a daemon that dies and does not
+   * come back by itself — one full disk would take the whole machine's session
+   * supervision with it. The throw is logged and the next tick tries again
+   * against the same durable state.
+   */
+  function guardTick(): void {
+    if (running) return;
+    running = true;
+    try {
+      tick();
+    } catch (error) {
+      log(`调度 tick 失败（下次再试）：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      running = false;
+    }
+  }
 }
 
 /** The opening message a scheduled run starts with. */
