@@ -82,7 +82,11 @@ export function adoptScheduledRunContract(
   ctx: unknown,
   env: NodeJS.ProcessEnv = process.env,
 ): ScheduledRunAdoption {
-  /** Fail-closed: nothing is written, and a real mismatch leaves ONE log line. */
+  /**
+   * Fail-closed: nothing is written, and a REAL mismatch leaves one log line.
+   * A session with no `RG_SCHEDULE_*` at all is silent on purpose — that is
+   * every ordinary session start, and a line per start would be noise.
+   */
   const skip = (reason: string, quiet = false): ScheduledRunAdoption => {
     if (!quiet) deps.log(`schedule_task: 本次会话没有继承调度契约（${reason}）`);
     return { adopted: false, reason };

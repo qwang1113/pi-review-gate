@@ -87,8 +87,10 @@ daemon 起一个 authoring 会话跟你谈；
  authoring 会话重谈** —— 契约绑着你批准过的那两段文本的 hash，一个文本框悄悄改掉需求，
 这个定时任务就不再是你批准的那个了。
 
-运行起来的会话里，`RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN` 标着是哪个任务的哪一次运行，
-契约文本由门禁在 `session_start` 从 `.pi/loop-goal.md` 继承；干完活照常走门禁
+运行起来的会话里，`RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN` 标着是哪个任务的哪一次运行；
+门禁在 `session_start` 按它们把契约**从 `schedules.json` 读回来**（hash 校验 + 任务 repo 相符 +
+台账里那条 `run-started` 就是本会话，四道闸全过才生效），**写出** `.pi/loop-goal.md` 与 sidecar 的
+`restatement` / `loopGoal`；干完活照常走门禁
 （有代码改动就要过 reviewer）—— 台账里**只有记录过 READY** 的那次才算 `passed`。
 
 **两条不会变的行为**：

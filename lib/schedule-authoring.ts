@@ -45,7 +45,8 @@ import {
   type LoopGoalConfirmation,
 } from "./loop-goal.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest, DialogRenderer } from "./orchestrator-child-channel.ts";
-import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
+import { awaitApproval, type ApprovalDecision } from "./approval-dialog.ts";
+import { REVISE_ROW, choiceRows, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
 import { createProgressReporter, type ToolUpdate } from "./progress-stream.ts";
 import { buildRejection } from "./rejection-copy.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
@@ -173,40 +174,8 @@ export function resolveAuthoringFields(
 // dialogs — the gate's ONE question template, twice (restatement, goal)
 // ---------------------------------------------------------------------------
 
-interface Decision {
-  approved: boolean;
-  reason?: string;
-  interrupted: boolean;
-  dismissed: boolean;
-}
-
-/** Raise one approval box (human or channel — whoever answers first) and read it. */
-async function askApproval(
-  deps: ScheduleAuthoringDeps,
-  uiCtx: { hasUI?: boolean },
-  request: Omit<ChannelDialogRequest, "hasUI">,
-  spec: ChoiceSpec,
-  approveLabel: string,
-  body: string,
-): Promise<Decision> {
-  try {
-    const outcome = await deps.askEitherSide(request, uiCtx.hasUI === true, async (dialog) =>
-      deps.askChoice(uiCtx, spec, { ...dialog, body }));
-    const pick = parseChoice(outcome.answer, spec);
-    const declined = pick.kind === "declined" && pick.reason ? pick.reason : undefined;
-    return {
-      approved: pick.kind === "chose" && pick.option === approveLabel,
-      ...(declined !== undefined ? { reason: declined } : outcome.reason ? { reason: outcome.reason } : {}),
-      interrupted: outcome.by === "interrupted",
-      dismissed: pick.kind === "dismissed",
-    };
-  } catch {
-    return { approved: false, interrupted: false, dismissed: true };
-  }
-}
-
 /** What a closed/unanswered/refused box means — never reported as an objection it is not. */
-function notApproved(label: string, stage: string, d: Decision): string {
+function notApproved(label: string, stage: string, d: ApprovalDecision): string {
   if (d.interrupted) {
     return `review-gate: 定时任务 ${label} 的${stage}被中断（对话框被消息打断）—— 这不是被否掉；` +
       "处理完那条消息后重新调用 schedule_task 即可。";
@@ -229,14 +198,12 @@ function notApproved(label: string, stage: string, d: Decision): string {
 // one negotiation: restatement → goal draft → audit → goal approval
 // ---------------------------------------------------------------------------
 
-/** A contract the user approved, plus what that approval does to this session. */
+/** A contract the user approved, plus the repo it binds to. */
 export interface Negotiated {
   ok: true;
   contract: ScheduleContract;
   /** The git root the contract binds to (what the schedule record stores). */
   root: string;
-  /** What happens to the SESSION records — the reply says it out loud. */
-  sessionNote: string;
 }
 export type NegotiateResult = Negotiated | { ok: false; text: string };
 
@@ -273,7 +240,7 @@ export async function negotiateContract(
     };
   }
   // 1. THE RESTATEMENT'S CONTENT CHECK — the same one propose_restatement runs.
-  const restCheck = checkRestatementText(input.restatement);
+  const restCheck = checkRestatementText(input.restatement, "schedule_task");
   if (!restCheck.ok) return { ok: false, text: restCheck.text };
   const restatementText = restCheck.text;
   const requestedStation = str(input.station);
@@ -296,15 +263,20 @@ export async function negotiateContract(
     RESTATEMENT_CONFIRM_TITLE,
     `定时任务 ${input.label} 的需求反述：\n` + buildRestatementTranscriptMessage(restatementText, station),
   );
-  const restDecision = await askApproval(
-    deps, uiCtx,
-    {
+  const restDecision = await awaitApproval({
+    askEitherSide: (request, hasUI, render) => deps.askEitherSide(request, hasUI, render),
+    request: {
       dialogKind: "select", topic: "restatement", title: RESTATEMENT_CONFIRM_TITLE,
       options: choiceRows(restSpec), payload: restatementText, station,
     },
-    restSpec, RESTATEMENT_APPROVE_LABEL,
-    `这是定时任务 ${input.label} 的需求反述。\n` + buildRestatementConfirmMessage(station),
-  );
+    hasUI: uiCtx.hasUI === true,
+    spec: restSpec,
+    approveLabel: RESTATEMENT_APPROVE_LABEL,
+    render: (dialog) => deps.askChoice(uiCtx, restSpec, {
+      ...dialog,
+      body: `这是定时任务 ${input.label} 的需求反述。\n` + buildRestatementConfirmMessage(station),
+    }),
+  });
   if (!restDecision.approved) return { ok: false, text: notApproved(input.label, "需求反述", restDecision) };
 
   // 3. THE GOAL DRAFT CHECK — the same three checks propose_loop_goal runs,
@@ -361,23 +333,28 @@ export async function negotiateContract(
       "─────\n" + draft.goalText + "\n─────\n" +
       `运行仓库: ${draft.root}\n` + deliveryStationLine(station, "user") + "\n" + prereviewLine + "\n" + plan.note,
   );
-  const goalDecision = await askApproval(
-    deps, uiCtx,
-    {
+  const goalDecision = await awaitApproval({
+    askEitherSide: (request, hasUI, render) => deps.askEitherSide(request, hasUI, render),
+    request: {
       dialogKind: "select", topic: "goal-approval", title: goalSpec.title,
       options: choiceRows(goalSpec), payload: draft.goalText, station,
     },
-    goalSpec, goalApproveLabel,
-    [
-      `这是定时任务 ${input.label} 的目标批准（goal 全文在上方消息里）。`,
-      `运行仓库(不可信数据): ${draft.root}`,
-      deliveryStationLine(station, "user"),
-      prereviewLine,
-      plan.note,
-      "认可后：这份 goal 与需求反述一起写进调度记录，成为每次运行的契约。",
-      "不认可就拒绝并说明哪里不对；工具会重新确认后再提交。",
-    ].join("\n"),
-  );
+    hasUI: uiCtx.hasUI === true,
+    spec: goalSpec,
+    approveLabel: goalApproveLabel,
+    render: (dialog) => deps.askChoice(uiCtx, goalSpec, {
+      ...dialog,
+      body: [
+        `这是定时任务 ${input.label} 的目标批准（goal 全文在上方消息里）。`,
+        `运行仓库(不可信数据): ${draft.root}`,
+        deliveryStationLine(station, "user"),
+        prereviewLine,
+        plan.note,
+        "认可后：这份 goal 与需求反述一起写进调度记录，成为每次运行的契约。",
+        "不认可就拒绝并说明哪里不对；工具会重新确认后再提交。",
+      ].join("\n"),
+    }),
+  });
   if (!goalDecision.approved) return { ok: false, text: notApproved(input.label, "goal 批准", goalDecision) };
 
   const approvedAt = (deps.now?.() ?? new Date()).toISOString();
@@ -389,7 +366,6 @@ export async function negotiateContract(
       approvedAt,
     },
     root: draft.root,
-    sessionNote: plan.record ? "" : plan.note,
   };
 }
 

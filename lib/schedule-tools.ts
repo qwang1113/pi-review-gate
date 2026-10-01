@@ -56,6 +56,7 @@
 import { Type } from "typebox";
 
 import { describeCron } from "./cron-schedule.ts";
+import { dueDecision } from "./daemon/scheduler.ts";
 import { schedulesPath } from "./daemon/paths.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
 import { buildRejection } from "./rejection-copy.ts";
@@ -68,7 +69,6 @@ import {
 } from "./schedule-authoring.ts";
 import {
   addScheduledTask,
-  nextRunAtFor,
   readScheduleRuns,
   readSchedules,
   removeScheduledTask,
@@ -150,13 +150,20 @@ interface TaskView {
   describe: string;
   enabled: boolean;
   nextRunAt: string | null;
+  /** The slot is already in the past: a missed slot is dealt with on the next tick. */
+  overdue: boolean;
   station: DeliveryStation;
   /** The newest run of this task, or null when it never ran. */
   lastRun: { at: string; outcome: string; verdict: string | null; runId: string } | null;
 }
 
 function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], now: Date): TaskView {
-  const next = nextRunAtFor(task, now);
+  // THE SAME CLOCK THE DAEMON RUNS ON (and the panel shows): `dueDecision`
+  // counts the next slot from `lastFiredAt ?? createdAt`, so an overdue task
+  // reads as overdue instead of as "one period away" — the answer the user
+  // (and the agent) needs is what the scheduler will DO, not what a clock
+  // arithmetic would say from this instant.
+  const slot = dueDecision({ task, now, openRun: false }).scheduledAt;
   const settled = runs.filter((r) => r.kind === "run-settled").at(-1);
   const started = runs.filter((r) => r.kind === "run-started").at(-1);
   return {
@@ -166,7 +173,8 @@ function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], n
     cron: task.cron,
     describe: describeCron(task.cron),
     enabled: task.enabled,
-    nextRunAt: next ? next.toISOString() : null,
+    nextRunAt: slot ? slot.toISOString() : null,
+    overdue: slot !== null && slot.getTime() <= now.getTime(),
     station: task.contract.restatement.station,
     lastRun: settled && settled.kind === "run-settled"
       ? { at: settled.at, outcome: settled.outcome, verdict: settled.verdict, runId: settled.runId }
@@ -176,27 +184,37 @@ function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], n
   };
 }
 
-function listReply(home: string, tasks: readonly ScheduledTask[], deps: ScheduleToolDeps): ToolReply {
+/**
+ * The table, as the agent reads it. `version` goes out too: `expectedVersion`
+ * on a later write is an optimistic check against EXACTLY this number, and a
+ * value the caller cannot obtain is a parameter nobody can use.
+ */
+function listReply(home: string, tasks: readonly ScheduledTask[], version: number, deps: ScheduleToolDeps): ToolReply {
   const runs = readScheduleRuns(home);
   const now = deps.now?.() ?? new Date();
   const described = tasks.map((task) => describeTask(task, runs.filter((r) => r.taskId === task.id), now));
   if (described.length === 0) {
     return toolReply(
-      `review-gate: 当前没有任何定时任务（调度表：${schedulesPath(home)}，空）。\n` +
+      `review-gate: 当前没有任何定时任务（调度表：${schedulesPath(home)}，version ${version}，空）。\n` +
       "要新增，用 `schedule_task({action:\"create\", name, repo, cron, requirement, restatement, goal, station})`——" +
       "它会依次问你需求反述与 goal 批准。",
-      { tasks: [] },
+      { version, tasks: [] },
     );
   }
   const lines = described.map((t) => [
     `- ${t.name}（${t.id}）${t.enabled ? "" : " [已停用]"}`,
     `  repo: ${t.repo}`,
     `  cron: ${t.cron}（${t.describe}）`,
-    `  下次运行: ${t.nextRunAt ?? "（停用或 cron 无解，不再跑）"}`,
+    `  下次运行: ${t.nextRunAt === null
+      ? "（停用或 cron 无解，不再跑）"
+      : t.nextRunAt + (t.overdue ? "（已过期：daemon 下一个 tick 就会跑）" : "")}`,
     `  交付站点: ${t.station}`,
     `  最近一次运行: ${t.lastRun === null ? "从未运行" : `${t.lastRun.at} → ${t.lastRun.outcome}${t.lastRun.verdict ? `（${t.lastRun.verdict}）` : ""}`}`,
   ].join("\n"));
-  return toolReply(`review-gate: 定时任务 ${described.length} 条：\n` + lines.join("\n"), { tasks: described });
+  return toolReply(
+    `review-gate: 定时任务 ${described.length} 条（调度表 version ${version}）：\n` + lines.join("\n"),
+    { version, tasks: described },
+  );
 }
 
 function removeReply(home: string, params: Record<string, unknown>): ToolReply {
@@ -371,7 +389,7 @@ export async function doScheduleTask(
       next: "让人工修好那个文件（工具从不把读不出来的表当成空表——那会让下一笔写入覆盖掉盘上的任务），再重试。",
     }));
   }
-  if (action === "list") return listReply(home, table.file.tasks, deps);
+  if (action === "list") return listReply(home, table.file.tasks, table.file.version, deps);
   if (action === "remove") return removeReply(home, params);
 
   if (action === "update") {

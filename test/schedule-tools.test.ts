@@ -305,7 +305,9 @@ test("create: bad inputs are refused BEFORE any dialog or audit", async () => {
   const badRestatement = fake();
   out = await doScheduleTask(badRestatement.deps, createParams(badRestatement, { restatement: "改一下就好了" }), {}, undefined);
   assert.equal(out.isError, true, "a restatement that is not a restatement is refused by the shared content check");
-  assert.match(out.content[0]!.text, /反述/);
+  assert.match(out.content[0]!.text, /schedule_task rejected/, "the refusal names the tool that was actually called");
+  assert.doesNotMatch(out.content[0]!.text, /propose_restatement rejected/,
+    "…and never sends the reader to negotiate the SESSION's own goal instead");
   assert.deepEqual(badRestatement.surfaces, []);
   assert.equal(badRestatement.auditRuns, 0);
 });
@@ -404,6 +406,7 @@ test("list: every task with its run facts, and an empty table is a real answer",
   assert.equal(none.isError, undefined);
   assert.match(none.content[0]!.text, /当前没有任何定时任务/);
   assert.deepEqual(none.details?.tasks, []);
+  assert.equal(none.details?.version, 0, "the table version goes out with the list — expectedVersion is checked against it");
 
   const f = fake();
   seed(f, { name: "nightly-audit", cron: "0 3 * * *" });
@@ -419,8 +422,26 @@ test("list: every task with its run facts, and an empty table is a real answer",
   assert.equal(typeof tasks[0]?.nextRunAt, "string", "a waiting task names its next slot");
   assert.equal(tasks[0]?.lastRun, null, "never run yet");
   assert.match(String(tasks[0]?.describe), /03:00|3:00/);
+  assert.equal(out.details?.version, 2, "two writes ⇒ version 2, the number a later update may pass as expectedVersion");
+  assert.match(out.content[0]!.text, /调度表 version 2/);
   assert.match(out.content[0]!.text, /cron: 0 3 \* \* \*/);
   assert.match(out.content[0]!.text, /最近一次运行: 从未运行/);
+});
+
+test("list: a MISSED slot reads as overdue, not as one period away", async () => {
+  const f = fake();
+  seed(f);
+  // A month later: the task never ran, so its first slot is long past — the
+  // daemon will deal with that very slot on its next tick, and 「下次运行」
+  // must not claim it is a day away (the panel's `/api/schedules` reads the
+  // same `dueDecision`, so the two surfaces cannot disagree).
+  const later = new Date(Date.parse(APPROVED_AT) + 30 * 24 * 60 * 60 * 1000);
+  f.deps.now = () => later;
+  const out = await doScheduleTask(f.deps, { action: "list" }, {}, undefined);
+  const task = (out.details?.tasks as Array<Record<string, unknown>>)[0]!;
+  assert.equal(task.overdue, true);
+  assert.ok(Date.parse(String(task.nextRunAt)) < later.getTime(), String(task.nextRunAt));
+  assert.match(out.content[0]!.text, /已过期/);
 });
 
 // ---------------------------------------------------------------------------

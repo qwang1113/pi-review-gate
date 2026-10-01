@@ -725,7 +725,10 @@ pi-gate daemon uninstall
 - **一个 repo 同时只有一个运行**：该 repo 上还有未结算运行时本次不启动，写一条 `run-skipped`，
   `reason` 点名占着它的 `runId`（两个写者进同一个 checkout 会互相覆盖）。
 - **运行就是普通 loop 会话**：`RG_GATE_MODE=loop`、`RG_STATION_CAP=<契约里的 station>`、
-  `RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`（本次运行的标识）；契约文本由门禁在 `session_start`
-  从 `.pi/loop-goal.md` 继承。
+  `RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`（本次运行的标识）；门禁在 `session_start` 按这两个变量
+  把契约**从 `schedules.json` 读回来**（两个 hash 与文本相符 + 任务 repo 就是本会话 repo +
+  台账里有本 runId 且 `sessionId` 就是本会话的 `run-started` 记录，四道闸全过才生效），再**写出**
+  `.pi/loop-goal.md` 与 sidecar 的 `restatement` / `loopGoal`（`lib/schedule-run-contract.ts`）；
+  任一道闸不过就什么都不写、只记一条日志，运行会话只好自己重新谈 goal（fail-closed）。
 - **结算**：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒ 写 `run-settled`。
   刚起的会话在观测里要过一会儿才出现，这段宽限期内「没看见」不算消失。

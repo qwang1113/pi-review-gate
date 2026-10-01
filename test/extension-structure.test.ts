@@ -215,6 +215,12 @@ const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit", 
  */
 const GOAL_TOOLS_SRC = readFileSync(join(ROOT, "lib", "goal-tools.ts"), "utf8");
 const GOAL_TOOLS = new Set(["propose_loop_goal"]);
+/**
+ * The APPROVAL LADDER every family reads its box through (2026-10-02,
+ * quality round: it was a third copy here, so the rule "the answer is read
+ * through the one parser" follows the code into this module).
+ */
+const APPROVAL_DIALOG_SRC = readFileSync(join(ROOT, "lib", "approval-dialog.ts"), "utf8");
 const GOAL_PREREVIEW_SRC = readFileSync(join(ROOT, "lib", "goal-prereview-tools.ts"), "utf8");
 /**
  * The COMMAND layer moved the same way, split by the same rule: the commands
@@ -4074,8 +4080,9 @@ test("propose_loop_goal: a rejection may carry a user REASON — typed into the 
   // dialog, and that text is the objection the agent renegotiates against.
   const body = toolBodyOf("propose_loop_goal");
   assert.match(body, /declineRow: REVISE_ROW/, "the approval dialog offers the revise row");
-  assert.match(body, /parseChoice\(outcome\.answer, spec\)/, "the answer is read through the one parser");
-  assert.match(body, /pick\.kind === "declined" && pick\.reason/, "the typed reason becomes the rejection reason");
+  assert.match(body, /awaitApproval\(\{/, "the answer is read through the shared approval ladder");
+  assert.match(APPROVAL_DIALOG_SRC, /parseChoice\(outcome\.answer, ask\.spec\)/, "…which reads it through the one parser");
+  assert.match(APPROVAL_DIALOG_SRC, /pick\.kind === "declined" && pick\.reason/, "the typed reason becomes the rejection reason");
   assert.match(body, /did NOT approve this goal\."/, "rejection path must exist");
   assert.match(body, /Reason: \$\{reason\}/, "rejection reason must reach the agent");
   assert.doesNotMatch(body, /dialogKind: "input"/, "no second box for the reason any more");
