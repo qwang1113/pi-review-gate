@@ -29,7 +29,8 @@
 
 import { execFileSync } from "node:child_process";
 
-import { assertSafeTmuxArgv, type SafeTmuxOptions, type TmuxRunResult } from "./orchestrator-tmux.ts";
+import { assertSafeTmuxArgv, type SafeTmuxOptions, type TmuxRunResult, type TmuxRunner } from "./orchestrator-tmux.ts";
+import { tmuxServerFrom } from "./hierarchy.ts";
 
 /** Run one tmux command under the safety door. Never throws. */
 export function runTmuxArgv(
@@ -53,5 +54,31 @@ export function runTmuxArgv(
   } catch (error) {
     const failure = error as { stderr?: Buffer | string; message?: string };
     return { ok: false, stdout: "", stderr: String(failure.stderr ?? failure.message ?? "tmux failed") };
+  }
+}
+
+/**
+ * WHICH TMUX SERVER THIS PROCESS IS TALKING TO.
+ *
+ * The registry records the server that minted a pane id (`<socket>,<server pid>`)
+ * and a pane id only means something on THAT server: after a `kill-server` or a
+ * reboot the next server hands out the same small numbers again, so a stale
+ * entry's `%3` can name a stranger's pane. A pi session reads this from `$TMUX`;
+ * a process outside tmux ASKS tmux — `#{pid}` is the server pid, which is exactly
+ * the pair `$TMUX` carries.
+ *
+ * Unreadable ⇒ undefined ⇒ the comparison is skipped, exactly as it is for a
+ * session outside tmux (never reclaim, never reject, on missing information).
+ */
+export function currentTmuxServer(runTmux: TmuxRunner): string | undefined {
+  const fromEnv = tmuxServerFrom(process.env);
+  if (fromEnv !== undefined) return fromEnv;
+  try {
+    const result = runTmux(["display-message", "-p", "-F", "#{socket_path},#{pid}"]);
+    if (!result.ok) return undefined;
+    const value = result.stdout.trim();
+    return /^.+,\d+$/.test(value) ? value : undefined;
+  } catch {
+    return undefined;
   }
 }

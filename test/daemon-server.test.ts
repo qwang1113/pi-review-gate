@@ -108,11 +108,9 @@ test("every /api call needs the token, and the token is never echoed", async () 
     assert.equal(wrong.status, 401);
     const body = await wrong.text();
     assert.ok(!body.includes(h.token), "the refusal must not leak the expected token");
-
-    // EventSource cannot set a header, so the SSE endpoint (and every other
-    // one) also accepts ?token=.
-    const viaQuery = await h.json<{ sessions: unknown[] }>(`/api/sessions?token=${h.token}&limit=1`);
-    assert.equal(Array.isArray(viaQuery.sessions), true);
+    // The `?token=` exception is SSE-only and is pinned by its own test below
+    // (“the query token is an SSE-only exception”); this test is about the
+    // header path.
   } finally {
     await h.runtime.stop();
   }

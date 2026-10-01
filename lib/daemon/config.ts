@@ -442,14 +442,20 @@ export function writeConfig(
   try {
     mkdirSync(dirname(file), { recursive: true });
     writeFileAtomic(file, `${JSON.stringify(next, null, 2)}\n`);
-    // A FILE WE CREATE IS PRIVATE (reviewer P1, 2026-10-01). `writeFileAtomic`
+  } catch (error) {
+    return { ok: false, problem: `写入失败：${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (!existed) {
+    // A FILE WE CREATE IS PRIVATE (reviewer P1, 2026-10-01): `writeFileAtomic`
     // preserves an existing mode, but a brand-new config file got the process
     // umask — usually 0644 — and this surface can hold an API key (`models.json`
     // exists for exactly that). 0600 costs nothing: pi reads these files as the
-    // same user.
-    if (!existed) chmodSync(file, 0o600);
-  } catch (error) {
-    return { ok: false, problem: `写入失败：${error instanceof Error ? error.message : String(error)}` };
+    // same user. The chmod gets its OWN try (quality round P2): a failed chmod
+    // must not report a write that DID land as a failure — the panel would
+    // retry it and produce another backup.
+    try {
+      chmodSync(file, 0o600);
+    } catch { /* the write already landed; a stricter mode is best effort */ }
   }
   if (backup !== undefined) {
     for (const stale of backupsOf(file).slice(CONFIG_BACKUP_KEEP)) {

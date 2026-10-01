@@ -189,7 +189,9 @@ pane 判定整体跳过，注册表与转写照常上报。
 
 ### 5.5 `POST /api/sessions/:id/messages`
 
-请求：`{ "text": "…", "from": "daemon" }`（`from` 可省，默认 `daemon`）。
+请求：`{ "text": "…" }`。
+
+**请求体里没有 `from`**（传了也会被忽略）：发送者恒为 daemon。历史上这里曾接受调用方自报名字，那让任何持 token 的人都能冒充别的会话 —— 面板不是 peer，也不得声称自己是。
 
 - `:id` **必须是带名字的活会话**（名字是地址）。
 - 成功 `200`：`{ "ok": true, "messageId": "msg-…", "at": ISO, "inbox": "/…/<name>.inbox.jsonl", "to": "t1-work" }`
@@ -280,8 +282,8 @@ pi --session-id <uuid> [--name <name>] -- <任务描述> [+ 起名提示]
 ```
 
 **掩码规则**：任何**键名**匹配 `/(api[-_]?key|token|secret|password|passwd|credential|authorization|cookie|private[-_]?key)/i`
-的字符串值（以及它**整个子树**里的字符串）替换为固定掩码 `••••••••`。掩码是常量，
-不保留任何后缀——明文绝不回显。`fields` 里的敏感项带 `"sensitive": true`。
+的键，**其下所有非 null/undefined 的值**（字符串、数字、布尔，以及整个子树里的每一项）都替换为固定掩码 `••••••••`。
+掩码是常量，不保留任何后缀——明文绝不回显，类型也不是漏网的理由（`apiTokens: { retries: 3 }` 也会被掩）。
 
 **可编辑面 = `fields` 列出的白名单**（写清单之外的路径一律拒绝）：
 
@@ -407,8 +409,9 @@ daemon 据此不再列出它。
 - 成功 `200`：`{ "ok": true, "requestId": "q-3f2a", "answer": "甲", "path": "/…/q-3f2a.answer.json" }`
 - 拒绝 `400`：问题读不到 / 已经答过（答案文件已存在）/ 答案不在选项里 / 缺 `sessionId`。
 
-**先答者生效**：答案文件以 **`O_EXCL`** 创建，所以 daemon 与 pane（或两个调用方）同时回答时
-只有一个能写进去，另一个拿到「已经答过了」；已经存在的答案文件**不会被覆盖**。
+**先答者生效，且原子**：答案先写成临时文件，再用 **`link(2)`** 链到 `*.answer.json` —— 目标已存在时
+链接失败（EEXIST），同时那个名字**只会以完整文档的形式出现**（不会留下写一半的答案）。已经存在的答案
+文件**不会被覆盖**。
 
 ---
 
@@ -554,6 +557,8 @@ data: <JSON>
 | `~/.pi/agent/rg-daemon/scope.json` / `scope-repo` | 0600 | 专属 tmux session 的记录与锚点 repo |
 | `~/.pi/agent/rg-daemon/questions/…` | — | 待答问题协议（§7） |
 | `~/.pi/agent/rg-daemon/notifications.json` | 0600 | 通知去重存储（§8.3） |
+| `~/.pi/agent/rg-daemon/notification-claims/ledger.lock` | 0600 | claim 期间持有、结束即删；超过 30 s 可被接管（§8.3） |
+| `~/.pi/agent/rg-daemon/start.lock` | 0600 | `daemon start` 期间持有、结束即删；超过 30 s 可被接管（§12） |
 
 默认端口 **4597**（`--port` 可改）。`RG_DAEMON_HOME` 可覆盖 agent home（默认 `$HOME`），
 后台子进程靠它继承同一个 home。

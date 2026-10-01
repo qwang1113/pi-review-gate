@@ -149,8 +149,8 @@ export function extractGateState(text: string): Record<string, unknown> | undefi
  * Only the requested window is read into memory: a long session's transcript
  * is tens of megabytes, and every reader here wants the end of it.
  */
-function readRange(path: string, from: number, size: number): string | undefined {
-  if (size <= from) return "";
+function readRange(path: string, from: number, size: number): { text: string; end: number } | undefined {
+  if (size <= from) return { text: "", end: from };
   let fd: number;
   try {
     fd = openSync(path, "r");
@@ -160,7 +160,10 @@ function readRange(path: string, from: number, size: number): string | undefined
   try {
     const buffer = Buffer.alloc(size - from);
     const read = readSync(fd, buffer, 0, buffer.length, from);
-    return buffer.subarray(0, read).toString("utf8");
+    // `end` IS WHAT WAS READ, not what we asked for: a short read (a file
+    // truncated between the stat and this call, a signal) would otherwise make
+    // callers bookmark past bytes nobody has seen (reviewer P2, 2026-10-01).
+    return { text: buffer.subarray(0, read).toString("utf8"), end: from + read };
   } catch {
     return undefined;
   } finally {
@@ -181,8 +184,9 @@ export function transcriptSize(path: string): number | undefined {
 export function readFileHead(path: string, maxBytes: number): string | undefined {
   const size = transcriptSize(path);
   if (size === undefined) return undefined;
-  const raw = readRange(path, 0, Math.min(maxBytes, size));
-  if (raw === undefined) return undefined;
+  const read = readRange(path, 0, Math.min(maxBytes, size));
+  if (read === undefined) return undefined;
+  const raw = read.text;
   const newline = raw.indexOf("\n");
   return newline < 0 ? raw : raw.slice(0, newline);
 }
@@ -204,14 +208,15 @@ export function readFileTail(
   const size = transcriptSize(path);
   if (size === undefined) return undefined;
   const from = Math.max(0, size - maxBytes);
-  const raw = readRange(path, from, size);
-  if (raw === undefined) return undefined;
-  if (from === 0) return { text: raw, truncated: false, end: size };
+  const read = readRange(path, from, size);
+  if (read === undefined) return undefined;
+  const raw = read.text;
+  if (from === 0) return { text: raw, truncated: false, end: read.end };
   // Cutting at a byte boundary can split a UTF-8 sequence; the first partial
   // line is dropped rather than repaired, since a JSON line cannot be
   // completed from its tail anyway (the bytes before it were never read).
   const firstNewline = raw.indexOf("\n");
-  return { text: firstNewline < 0 ? "" : raw.slice(firstNewline + 1), truncated: true, end: size };
+  return { text: firstNewline < 0 ? "" : raw.slice(firstNewline + 1), truncated: true, end: read.end };
 }
 
 /** The last `count` output entries, oldest first. */
@@ -272,8 +277,9 @@ export class TranscriptTailer {
       return entries;
     }
     if (size === from) return [];
-    const chunk = readRange(path, from, size);
-    if (chunk === undefined) return [];
+    const read = readRange(path, from, size);
+    if (read === undefined) return [];
+    const chunk = read.text;
     const lastNewline = chunk.lastIndexOf("\n");
     if (lastNewline < 0) {
       // NOT ONE COMPLETE LINE in this window: leave the bookmark where it is so

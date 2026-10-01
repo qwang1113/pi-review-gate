@@ -41,7 +41,7 @@ import { MAX_INLINE_RECORD_BYTES, newChannelId } from "../channel-io.ts";
 import { openScopeWindow, type TmuxScope, type TmuxScopeRecord } from "../session-tmux-scope.ts";
 import { ownSessionName } from "../session-tmux-scope.ts";
 import type { TmuxRunner } from "../orchestrator-tmux.ts";
-import { runTmuxArgv } from "../tmux-exec.ts";
+import { runTmuxArgv, currentTmuxServer } from "../tmux-exec.ts";
 import { liveSessionNames } from "../session-name-tools.ts";
 import {
   SESSION_MESSAGE_KIND,
@@ -51,7 +51,6 @@ import {
 } from "../session-message-tools.ts";
 import { sessionInboxPath, sessionNameProblem, sessionRegistryRoot } from "../session-registry.ts";
 import { STATION_CAP_ENV } from "../repo-pr-policy.ts";
-import { tmuxServerFrom } from "../hierarchy.ts";
 import type { DeliveryStation } from "../delivery-station.ts";
 import { GATE_MODE_ENV } from "../task-mode.ts";
 import { daemonHome } from "./paths.ts";
@@ -71,33 +70,6 @@ export const MESSAGE_PREVIEW = 160;
  */
 export function createDaemonTmuxRunner(): TmuxRunner {
   return (argv, env, ownSessions) => runTmuxArgv(argv, env ?? process.env, { ownSessions: [...(ownSessions ?? [])] });
-}
-
-/**
- * WHICH TMUX SERVER THIS PROCESS IS TALKING TO.
- *
- * The registry records the server that minted a pane id (`<socket>,<server pid>`)
- * and a pane id only means something on THAT server: after a `kill-server` or a
- * reboot the next server hands out the same small numbers again, so a stale
- * entry's `%3` can name a stranger's pane. A pi session reads this from `$TMUX`;
- * the daemon runs outside tmux, so it ASKS tmux — `#{pid}` is the server pid,
- * which is exactly the pair `$TMUX` carries (reviewer P1, 2026-10-01: without
- * this, the daemon could hand a live-looking stale entry a message).
- *
- * Unreadable ⇒ undefined ⇒ the comparison is skipped, exactly as it is for a
- * session outside tmux (never reclaim, never reject, on missing information).
- */
-export function currentTmuxServer(runTmux: TmuxRunner): string | undefined {
-  const fromEnv = tmuxServerFrom(process.env);
-  if (fromEnv !== undefined) return fromEnv;
-  try {
-    const result = runTmux(["display-message", "-p", "-F", "#{socket_path},#{pid}"]);
-    if (!result.ok) return undefined;
-    const value = result.stdout.trim();
-    return /^.+,\d+$/.test(value) ? value : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 export interface SendMessageOutcome {

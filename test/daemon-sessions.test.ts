@@ -25,6 +25,7 @@ import { PANE_STATE_STALE_S } from "../lib/tmux-pane-state.ts";
 import {
   assistantRecord,
   brokenRunner,
+  fakeRunner,
   gateStateRecord,
   paneLine,
   paneRunner,
@@ -236,6 +237,28 @@ test("sessions merge the pane, the registry and the transcript", () => {
   assert.equal(session.gateStateFound, true, "the fixture's gate state was found in the transcript tail");
   assert.ok(session.transcript?.endsWith(".jsonl"));
   assert.ok(observer.outputFor("abc123", 5).some((entry) => entry.text === "working on it"));
+});
+
+test("a pane id minted by another tmux server does not make a session look alive in the list", () => {
+  const home = scratchHome();
+  writeRegistry(home, registryEntry({
+    name: "old-one",
+    sessionId: "s1",
+    repo: "/repo",
+    cwd: "/repo",
+    pid: 999_999_999,
+    heartbeatAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    tmux: { session: "rg-old", window: "@1", pane: "%1", server: "/private/tmp/tmux-501/old,111" },
+  }));
+  const runner = fakeRunner((argv) => {
+    if (argv[0] === "display-message") return { ok: true, stdout: "/private/tmp/tmux-501/default,22388\n", stderr: "" };
+    if (argv[0] === "list-panes") return { ok: true, stdout: "%1\n", stderr: "" };
+    return { ok: false, stdout: "", stderr: `unexpected: ${argv.join(" ")}` };
+  });
+  const observer = createSessionObserver({ home, runTmux: runner });
+  const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "s1");
+  assert.ok(session);
+  assert.equal(session.alive, false, "a stranger's pane must not read as this session being alive");
 });
 
 test("a pane that stopped reporting is stalled, not working", () => {

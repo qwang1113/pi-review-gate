@@ -112,26 +112,34 @@ export function readDaemonState(home?: string): DaemonState | undefined {
   }
 }
 
-export function buildDaemonState(
-  port: number,
-  now: number = Date.now(),
-  workspaceRoots: readonly string[] = [],
-  /**
-   * The agent home this daemon actually uses. Passed so `tokenFile` POINTS AT
-   * THE FILE THAT EXISTS: defaulting to `homedir()` here while the CLI wrote the
-   * token under an override produced a state file naming a path nobody had
-   * written (reviewer P1, 2026-10-01 — a test-only home made it visible).
-   */
-  home?: string,
-): DaemonState {
+/**
+ * What a fresh state record is built from.
+ *
+ * AN OBJECT, not four positional parameters (quality round P2, 2026-10-01):
+ * `home` and the `home` passed to `writeDaemonState` are two spellings of the
+ * same value that must agree, and a call site that repeats it twice silently
+ * falls back to `$HOME` the moment one of them is dropped — which is exactly
+ * the bug (a `tokenFile` pointing at another home) this fixes.
+ */
+export interface DaemonStateInit {
+  port: number;
+  now?: number;
+  workspaceRoots?: readonly string[];
+  /** The agent home this daemon actually uses; `tokenFile` follows it. */
+  home?: string;
+}
+
+export function buildDaemonState(init: DaemonStateInit): DaemonState {
+  const now = init.now ?? Date.now();
+  const workspaceRoots = init.workspaceRoots ?? [];
   return {
     schema: DAEMON_SCHEMA,
     pid: process.pid,
-    port,
+    port: init.port,
     startedAt: new Date(now).toISOString(),
     version: daemonPackageVersion(),
-    baseUrl: daemonBaseUrl(port),
-    tokenFile: daemonTokenPath(home),
+    baseUrl: daemonBaseUrl(init.port),
+    tokenFile: daemonTokenPath(init.home),
     ...(workspaceRoots.length === 0 ? {} : { workspaceRoots: [...workspaceRoots] }),
   };
 }

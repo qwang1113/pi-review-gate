@@ -26,7 +26,6 @@
  * own identity for one notification.
  */
 
-import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
@@ -198,12 +197,13 @@ export function createNotificationStore(path: string, deps: { now?: () => number
 
   return {
     claim(input) {
-      // ONE CLAIM PER KEY AT A TIME, ACROSS PROCESSES (reviewer P1, 2026-10-01).
-      // The ledger is a read-modify-write, and "the first caller wins" is only
-      // true if two callers cannot both read "not claimed yet". The arbitration
-      // is an `O_EXCL` lock file per key — the daemon is the documented writer,
-      // but a contract that depends on nobody else writing is not a guarantee.
-      const guard = claimGuard(claimDirs, input.key, now());
+      // ONE LEDGER WRITER AT A TIME, ACROSS PROCESSES (reviewer P1/P2,
+      // 2026-10-01). The claim is a read-modify-write of ONE file, so the lock
+      // has to cover the WHOLE ledger, not one key: two processes claiming
+      // different keys would otherwise each read the same snapshot and the
+      // later write would drop the other's entry. Claims are rare, so
+      // serialising all of them costs nothing.
+      const guard = claimGuard(join(claimDirs, "ledger.lock"), now());
       if (guard.kind === "busy") {
         return { claimed: false, firstSeenAt: new Date(now()).toISOString(), count: 0, reason: guard.reason };
       }
@@ -295,40 +295,39 @@ export const CLAIM_LOCK_STALE_MS = 30_000;
 type ClaimGuard = { kind: "held"; release: () => void } | { kind: "busy"; reason: string };
 
 /**
- * The per-key lock a claim runs under: an `O_EXCL` file, removed in a `finally`.
+ * The lock a claim runs under: an `O_EXCL` file, removed in a `finally`.
  *
  * A lock left behind by a crash is TAKEN OVER once it is older than
- * {@link CLAIM_LOCK_STALE_MS} — otherwise one killed process would refuse that
- * key forever, and a notification nobody could ever send is worse than one sent
- * twice.
+ * {@link CLAIM_LOCK_STALE_MS} — otherwise one killed process would refuse every
+ * claim forever, and a notification nobody could ever send is worse than one
+ * sent twice.
  */
-function claimGuard(dir: string, key: string, at: number): ClaimGuard {
-  const path = join(dir, `${createHash("sha256").update(key).digest("hex").slice(0, 32)}.lock`);
+function claimGuard(lockPath: string, at: number): ClaimGuard {
   const take = (): boolean => {
     try {
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(path, `${at}`, { flag: "wx", mode: 0o600 });
+      mkdirSync(dirname(lockPath), { recursive: true });
+      writeFileSync(lockPath, `${at}`, { flag: "wx", mode: 0o600 });
       return true;
     } catch {
       return false;
     }
   };
-  if (take()) return { kind: "held", release: () => { rmSync(path, { force: true }); } };
+  if (take()) return { kind: "held", release: () => { rmSync(lockPath, { force: true }); } };
 
   let heldAt = Number.NaN;
   try {
-    heldAt = Number(readFileSync(path, "utf8"));
+    heldAt = Number(readFileSync(lockPath, "utf8"));
   } catch {
     heldAt = Number.NaN; // it vanished between the create and the read
   }
   if (Number.isFinite(heldAt) && at - heldAt < CLAIM_LOCK_STALE_MS) {
-    return { kind: "busy", reason: "这条通知正被另一个调用方 claim —— 同一个 key 同时只能有一个赢家，请重试" };
+    return { kind: "busy", reason: "通知台账正被另一个调用方写入 —— 同一条通知同时只能有一个赢家，请重试" };
   }
   try {
-    rmSync(path, { force: true });
+    rmSync(lockPath, { force: true });
   } catch { /* the loser of the takeover race reports busy below */ }
-  if (take()) return { kind: "held", release: () => { rmSync(path, { force: true }); } };
-  return { kind: "busy", reason: "这条通知正被另一个调用方 claim —— 同一个 key 同时只能有一个赢家，请重试" };
+  if (take()) return { kind: "held", release: () => { rmSync(lockPath, { force: true }); } };
+  return { kind: "busy", reason: "通知台账正被另一个调用方写入 —— 同一条通知同时只能有一个赢家，请重试" };
 }
 
 /** The event kind a state transition deserves, or none. */

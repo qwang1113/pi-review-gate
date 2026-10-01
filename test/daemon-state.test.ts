@@ -26,7 +26,7 @@ const mode = (path: string): number => statSync(path).mode & 0o777;
 
 test("the state file and the token are both 0600, and the token is not in the state", () => {
   const home = scratchHome();
-  const state = buildDaemonState(4597);
+  const state = buildDaemonState({ port: 4597 });
   writeDaemonState(state, home);
   const { token, created } = ensureDaemonToken(home);
 
@@ -63,13 +63,13 @@ test("a malformed or partial state file reads as absent", () => {
   assert.equal(readDaemonState(home), undefined);
   writeFileSync(daemonStatePath(home), JSON.stringify({ schema: 1, pid: 1 }));
   assert.equal(readDaemonState(home), undefined, "a schema-1 record with no port is not a record");
-  writeFileSync(daemonStatePath(home), JSON.stringify({ ...buildDaemonState(1), schema: 2 }));
+  writeFileSync(daemonStatePath(home), JSON.stringify({ ...buildDaemonState({ port: 1 }), schema: 2 }));
   assert.equal(readDaemonState(home), undefined, "another schema version is not this daemon");
 });
 
 test("clearDaemonState removes only the record that still describes its own pid", () => {
   const home = scratchHome();
-  writeDaemonState(buildDaemonState(1234), home);
+  writeDaemonState(buildDaemonState({ port: 1234 }), home);
   assert.equal(clearDaemonState(999, home), false, "a stop that raced a restart must not delete the new record");
   assert.ok(readDaemonState(home) !== undefined);
   assert.equal(clearDaemonState(process.pid, home), true);
@@ -87,7 +87,7 @@ test("writePrivateFile creates missing parents and never leaves the temp sibling
 
 test("the state's tokenFile points into the home the daemon actually uses", () => {
   const home = scratchHome();
-  const state = buildDaemonState(4597, Date.now(), [], home);
+  const state = buildDaemonState({ port: 4597, workspaceRoots: [], home });
   assert.equal(state.tokenFile, daemonTokenPath(home));
   assert.notEqual(state.tokenFile, daemonTokenPath(), "defaulting to $HOME named a file nobody had written");
 });
@@ -97,7 +97,7 @@ test("the probe talks to loopback, never to the address a state file claims", as
   ensureDaemonToken(home);
   // A tampered/corrupt record: it names another host, and the probe carries the
   // token — following it would hand the secret to whoever answers there.
-  writeDaemonState({ ...buildDaemonState(4597), baseUrl: "http://evil.example:4597" }, home);
+  writeDaemonState({ ...buildDaemonState({ port: 4597 }), baseUrl: "http://evil.example:4597" }, home);
   const seen: string[] = [];
   const probe = await probeDaemon({
     home,
@@ -124,7 +124,7 @@ test("offline: no state file, a dead pid, and a live pid with nothing listening"
   const home = scratchHome();
   assert.equal((await probeDaemon({ home })).online, false);
 
-  writeDaemonState({ ...buildDaemonState(4597), pid: 999_999_999 }, home);
+  writeDaemonState({ ...buildDaemonState({ port: 4597 }), pid: 999_999_999 }, home);
   ensureDaemonToken(home);
   const deadPid = await probeDaemon({ home });
   assert.equal(deadPid.online, false);
@@ -132,7 +132,7 @@ test("offline: no state file, a dead pid, and a live pid with nothing listening"
 
   // A live pid and a closed port: the probe must say "cannot confirm", never
   // "dead", because the online rule never kills and never deletes.
-  writeDaemonState({ ...buildDaemonState(9), pid: process.pid }, home);
+  writeDaemonState({ ...buildDaemonState({ port: 9 }), pid: process.pid }, home);
   const nothingListening = await probeDaemon({ home });
   assert.equal(nothingListening.online, false);
   assert.match(nothingListening.reason, /不能断定在线|探测失败/);
@@ -150,7 +150,7 @@ test("online: a real runtime on loopback answers the probe", async () => {
   });
   const port = await runtime.start();
   try {
-    writeDaemonState({ ...buildDaemonState(port), pid: process.pid }, home);
+    writeDaemonState({ ...buildDaemonState({ port }), pid: process.pid }, home);
     const probe = await probeDaemon({ home });
     assert.equal(probe.online, true);
     assert.equal(probe.state?.port, port);
@@ -171,7 +171,7 @@ test("the probe gives up on a socket that never answers (the timeout is the offl
     });
   });
   try {
-    writeDaemonState({ ...buildDaemonState(port), pid: process.pid }, home);
+    writeDaemonState({ ...buildDaemonState({ port }), pid: process.pid }, home);
     const probe = await probeDaemon({ home, timeoutMs: 250 });
     assert.equal(probe.online, false);
     assert.match(probe.reason, /探测失败/);

@@ -40,7 +40,7 @@
  * against. This module is its implementation; the document is its authority.
  */
 
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 import { resolveAnswer } from "../orchestrator-answer-rules.ts";
 import {
@@ -318,7 +318,20 @@ export function submitAnswer(
   const path = questionAnswerPath(home, input.sessionId, input.requestId);
   try {
     mkdirSync(sessionQuestionsDir(home, input.sessionId), { recursive: true });
-    writeFileSync(path, `${JSON.stringify(answer, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    // ATOMIC **AND** EXCLUSIVE (quality round P2, 2026-10-01): `wx` alone makes
+    // the first writer win, but a crash halfway through leaves a TRUNCATED
+    // answer file — and `isPending` only asks whether the file exists, so that
+    // question would vanish from the list and refuse every later answer with
+    // "already answered". A temp file + `link(2)` gives both properties: the
+    // link fails with EEXIST when somebody got there first, and the name only
+    // ever appears with the complete document behind it.
+    const tmp = `${path}.tmp-${process.pid}`;
+    writeFileSync(tmp, `${JSON.stringify(answer, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    try {
+      linkSync(tmp, path);
+    } finally {
+      rmSync(tmp, { force: true });
+    }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "EEXIST") return { ok: false, problem: "这个问题已经答过了（另一个回答先落地）" };

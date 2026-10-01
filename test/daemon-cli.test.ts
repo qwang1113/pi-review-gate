@@ -112,7 +112,7 @@ test("start brings a real daemon up, a second start leaves it alone, stop takes 
 test("a stale state file whose process is gone is cleaned up by stop, not by a kill", async () => {
   const home = scratchHome();
   const { writeDaemonState, buildDaemonState } = await import("../lib/daemon/state.ts");
-  writeDaemonState({ ...buildDaemonState(4597), pid: 999_999_999 }, home);
+  writeDaemonState({ ...buildDaemonState({ port: 4597 }), pid: 999_999_999 }, home);
   const result = await cli(home, ["daemon", "stop"]);
   assert.equal(result.code, 0);
   assert.match(result.out, /已经不在/);
@@ -127,7 +127,7 @@ test("stop refuses to signal a pid the health check does not confirm as the daem
   // A live process that is NOT the daemon — the shape a reused pid leaves.
   const victim = spawn("sleep", ["30"], { stdio: "ignore" });
   try {
-    writeDaemonState({ ...buildDaemonState(await freePort()), pid: victim.pid! }, home);
+    writeDaemonState({ ...buildDaemonState({ port: await freePort() }), pid: victim.pid! }, home);
     const result = await cli(home, ["daemon", "stop"]);
     assert.equal(result.code, 1);
     assert.match(result.err, /拒绝发 SIGTERM/);

@@ -136,7 +136,7 @@ async function runForeground(args: Args, io: CliIo, home: string): Promise<numbe
     io.err(`无法监听 127.0.0.1:${args.port} —— ${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
-  writeDaemonState(buildDaemonState(port, Date.now(), args.workspaceRoots, home), home);
+  writeDaemonState(buildDaemonState({ port, workspaceRoots: args.workspaceRoots, home }), home);
   io.out(`pi-gate daemon 已在 http://127.0.0.1:${port} 监听（pid ${process.pid}）`);
   io.out(`token 文件：${daemonTokenPath(home)}（0600，内容不会回显）`);
   if (args.workspaceRoots.length > 0) io.out(`工作区根目录：${args.workspaceRoots.join("、")}`);

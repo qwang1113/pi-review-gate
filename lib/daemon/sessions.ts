@@ -49,6 +49,7 @@ import { gitRawOrNull } from "../git-exec.ts";
 import { unmetRequirements } from "../gate-state-requirements.ts";
 import type { GateState } from "../gate-state.ts";
 import { extractGateState, readFileHead, readFileTail, readRecentEntries, transcriptSize, type OutputEntry } from "./transcript.ts";
+import { currentTmuxServer } from "../tmux-exec.ts";
 import { daemonAgentHome } from "./paths.ts";
 
 const STATE_WORDS: ReadonlySet<string> = new Set(CHILD_STATES);
@@ -435,6 +436,11 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
           runTmux: deps.runTmux,
           alive: pidAlive,
           now,
+          // WHICH SERVER MINTED THE PANE ID MATTERS (reviewer P2, 2026-10-01):
+          // without it a restarted server's reused `%3` makes a dead session
+          // read as alive in this very list — the message path already passed
+          // it, so the observation面 was the odd one out.
+          currentServer: () => currentTmuxServer(deps.runTmux),
         }, entry);
         if (occupancy === "live") session.alive = true;
         // The registry's own word is the fallback the resolver already applied
