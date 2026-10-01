@@ -150,7 +150,7 @@ interface TaskView {
   describe: string;
   enabled: boolean;
   nextRunAt: string | null;
-  /** The slot is already in the past: a missed slot is dealt with on the next tick. */
+  /** The slot is already in the past — a missed slot the daemon still owes a decision on. */
   overdue: boolean;
   station: DeliveryStation;
   /** The newest run of this task, or null when it never ran. */
@@ -158,14 +158,17 @@ interface TaskView {
 }
 
 function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], now: Date): TaskView {
-  // THE SAME CLOCK THE DAEMON RUNS ON (and the panel shows): `dueDecision`
+  // THE SAME FACTS THE DAEMON RUNS ON (and the panel shows): `dueDecision`
   // counts the next slot from `lastFiredAt ?? createdAt`, so an overdue task
-  // reads as overdue instead of as "one period away" — the answer the user
-  // (and the agent) needs is what the scheduler will DO, not what a clock
-  // arithmetic would say from this instant.
-  const slot = dueDecision({ task, now, openRun: false }).scheduledAt;
-  const settled = runs.filter((r) => r.kind === "run-settled").at(-1);
-  const started = runs.filter((r) => r.kind === "run-started").at(-1);
+  // reads as overdue instead of as "one period away". The `openRun` half is
+  // derived from the LEDGER — append-only and in order, so the newest
+  // `run-started`/`run-settled` line is the newest truth about this task —
+  // because the answer has to be what the scheduler will DO: a task with an
+  // unsettled run is not dealt with until that run settles, so promising
+  // 「下一个 tick 就会跑」 would be a lie for exactly that case.
+  const lastRun = runs.filter((r) => r.kind !== "run-skipped").at(-1);
+  const openRun = lastRun?.kind === "run-started";
+  const slot = dueDecision({ task, now, openRun }).scheduledAt;
   return {
     id: task.id,
     name: task.name,
@@ -176,11 +179,11 @@ function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], n
     nextRunAt: slot ? slot.toISOString() : null,
     overdue: slot !== null && slot.getTime() <= now.getTime(),
     station: task.contract.restatement.station,
-    lastRun: settled && settled.kind === "run-settled"
-      ? { at: settled.at, outcome: settled.outcome, verdict: settled.verdict, runId: settled.runId }
-      : started && started.kind === "run-started"
-        ? { at: started.at, outcome: "open", verdict: null, runId: started.runId }
-        : null,
+    lastRun: lastRun === undefined
+      ? null
+      : lastRun.kind === "run-settled"
+        ? { at: lastRun.at, outcome: lastRun.outcome, verdict: lastRun.verdict, runId: lastRun.runId }
+        : { at: lastRun.at, outcome: "open", verdict: null, runId: lastRun.runId },
   };
 }
 
@@ -207,7 +210,11 @@ function listReply(home: string, tasks: readonly ScheduledTask[], version: numbe
     `  cron: ${t.cron}（${t.describe}）`,
     `  下次运行: ${t.nextRunAt === null
       ? "（停用或 cron 无解，不再跑）"
-      : t.nextRunAt + (t.overdue ? "（已过期：daemon 下一个 tick 就会跑）" : "")}`,
+      : t.nextRunAt + (t.overdue
+        ? (t.lastRun?.outcome === "open"
+          ? "（已过期：本任务还有一次运行没结算，结算后 daemon 才会处理）"
+          : "（已过期：欠着，daemon 的下一次 tick 会处理；若同一 repo 还有别的运行没结算，这个 slot 会被跳过并记一条 run-skipped）")
+        : "")}`,
     `  交付站点: ${t.station}`,
     `  最近一次运行: ${t.lastRun === null ? "从未运行" : `${t.lastRun.at} → ${t.lastRun.outcome}${t.lastRun.verdict ? `（${t.lastRun.verdict}）` : ""}`}`,
   ].join("\n"));

@@ -16,7 +16,6 @@ import {
   applyScheduleEdit,
   findScheduledTask,
   listScheduledTasks,
-  nextRunAtFor,
   readScheduleRuns,
   readSchedules,
   removeScheduledTask,
@@ -268,9 +267,6 @@ test("expectedVersion is the only thing standing between two writers", () => {
   assert.equal(current.value.enabled, false);
   assert.equal(current.value.updatedAt >= current.value.createdAt, true);
   assert.equal(current.version, 2);
-
-  // A disabled task has no next run.
-  assert.equal(nextRunAtFor(current.value, new Date(2026, 9, 1, 8, 0)), null);
 });
 
 test("a panel edit may touch name / cron / enabled — and nothing else", () => {
@@ -373,31 +369,6 @@ test("applyScheduleEdit is the one place the authoring rule lives", () => {
   assert.equal(unknownOrigin.ok, false);
 });
 
-test("nextRunAtFor counts from lastFiredAt, and from now when it never fired", () => {
-  const repo = scratch();
-  const base: ScheduledTask = {
-    id: "sch-00000001",
-    name: "daily-audit",
-    repo,
-    cron: "0 9 * * *",
-    requirement: "每天 09:00 跑一次审计",
-    contract: makeContract(),
-    enabled: true,
-    createdAt: "2026-10-01T00:00:00.000Z",
-    updatedAt: "2026-10-01T00:00:00.000Z",
-    lastFiredAt: null,
-  };
-  const never = nextRunAtFor(base, new Date(2026, 9, 1, 8, 0));
-  assert.equal(never?.getTime(), new Date(2026, 9, 1, 9, 0).getTime());
-
-  const fired: ScheduledTask = { ...base, lastFiredAt: new Date(2026, 9, 1, 9, 0).toISOString() };
-  const next = nextRunAtFor(fired, new Date(2026, 9, 1, 9, 30));
-  assert.equal(next?.getTime(), new Date(2026, 9, 2, 9, 0).getTime(), "the run already done is not a candidate");
-
-  assert.equal(nextRunAtFor({ ...base, enabled: false }, new Date(2026, 9, 1, 8, 0)), null);
-  assert.equal(nextRunAtFor({ ...base, cron: "bogus" }, new Date(2026, 9, 1, 8, 0)), null);
-});
-
 test("the run ledger appends one line per record and reads back filtered", () => {
   const home = scratch();
   const runs = scheduleRunsPath(home);
@@ -473,7 +444,8 @@ test("a hand-edited table missing a contract field is refused, never passed on",
   writeFileSync(schedulesPath(home), JSON.stringify(file));
   assert.equal(readSchedules(home).ok, true, "the file was never rewritten by a refused read");
 
-  // `cron` is the last field a RULE reads (nextRunAtFor), so it is validated by
+  // `cron` is what the scheduler counts the next slot from (`nextRunAfter`), so
+  // it is validated by
   // the same parser the write side uses: a garbage expression must not survive
   // as a task that silently never fires.
   const task = file.tasks[0]! as unknown as { cron: string };
@@ -591,10 +563,6 @@ test("an unparseable lastFiredAt is refused on both sides — it would mean「ne
   assert.equal(stamped.ok, true);
   if (!stamped.ok) return;
   assert.equal(stamped.value.lastFiredAt, firedAt);
-  assert.equal(
-    nextRunAtFor(stamped.value, new Date(2026, 9, 1, 9, 30))?.getTime(),
-    new Date(2026, 9, 2, 9, 0).getTime(),
-  );
 
   // A hand-edited file cannot get past the read side either.
   const file = JSON.parse(readFileSync(schedulesPath(home), "utf8")) as { tasks: Array<{ lastFiredAt: string }> };

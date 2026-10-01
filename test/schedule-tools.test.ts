@@ -27,6 +27,7 @@ import {
 } from "../lib/schedule-tools.ts";
 import {
   addScheduledTask,
+  appendScheduleRun,
   readSchedules,
   type ScheduleContract,
   type ScheduledTask,
@@ -168,6 +169,19 @@ const createParams = (f: Fake, over: Record<string, unknown> = {}): Record<strin
 function tasksIn(f: Fake): ScheduledTask[] {
   const read = readSchedules(f.home);
   return read.ok ? read.file.tasks : [];
+}
+
+/**
+ * An instant N days AFTER the seeded task was authored.
+ *
+ * Derived from the task's OWN `createdAt` (which the store stamps from the real
+ * clock — the injected `now` only affects the tool's reading) on purpose: an
+ * absolute date here would pass today and start failing the day the wall clock
+ * passes it, for no code change at all.
+ */
+function daysAfterSeeded(f: Fake, days: number): Date {
+  const task = tasksIn(f)[0]!;
+  return new Date(Date.parse(task.createdAt) + days * 24 * 60 * 60 * 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -431,17 +445,35 @@ test("list: every task with its run facts, and an empty table is a real answer",
 test("list: a MISSED slot reads as overdue, not as one period away", async () => {
   const f = fake();
   seed(f);
-  // A month later: the task never ran, so its first slot is long past — the
-  // daemon will deal with that very slot on its next tick, and 「下次运行」
-  // must not claim it is a day away (the panel's `/api/schedules` reads the
-  // same `dueDecision`, so the two surfaces cannot disagree).
-  const later = new Date(Date.parse(APPROVED_AT) + 30 * 24 * 60 * 60 * 1000);
+  // A month after it was AUTHORED: the task never ran, so its first slot is
+  // long past — the daemon will deal with that very slot on its next tick, and
+  // 「下次运行」 must not claim it is a day away (the panel's `/api/schedules`
+  // reads the same `dueDecision`, so the two surfaces cannot disagree).
+  const later = daysAfterSeeded(f, 30);
   f.deps.now = () => later;
   const out = await doScheduleTask(f.deps, { action: "list" }, {}, undefined);
   const task = (out.details?.tasks as Array<Record<string, unknown>>)[0]!;
   assert.equal(task.overdue, true);
   assert.ok(Date.parse(String(task.nextRunAt)) < later.getTime(), String(task.nextRunAt));
   assert.match(out.content[0]!.text, /已过期/);
+});
+
+test("list: a task with an UNSETTLED run says so, and its overdue note promises no tick", async () => {
+  const f = fake();
+  const task = seed(f);
+  appendScheduleRun(f.home, {
+    kind: "run-started", runId: "run-1", taskId: task.id, sessionId: "sess-x", at: "2026-10-01T00:00:00.000Z",
+  });
+  // A month after it was authored, that run has never settled and the next
+  // slot is long past too.
+  const later = daysAfterSeeded(f, 30);
+  f.deps.now = () => later;
+  const out = await doScheduleTask(f.deps, { action: "list" }, {}, undefined);
+  const view = (out.details?.tasks as Array<Record<string, unknown>>)[0]!;
+  assert.equal((view.lastRun as { outcome: string }).outcome, "open", "the newest ledger line is the truth, not the last settled one");
+  assert.equal(view.overdue, true);
+  assert.match(out.content[0]!.text, /没结算/, "the note names the real reason the scheduler waits");
+  assert.doesNotMatch(out.content[0]!.text, /下一个 tick 会处理/, "…and does not promise a tick that will be skipped");
 });
 
 // ---------------------------------------------------------------------------

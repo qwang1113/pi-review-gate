@@ -71,7 +71,9 @@ export async function awaitApproval(ask: ApprovalAsk): Promise<ApprovalDecision>
     const reason = pick.kind === "declined" && pick.reason ? pick.reason : outcome.reason;
     return {
       approved: pick.kind === "chose" && pick.option === ask.approveLabel,
-      ...(reason !== undefined ? { reason } : {}),
+      // A blank reason is no reason: the field is absent, exactly as the three
+      // pre-extraction copies wrote it.
+      ...(reason ? { reason } : {}),
       interrupted: outcome.by === "interrupted",
       dismissed: pick.kind === "dismissed",
     };

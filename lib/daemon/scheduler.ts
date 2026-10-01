@@ -12,18 +12,21 @@
  * IO, so "why did it not run" is answerable without a real daemon and a real
  * cron minute.
  *
- * ── WHAT "DUE" MEANS, AND WHY IT IS NOT `nextRunAtFor` ──
+ * ── WHAT "DUE" MEANS ──
  *
- * `nextRunAtFor` (lib/schedule-store.ts) counts from `lastFiredAt` when there
- * is one and from `now` otherwise — right for the panel's "when does it fire
- * next", useless for firing: counted from `now`, a brand-new task's first slot
- * is always one period away, so a task that never ran would never run. The
- * schedule here counts from `lastFiredAt ?? createdAt`, so the first slot is
- * the first cron minute after the task was AUTHORED (authored 08:59 for
- * `0 9 * * *` ⇒ fires at 09:00), and a task whose daemon was away for a week
- * fires ONCE on the next tick rather than seven times — a missed slot is not
- * replayed, the schedule simply moves on: the slot due is `lastFiredAt`'s next
- * one, and dealing with it stamps `lastFiredAt = now`.
+ * Counting the next slot from `now` would be useless for firing: a brand-new
+ * task's first slot would always be one period away, so a task that never ran
+ * would never run. The schedule counts from `lastFiredAt ?? createdAt`, so the
+ * first slot is the first cron minute after the task was AUTHORED (authored
+ * 08:59 for `0 9 * * *` ⇒ fires at 09:00), and a task whose daemon was away
+ * for a week fires ONCE on the next tick rather than seven times — a missed
+ * slot is not replayed, the schedule simply moves on: the slot due is
+ * `lastFiredAt`'s next one, and dealing with it stamps `lastFiredAt = now`.
+ *
+ * ONE SOURCE FOR "WHAT IS NEXT": the API's `nextRunAt` (daemon/server.ts) and
+ * `schedule_task({action:"list"})` both read `dueDecision`'s `scheduledAt`, so
+ * the panel and the agent can never disagree about a task that is merely
+ * WAITING — and neither can promise a tick the scheduler would skip.
  *
  * ── ONE SLOT IS DEALT WITH ONCE (RESTART INCLUDED) ──
  *

@@ -33,7 +33,7 @@ import { appendFileSync, chmodSync, mkdirSync, readFileSync, statSync } from "no
 import { dirname, isAbsolute } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
-import { nextRunAfter, parseCron } from "./cron-schedule.ts";
+import { parseCron } from "./cron-schedule.ts";
 import { scheduleRunsPath, schedulesPath } from "./daemon/paths.ts";
 import { isDeliveryStation, type DeliveryStation } from "./delivery-station.ts";
 import { goalTextHash, normalizeGoalText } from "./loop-goal.ts";
@@ -164,10 +164,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
 /**
- * A timestamp `new Date(...)` can read. The gate ACTS on `lastFiredAt` (what
- * `nextRunAtFor` counts from) and on `approvedAt` (what makes a re-negotiation
- * one), so both are validated on BOTH sides: the write side refuses them, the
- * read side refuses to hand them on.
+ * A timestamp `new Date(...)` can read. The gate ACTS on `lastFiredAt` (the
+ * slot the scheduler counts from, lib/daemon/scheduler.ts's `dueDecision`)
+ * and on `approvedAt` (what makes a re-negotiation one), so both are validated
+ * on BOTH sides: the write side refuses them, the read side refuses to hand
+ * them on.
  */
 const isTimestamp = (value: unknown): value is string => isText(value) && Number.isFinite(Date.parse(value));
 
@@ -576,27 +577,6 @@ export function removeScheduledTask(
   };
   writeSchedules(home, next);
   return { ok: true, value: removed, version: next.version };
-}
-
-/**
- * When this task fires next — from `lastFiredAt` if it has fired (a run that
- * already happened is not a candidate again, so after a pause this can land in
- * the past), else from `now`. A disabled task, an illegal cron and an
- * impossible date all answer `null` rather than throwing.
- *
- * NOT THE SCHEDULER'S CLOCK (t2-daemon). The daemon fires on the slot it is
- * counting towards — `lastFiredAt ?? createdAt` (lib/daemon/scheduler.ts
- * `dueDecision`) — because counted from `now` a never-fired task's first slot
- * is always one period away, so it would never arrive. This one answers the
- * different question "when is the next slot after this instant", and is what
- * the panel wants for a task that is merely WAITING: due slots are the
- * scheduler's to name.
- */
-export function nextRunAtFor(task: ScheduledTask, now: Date): Date | null {
-  if (!task || task.enabled !== true) return null;
-  const base = task.lastFiredAt ? new Date(task.lastFiredAt) : now;
-  if (!(base instanceof Date) || Number.isNaN(base.getTime())) return null;
-  return nextRunAfter(task.cron, base);
 }
 
 // ---------------------------------------------------------------------------
