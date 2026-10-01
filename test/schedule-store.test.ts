@@ -416,11 +416,21 @@ test("moving a task to another repo has to bring a new contract with it", () => 
   if (bare.ok) return;
   assert.match(bare.problem, /新的 contract/);
 
+  // Submitting the whole task back UNCHANGED is not a move: the rule compares
+  // against the current repo, not against the presence of the key.
+  const unchanged = updateScheduledTask(
+    home,
+    added.value.id,
+    { name: added.value.name, repo, cron: added.value.cron, enabled: added.value.enabled },
+    { from: "gate", expectedVersion: 1 },
+  );
+  assert.equal(unchanged.ok, true);
+
   const moved = updateScheduledTask(
     home,
     added.value.id,
     { repo: other, contract: makeContract() },
-    { from: "gate", expectedVersion: 1 },
+    { from: "gate", expectedVersion: 2 },
   );
   assert.equal(moved.ok, true);
   if (!moved.ok) return;

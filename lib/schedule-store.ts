@@ -15,10 +15,8 @@
  * daemon's tick, a gate session, the panel) can add a line without any of them
  * reading the others, and a torn final line is skipped rather than fatal.
  *
- * ── WHY `home` IS A PARAMETER ──
- *
- * Every path is derived from an explicit `home`, the same convention
- * `lib/daemon/paths.ts` uses, so a test points the whole store at a scratch
+ * Every path is derived from an explicit `home` (the convention
+ * `lib/daemon/paths.ts` uses), so a test points the whole store at a scratch
  * directory and never touches the real agent home.
  *
  * ── THE AUTHORING RULE ──
@@ -166,12 +164,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
 /**
- * A timestamp that `new Date(...)` can actually read.
- *
- * `lastFiredAt` is not decoration: `nextRunAtFor` counts the next run from it,
- * so an unparseable value silently means “never again” (Invalid Date → null).
- * It is therefore the one date field held to a parse on BOTH sides — the write
- * side refuses it, and the read side refuses to hand it on.
+ * A timestamp `new Date(...)` can read: `lastFiredAt` is what `nextRunAtFor`
+ * counts from, so an unparseable value means "never again" — refused on the
+ * write side AND the read side.
  */
 const isTimestamp = (value: unknown): value is string => isText(value) && Number.isFinite(Date.parse(value));
 
@@ -204,12 +199,9 @@ function isStoredTask(value: unknown): value is ScheduledTask {
 }
 
 /**
- * Read `schedules.json`.
- *
- * A MISSING file is an empty table (version 0). An unreadable, malformed or
- * wrong-shaped one is `{ ok: false }` — deliberately NOT an empty table: the
- * caller would otherwise write a fresh file over tasks that are still on disk,
- * and a parse error would turn into silent data loss.
+ * Read `schedules.json`. A MISSING file is an empty table (version 0); an
+ * unreadable, malformed or wrong-shaped one is `{ ok: false }` — deliberately
+ * NOT an empty table, which the next write would happily overwrite.
  */
 export function readSchedules(home: string): SchedulesRead {
   const path = schedulesPath(home);
@@ -381,8 +373,8 @@ const has = (patch: ScheduleEditPatch, key: keyof ScheduleEditPatch): boolean =>
  * that means to write the name, and writing `undefined` into the table would
  * make the whole document unreadable on the next load.
  */
-function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, selfId?: string): string | undefined {
-  const taken = file.tasks.filter((task) => task.id !== selfId).map((task) => task.name);
+function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, current?: ScheduledTask): string | undefined {
+  const taken = file.tasks.filter((task) => task.id !== current?.id).map((task) => task.name);
   if (has(patch, "name")) {
     const problem = scheduleNameProblem(patch.name, taken);
     if (problem) return problem;
@@ -390,11 +382,12 @@ function patchProblem(file: SchedulesFile, patch: ScheduleEditPatch, selfId?: st
   if (has(patch, "repo")) {
     const problem = scheduleRepoProblem(patch.repo);
     if (problem) return problem;
-    // `repo` is authoring-only AND it is not bound by any hash: moving a task to
-    // another checkout would silently re-point a task the user agreed to in one
-    // repository. The move therefore has to bring a NEW contract in the same
-    // patch — the requirement is re-negotiated for the repo it will run in.
-    if (!has(patch, "contract")) {
+    // `repo` is authoring-only AND no hash binds it: moving a task to another
+    // checkout would silently re-point a task the user agreed to in one
+    // repository, so the move has to bring a NEW contract in the same patch.
+    // The comparison is against the CURRENT repo, not the key's presence: a
+    // caller that submits the whole task back unchanged is not moving it.
+    if (patch.repo !== current?.repo && !has(patch, "contract")) {
       return "改 repo 必须和一份新的 contract 一起提交（需求反述 + goal 批准）：契约的两个 hash 绑不住 repo，" +
         "而「这份反述 / goal 是在哪个仓库上批准的」正是换 repo 会默默改掉的东西";
     }
@@ -494,7 +487,7 @@ export function updateScheduledTask(
   const index = file.tasks.findIndex((task) => task.id === id);
   if (index < 0) return { ok: false, problem: `找不到调度任务 ${id}（id 不会被改写；按名字找请用 findScheduledTask）` };
   const current = file.tasks[index]!;
-  const problem = patchProblem(file, patch, current.id);
+  const problem = patchProblem(file, patch, current);
   if (problem) return { ok: false, problem: problem };
   const updated: ScheduledTask = { ...current, ...patch, id: current.id, updatedAt: new Date().toISOString() };
   const tasks = [...file.tasks];
@@ -505,9 +498,8 @@ export function updateScheduledTask(
 }
 
 /**
- * Delete one task. Removal is not an edit of the contract — it publishes
- * nothing and rewrites nothing — so the panel side may do it too; the version
- * check is what keeps it from deleting a task somebody just replaced.
+ * Delete one task. Removal publishes nothing and rewrites no contract, so the
+ * panel side may do it too; the version check is the guard.
  */
 export function removeScheduledTask(
   home: string,
@@ -532,11 +524,9 @@ export function removeScheduledTask(
 }
 
 /**
- * When this task fires next, from `now` (or from `lastFiredAt` when it has
- * fired before — a run that already happened is not a candidate again).
- * A disabled task has no next run; an illegal cron or an impossible date has
- * none either, and both answer `null` rather than throwing at a caller that is
- * only drawing a row in a panel.
+ * When this task fires next — from `lastFiredAt` if it has fired, else from
+ * `now`. A disabled task, an illegal cron and an impossible date all answer
+ * `null` rather than throwing at a caller that is only drawing a panel row.
  */
 export function nextRunAtFor(task: ScheduledTask, now: Date): Date | null {
   if (!task || task.enabled !== true) return null;
@@ -550,12 +540,9 @@ export function nextRunAtFor(task: ScheduledTask, now: Date): Date | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Append one line to `schedule-runs.jsonl` (0600).
- *
- * Append-only on purpose: this is the file three processes write and nobody
- * rewrites, so there is no read-modify-write window to lose an entry in. It
- * throws on an unreadable home or an unknown record kind — both are bugs at a
- * call site, not states to report.
+ * Append one line to `schedule-runs.jsonl` (0600). Append-only on purpose: the
+ * file three processes write and nobody rewrites, so there is no
+ * read-modify-write window to lose an entry in.
  */
 export function appendScheduleRun(home: string, record: ScheduleRunRecord): void {
   if (!isRecord(record) || !RUN_KINDS.includes(String(record.kind))) {
