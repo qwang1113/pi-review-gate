@@ -214,8 +214,9 @@ test("a child session's transition is not raised as a notification (its manager 
   watcher.stop();
 });
 
-test("a session that disappears notifies — but only when the gate would have (same predicate)", () => {
-  const session = (over: Partial<DaemonSession> = {}): DaemonSession => ({
+/** One session as the observer would report it — shared by the two liveness tests. */
+function daemonSession(over: Partial<DaemonSession> = {}): DaemonSession {
+  return {
     sessionId: "s-1",
     name: "t1-work",
     kind: "loop",
@@ -237,26 +238,59 @@ test("a session that disappears notifies — but only when the gate would have (
     registeredAt: null,
     heartbeatAt: null,
     ...over,
-  });
+  };
+}
 
+/** A watcher over a session list the test replaces between ticks. */
+function watcherOver(live: () => DaemonSession[]): { tick: () => void; stop: () => void; events: DaemonEvent[] } {
+  const events: DaemonEvent[] = [];
+  const hub = createSseHub();
+  hub.add((event) => events.push(event), null);
+  const observer = {
+    collect: () => ({ now: new Date().toISOString(), tmuxReadable: true, sessions: live(), problems: [] }),
+    transcriptFor: () => undefined,
+    outputFor: () => [],
+  };
+  const watcher = createSessionWatcher({ observer, hub, intervalMs: 60_000 });
+  return { tick: () => watcher.tick(), stop: () => watcher.stop(), events };
+}
+
+test("a session that disappears notifies — but only when the gate would have (same predicate)", () => {
   for (const [kind, expected] of [["loop", 1], ["child", 0]] as const) {
-    let live: DaemonSession[] = [session({ kind })];
-    const observer = {
-      collect: () => ({ now: new Date().toISOString(), tmuxReadable: true, sessions: live, problems: [] }),
-      transcriptFor: () => undefined,
-      outputFor: () => [],
-    };
-    const events: DaemonEvent[] = [];
-    const hub = createSseHub();
-    hub.add((event) => events.push(event), null);
-    const watcher = createSessionWatcher({ observer, hub, intervalMs: 60_000 });
+    let live: DaemonSession[] = [daemonSession({ kind })];
+    const watcher = watcherOver(() => live);
     watcher.tick();
     live = [];
     watcher.tick();
-    const notifications = events.filter((event) => event.event === "notification");
+    const notifications = watcher.events.filter((event) => event.event === "notification");
     assert.equal(notifications.length, expected, `${kind} session: ${expected} notification(s)`);
     if (expected > 0) {
       assert.equal((notifications[0]!.data as { kind: string }).kind, "exited");
+    }
+    watcher.stop();
+  }
+});
+
+test("a session that dies IN PLACE notifies on the liveness flip alone (review round 1 P1)", () => {
+  // MEASURED (2026-10-01, quality round): the state word and liveness flip on
+  // DIFFERENT polls. `working → idle` is not news, and the session's `alive`
+  // only turns false on a LATER tick — a tick that carries NO state change.
+  // With the `exited` branch nested under `previous.state !== session.state`,
+  // the frozen contract's own event (docs/daemon/api.md §8.2) was unreachable
+  // on this path: the panel was never told a session had died in place.
+  for (const [kind, expected] of [["loop", 1], ["child", 0]] as const) {
+    let live: DaemonSession[] = [daemonSession({ kind, state: "working" })];
+    const watcher = watcherOver(() => live);
+    watcher.tick();
+    live = [daemonSession({ kind, state: "idle" })];
+    watcher.tick();
+    live = [daemonSession({ kind, state: "idle", alive: false })];
+    watcher.tick();
+    const notifications = watcher.events.filter((event) => event.event === "notification");
+    assert.equal(notifications.length, expected, `${kind} session: ${expected} notification(s)`);
+    if (expected > 0) {
+      assert.equal((notifications[0]!.data as { kind: string }).kind, "exited");
+      assert.match(String((notifications[0]!.data as { body: string }).body), /异常结束/);
     }
     watcher.stop();
   }

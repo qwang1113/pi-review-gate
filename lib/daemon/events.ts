@@ -495,12 +495,19 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
       } else if (previous.state !== session.state || previous.name !== session.name || previous.alive !== session.alive) {
         seen.set(session.sessionId, known);
         opts.hub.emit({ event: "session", data: { kind: "updated", session } }, session.sessionId);
-        if (notifiable && previous.state !== session.state) {
-          const kind = notificationKindFor(session.state);
+        if (notifiable) {
+          const kind = previous.state !== session.state ? notificationKindFor(session.state) : undefined;
           if (kind !== undefined) {
             const where = session.name === null ? session.sessionId : `@${session.name}`;
             notify(session, kind, kind === "needs-user" ? `${where} 正在等你回答。` : `${where} 已完成。`);
           } else if (previous.alive && !session.alive && previous.state !== "done") {
+            // AN EXIT IS ITS OWN TRANSITION (review round 1, 2026-10-01). The
+            // state word and liveness flip on DIFFERENT polls: `working → idle`
+            // is not news, and `alive` only goes true → false on a LATER tick —
+            // which carries no state change to speak for it. With this branch
+            // nested under the state guard, the contract's own `exited` event
+            // (docs/daemon/api.md §8.2) was unreachable on the ordinary path
+            // (measured: zero notifications while the session died in place).
             notify(session, "failed", `${session.name === null ? session.sessionId : `@${session.name}`} 异常结束。`);
           }
         }
