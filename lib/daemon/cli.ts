@@ -52,7 +52,7 @@ import {
 import { probeDaemon } from "../daemon-presence.ts";
 import { pidAlive } from "../session-registry.ts";
 import { ensureDaemonRunning } from "./autostart.ts";
-import { installDaemonService, launchdPlistPath, uninstallDaemonService, type LaunchdDeps } from "./service-launchd.ts";
+import { installDaemonService, uninstallDaemonService, type LaunchdDeps } from "./service-launchd.ts";
 import {
   DAEMON_DEFAULT_PORT,
   DAEMON_HOME_ENV,
@@ -75,7 +75,7 @@ export interface CliIo {
    * the real code path without writing into the user's LaunchAgents or
    * booting an agent out of their session.
    */
-  launchd?: Pick<LaunchdDeps, "runLaunchctl" | "platform" | "uid">;
+  launchd?: Pick<LaunchdDeps, "runLaunchctl" | "platform" | "uid" | "userHome">;
 }
 
 /**
@@ -289,7 +289,7 @@ function service(command: "install" | "uninstall", args: Args, io: CliIo, home: 
       io.err(`没装成：${result.problem}`);
       return 1;
     }
-    io.out(`已装载：${launchdPlistPath(home)}（登录自启；崩溃后由 launchd 重起，\`pi-gate daemon stop\` 的干净退出不会）`);
+    io.out(`已装载：${result.plistPath}（登录自启；崩溃后由 launchd 重起，\`pi-gate daemon stop\` 的干净退出不会）`);
     io.out("现在它应该已经在跑（RunAtLoad）—— `pi-gate daemon status` 确认。");
     io.out("若此刻另有一份手动启动的 daemon 在跑：那一份会继续服务，launchd 的这份会干净退出；先 `pi-gate daemon stop` 再 `launchctl kickstart -k gui/$(id -u)/com.pi.review-gate.daemon` 交给它。");
     return 0;

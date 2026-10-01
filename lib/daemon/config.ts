@@ -33,7 +33,7 @@
  * lands next to it.
  */
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { writeFileAtomic } from "../atomic-write.ts";
@@ -470,13 +470,4 @@ export function writeConfig(
     ...(backup === undefined ? {} : { backup }),
     value: maskSecrets(next),
   };
-}
-
-/** `true` when the path exists as a regular file — used by the tests and the panel. */
-export function configExists(path: string): boolean {
-  try {
-    return statSync(path).isFile();
-  } catch {
-    return false;
-  }
 }

@@ -120,7 +120,12 @@ export async function probeDaemon(opts: {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
 } = {}): Promise<DaemonProbe> {
-  const gathered = gatherPresenceFacts(opts.home);
+  // THE SAME HOME THE SYNC SIDE USES (quality round P1, 2026-10-01): without
+  // this line `readDaemonState(undefined)` fell back to `$HOME` and ignored
+  // `RG_DAEMON_HOME`, so the two entries could disagree about there being a
+  // daemon at all — one answering "online", the other "no state file".
+  const home = opts.home ?? daemonUserHome();
+  const gathered = gatherPresenceFacts(home);
   if (gathered.state === undefined || !gathered.alive || gathered.token === undefined) {
     // The rule's own early exits, judged with a health reading that is never
     // consulted — so the reason a user reads is the rule's, not this caller's.

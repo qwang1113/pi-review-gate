@@ -344,11 +344,3 @@ export function submitAnswer(
   }
   return { ok: true, answer: answer.answer, path };
 }
-
-/** Drop one session's question directory (the gate's own settle path may call this). */
-export function clearSessionQuestions(home: string, sessionId: string): void {
-  if (sessionIdProblem(sessionId) !== undefined) return;
-  try {
-    rmSync(sessionQuestionsDir(home, sessionId), { recursive: true, force: true });
-  } catch { /* best effort: an unremovable directory is not a reason to fail a request */ }
-}

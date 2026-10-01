@@ -34,6 +34,40 @@ import { freePort, scratchHome } from "./daemon-helpers.ts";
 /** The CLI's output is not the subject here; the daemon it starts is. */
 const silentIo = { out: () => {}, err: () => {} };
 
+test("both entries read the SAME home — RG_DAEMON_HOME is honoured by the async probe too", async () => {
+  // The bug this pins (quality round P1, 2026-10-01): `probeDaemon` used to let
+  // the fs helpers fall back to `$HOME` while `probeDaemonSync` resolved
+  // `daemonUserHome()`, so with the override set the two entries could disagree
+  // about there being a daemon AT ALL — one reading the override, the other the
+  // real home.
+  const home = scratchHome();
+  ensureDaemonToken(home);
+  writeDaemonState({ ...buildDaemonState({ port: 4711 }), pid: process.pid }, home);
+  const previous = process.env.RG_DAEMON_HOME;
+  process.env.RG_DAEMON_HOME = home;
+  try {
+    const seen: string[] = [];
+    await probeDaemon({
+      timeoutMs: 200,
+      fetchImpl: (async (input: string | URL | Request) => {
+        seen.push(String(input));
+        throw new Error("nothing listens there");
+      }) as unknown as typeof fetch,
+    });
+    let syncUrl = "";
+    probeDaemonSync({ health: (url) => { syncUrl = url; return { ok: true }; } });
+    assert.deepEqual(seen, ["http://127.0.0.1:4711/api/health"], "the async probe read the override");
+    assert.equal(syncUrl, "http://127.0.0.1:4711/api/health", "…and the sync probe read the same one");
+  } finally {
+    if (previous === undefined) delete process.env.RG_DAEMON_HOME;
+    else process.env.RG_DAEMON_HOME = previous;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The rule is three conditions, and its answer names the one that failed
+// ---------------------------------------------------------------------------
+
 test("the rule is three conditions, and its answer names the one that failed", () => {
   const state = { ...buildDaemonState({ port: 4597 }) };
   const ok: HealthReading = { ok: true };

@@ -57,9 +57,6 @@ import { daemonHome } from "./paths.ts";
 import { ensureDaemonIdentity } from "./state.ts";
 import type { SessionObserver } from "./sessions.ts";
 
-/** How much of the message a receipt echoes back. Same preview rule as the tool. */
-export const MESSAGE_PREVIEW = 160;
-
 /**
  * THE DAEMON'S OWN TMUX RUNNER.
  *

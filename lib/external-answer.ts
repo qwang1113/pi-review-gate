@@ -62,7 +62,7 @@
 
 import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, rmdirSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { daemonUserHome } from "./daemon/paths.ts";
 
 import { writeFileAtomic } from "./atomic-write.ts";
 import { declineRowOf, type ChoiceSpec } from "./choice-dialog.ts";
@@ -220,7 +220,12 @@ export function lookAtAnswerFile(
 }
 
 export function createExternalAnswers(deps: ExternalAnswerDeps): ExternalAnswerChannel {
-  const home = deps.home ?? homedir();
+  // THE DAEMON'S OWN HOME RESOLUTION (quality round P2, 2026-10-01): the
+  // daemon reads this directory as `daemonUserHome()` (rg/RG_DAEMON_HOME), so
+  // bare `homedir()` here would write every question into `$HOME` while the
+  // panel looked under the override — unanswered and silent. One rule, both
+  // sides: `lib/daemon/paths.ts`.
+  const home = deps.home ?? daemonUserHome();
   const now = deps.now ?? (() => Date.now());
   const pollMs = deps.pollMs ?? EXTERNAL_ANSWER_POLL_MS;
   const schedule: PollScheduler = deps.schedule ?? ((fn, ms) => {

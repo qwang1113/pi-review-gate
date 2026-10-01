@@ -40,6 +40,8 @@ pi-gate daemon uninstall  # bootout 并删除 plist
 
 - `install` 写 `~/Library/LaunchAgents/com.pi.review-gate.daemon.plist`，内容是事实拼出来的：
   绝对路径的 node + `scripts/pi-gate.mjs` + `daemon run --port …`，并把 `RG_DAEMON_HOME` 一起写进去。
+  plist 的位置**永远是真实的 `~/Library/LaunchAgents`**（launchd 只看那里）——
+  `RG_DAEMON_HOME` 改的是 daemon 自己读哪个 home，不会把登录项搬到别处。
 - **`RunAtLoad` + `KeepAlive.SuccessfulExit = false`**：登录起来；进程**崩溃**（非 0 退出）会被重起；
   而 `pi-gate daemon stop` 的干净退出（0）**不会**被拉回来 —— 否则这个命令就永远停不下来。
   实测（2026-10-01）：`launchctl kickstart -k` 后 4 秒内就起来了；`kill -9` 之后约 30 秒自动重起
@@ -135,7 +137,8 @@ open menubar/build/PiGate.app
 | `menubar/build/PiGate.app` | 菜单栏 app 的构建产物（`menubar/build.sh`） |
 
 `RG_DAEMON_HOME` 覆盖 agent home（默认 `$HOME`）：CLI、daemon 后台子进程、菜单栏 app
-与通知抑制探测读的都是同一个变量，所以设了它，四处会一起走。
+、通知抑制探测与门禁写待答问题的位置读的都是同一个变量，所以设了它，这几处会一起走。
+唯一的例外是 launchd 的 plist 落点（永远是真实的 `~/Library/LaunchAgents`，上面 §1 已说明）。
 
 常见问题：
 

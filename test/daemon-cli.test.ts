@@ -64,7 +64,15 @@ test("install writes a launchd agent and uninstall removes it (never the real on
     out: (line) => lines.push(line),
     err: (line) => errors.push(line),
     home,
-    launchd: { runLaunchctl: (argv) => { calls.push([...argv]); return { ok: true, code: 0, stdout: "", stderr: "" }; }, platform: "darwin", uid: 501 },
+    launchd: {
+      runLaunchctl: (argv) => { calls.push([...argv]); return { ok: true, code: 0, stdout: "", stderr: "" }; },
+      platform: "darwin",
+      uid: 501,
+      // The plist must land in a USER home the test owns — deriving it from the
+      // daemon home is the bug the unit test pins, and deriving it from the
+      // real `~/Library/LaunchAgents` would write into the developer's machine.
+      userHome: home,
+    },
   });
   const run = async (argv: string[]): Promise<{ code: number; out: string; err: string }> => {
     const lines: string[] = [];
@@ -97,7 +105,7 @@ test("install refuses honestly on a machine without launchd", async () => {
     out: (line) => lines.push(line),
     err: (line) => errors.push(line),
     home,
-    launchd: { platform: "linux" },
+    launchd: { platform: "linux", userHome: home },
   });
   assert.equal(code, 1);
   assert.match(errors.join("\n"), /launchd 只在 macOS/);

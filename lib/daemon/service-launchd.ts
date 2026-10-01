@@ -29,6 +29,14 @@
  * and both take the launchctl runner as a dependency — a test must never write
  * to the real `~/Library/LaunchAgents` or boot a real agent out of the user's
  * session.
+ *
+ * ── TWO HOMES, NOT ONE (quality round P2, 2026-10-01) ──
+ *
+ * `userHome` is where launchd looks for a login item (`~/Library/LaunchAgents`,
+ * always the REAL user home); `home` is the daemon's own (`RG_DAEMON_HOME` or
+ * `$HOME`), which the plist passes through in `EnvironmentVariables`. Deriving
+ * the first from the second wrote the plist into a directory nothing scans
+ * whenever the override was set — and then reported 「登录自启」.
  */
 
 import { spawnSync } from "node:child_process";
@@ -51,11 +59,22 @@ export interface LaunchctlResult {
 
 export interface LaunchdDeps {
   /**
-   * The user home the daemon belongs to (`RG_DAEMON_HOME` or `$HOME`) — the
-   * plist lives under it, which is also what keeps a scratch-home test out of
-   * the real `~/Library/LaunchAgents`.
+   * THE DAEMON'S home (`RG_DAEMON_HOME` or `$HOME`) — what the agent's
+   * `EnvironmentVariables` entry is set to, and where the log goes.
    */
   home?: string;
+  /**
+   * THE USER's home — where `~/Library/LaunchAgents` lives.
+   *
+   * SEPARATE FROM `home` ON PURPOSE (quality round P2, 2026-10-01): launchd
+   * only ever reads a login item from the USER's own `~/Library/LaunchAgents`,
+   * so pointing this at an `RG_DAEMON_HOME` override would write a plist into
+   * a directory nothing scans and then report 「登录自启」 — a lie. The override
+   * still reaches the daemon (the plist passes it through); it just does not
+   * move launchd's own directory. Injected by tests, so a scratch home never
+   * touches the real one.
+   */
+  userHome?: string;
   /** `[node, <pi-gate entry>, …]` — how launchd re-executes the CLI. */
   reexec: readonly string[];
   port?: number;
@@ -67,11 +86,12 @@ export interface LaunchdDeps {
   uid?: number;
 }
 
-export const launchdUserHome = (home?: string): string => home ?? homedir();
+/** Where `LaunchAgents` is looked up: the real user home unless a test says otherwise. */
+export const launchdUserHome = (userHome?: string): string => userHome ?? homedir();
 
-/** `~/Library/LaunchAgents/<label>.plist` — under the home the daemon uses. */
-export function launchdPlistPath(home?: string): string {
-  return join(launchdUserHome(home), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+/** `~/Library/LaunchAgents/<label>.plist` — under the USER's home. */
+export function launchdPlistPath(userHome?: string): string {
+  return join(launchdUserHome(userHome), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
 }
 
 const xmlEscape = (raw: string): string =>
@@ -86,7 +106,7 @@ const xmlEscape = (raw: string): string =>
  * installing CLI just wrote.
  */
 export function buildLaunchdPlist(deps: LaunchdDeps): string {
-  const home = launchdUserHome(deps.home);
+  const home = deps.home ?? homedir();
   const port = deps.port ?? DAEMON_DEFAULT_PORT;
   const roots = deps.workspaceRoots ?? [];
   const log = daemonLogPath(home);
@@ -158,7 +178,7 @@ const detail = (result: LaunchctlResult): string => (result.stderr.trim() || res
  * reported with launchctl's own words.
  */
 export function installDaemonService(deps: LaunchdDeps): ServiceOutcome {
-  const plistPath = launchdPlistPath(deps.home);
+  const plistPath = launchdPlistPath(deps.userHome);
   const steps: string[] = [];
   const platform = deps.platform ?? process.platform;
   if (platform !== "darwin") {
@@ -168,8 +188,8 @@ export function installDaemonService(deps: LaunchdDeps): ServiceOutcome {
   const uid = deps.uid ?? process.getuid?.() ?? 0;
   const domain = `gui/${uid}`;
   try {
-    mkdirSync(join(launchdUserHome(deps.home), "Library", "LaunchAgents"), { recursive: true });
-    mkdirSync(daemonHome(launchdUserHome(deps.home)), { recursive: true });
+    mkdirSync(join(launchdUserHome(deps.userHome), "Library", "LaunchAgents"), { recursive: true });
+    mkdirSync(daemonHome(deps.home ?? homedir()), { recursive: true });
     writeFileSync(plistPath, buildLaunchdPlist(deps), { encoding: "utf8", mode: 0o644 });
     steps.push(`写入 ${plistPath}`);
   } catch (error) {
@@ -193,7 +213,7 @@ export function installDaemonService(deps: LaunchdDeps): ServiceOutcome {
  * installed the agent should not be told it was removed.
  */
 export function uninstallDaemonService(deps: LaunchdDeps): ServiceOutcome & { removed: boolean } {
-  const plistPath = launchdPlistPath(deps.home);
+  const plistPath = launchdPlistPath(deps.userHome);
   const steps: string[] = [];
   const platform = deps.platform ?? process.platform;
   if (platform !== "darwin") {

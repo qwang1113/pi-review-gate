@@ -57,18 +57,21 @@ test("a path with XML metacharacters is escaped, not pasted in", () => {
 
 test("install writes the agent file and bootstraps it in the user's own domain", () => {
   const home = scratchHome();
+  const userHome = scratchHome();
   const calls: string[][] = [];
   const result = installDaemonService({
     home,
+    userHome,
     reexec: ["/usr/bin/node", "/tmp/cli.ts"],
     runLaunchctl: (argv) => { calls.push([...argv]); return OK(argv); },
     platform: "darwin",
     uid: 501,
   });
   assert.equal(result.ok, true);
-  const plistPath = launchdPlistPath(home);
-  assert.equal(plistPath, join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`));
+  const plistPath = launchdPlistPath(userHome);
+  assert.equal(plistPath, join(userHome, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`));
   assert.equal(existsSync(plistPath), true);
+  assert.equal(result.plistPath, plistPath);
   assert.deepEqual(calls, [
     ["bootout", `gui/501/${LAUNCHD_LABEL}`],
     ["bootstrap", "gui/501", plistPath],
@@ -76,10 +79,32 @@ test("install writes the agent file and bootstraps it in the user's own domain",
   assert.ok(result.steps.length >= 3);
 });
 
+test("the launchd directory is the USER's home, never the RG_DAEMON_HOME override", () => {
+  const daemonHomeOverride = scratchHome();
+  const userHome = scratchHome();
+  const result = installDaemonService({
+    home: daemonHomeOverride,
+    userHome,
+    reexec: ["/usr/bin/node", "/tmp/cli.ts"],
+    runLaunchctl: OK,
+    platform: "darwin",
+    uid: 501,
+  });
+  assert.equal(result.ok, true);
+  assert.ok(result.plistPath.startsWith(userHome), "launchd only scans the real ~/Library/LaunchAgents");
+  assert.equal(existsSync(join(daemonHomeOverride, "Library")), false, "the override never grows a Library/ tree");
+  // …while the DAEMON home still rides in the plist's environment, so the
+  // launchd instance reads exactly the files the installing CLI wrote.
+  const written = readFileSync(result.plistPath, "utf8");
+  assert.match(written, new RegExp(`<key>RG_DAEMON_HOME</key>\\s*<string>${daemonHomeOverride}</string>`));
+});
+
 test("a bootstrap launchctl refuses is reported with launchctl's own words", () => {
   const home = scratchHome();
+  const userHome = scratchHome();
   const result = installDaemonService({
     home,
+    userHome,
     reexec: ["/usr/bin/node", "/tmp/cli.ts"],
     runLaunchctl: (argv) => (argv[0] === "bootstrap" ? FAIL("Bootstrap failed: 5: Input/output error")() : OK(argv)),
     platform: "darwin",
@@ -87,15 +112,17 @@ test("a bootstrap launchctl refuses is reported with launchctl's own words", () 
   });
   assert.equal(result.ok, false);
   assert.match(result.problem!, /Bootstrap failed/);
-  assert.equal(existsSync(launchdPlistPath(home)), true, "the plist stays as evidence of what was attempted");
+  assert.equal(existsSync(launchdPlistPath(userHome)), true, "the plist stays as evidence of what was attempted");
 });
 
 test("uninstall boots the agent out and removes the plist", () => {
   const home = scratchHome();
-  installDaemonService({ home, reexec: ["/usr/bin/node", "/tmp/cli.ts"], runLaunchctl: OK, platform: "darwin", uid: 501 });
+  const userHome = scratchHome();
+  installDaemonService({ home, userHome, reexec: ["/usr/bin/node", "/tmp/cli.ts"], runLaunchctl: OK, platform: "darwin", uid: 501 });
   const calls: string[][] = [];
   const result = uninstallDaemonService({
     home,
+    userHome,
     reexec: ["/usr/bin/node", "/tmp/cli.ts"],
     runLaunchctl: (argv) => { calls.push([...argv]); return OK(argv); },
     platform: "darwin",
@@ -104,13 +131,15 @@ test("uninstall boots the agent out and removes the plist", () => {
   assert.equal(result.ok, true);
   assert.equal(result.removed, true);
   assert.deepEqual(calls, [["bootout", `gui/501/${LAUNCHD_LABEL}`]]);
-  assert.equal(existsSync(launchdPlistPath(home)), false);
+  assert.equal(existsSync(launchdPlistPath(userHome)), false);
 });
 
 test("uninstalling what was never installed is reported as such, not as a removal", () => {
   const home = scratchHome();
+  const userHome = scratchHome();
   const result = uninstallDaemonService({
     home,
+    userHome,
     reexec: ["/usr/bin/node", "/tmp/cli.ts"],
     // The shape of a real "nothing is loaded": launchctl exits non-zero.
     runLaunchctl: FAIL("Could not find service") as unknown as (argv: readonly string[]) => LaunchctlResult,
@@ -124,9 +153,11 @@ test("uninstalling what was never installed is reported as such, not as a remova
 
 test("on a machine without launchd nothing is written and the reason says so", () => {
   const home = scratchHome();
+  const userHome = scratchHome();
   const calls: unknown[] = [];
   const installed = installDaemonService({
     home,
+    userHome,
     reexec: ["/usr/bin/node", "/tmp/cli.ts"],
     runLaunchctl: (argv) => { calls.push(argv); return OK(argv); },
     platform: "linux",
@@ -134,17 +165,17 @@ test("on a machine without launchd nothing is written and the reason says so", (
   assert.equal(installed.ok, false);
   assert.match(installed.problem!, /launchd 只在 macOS 上有（这台机器是 linux）/);
   assert.deepEqual(calls, [], "no launchctl call is even attempted");
-  assert.equal(existsSync(join(home, "Library")), false);
+  assert.equal(existsSync(join(userHome, "Library")), false);
 
-  const uninstalled = uninstallDaemonService({ home, reexec: [], platform: "linux" });
+  const uninstalled = uninstallDaemonService({ home, userHome, reexec: [], platform: "linux" });
   assert.equal(uninstalled.ok, false);
   assert.equal(uninstalled.removed, false);
 });
 
 test("the plist the CLI would write is the plist a human can read back", () => {
-  const home = scratchHome();
-  installDaemonService({ home, reexec: ["/usr/bin/node", "/tmp/cli.ts"], runLaunchctl: OK, platform: "darwin", uid: 501 });
-  const written = readFileSync(launchdPlistPath(home), "utf8");
+  const userHome = scratchHome();
+  installDaemonService({ home: scratchHome(), userHome, reexec: ["/usr/bin/node", "/tmp/cli.ts"], runLaunchctl: OK, platform: "darwin", uid: 501 });
+  const written = readFileSync(launchdPlistPath(userHome), "utf8");
   assert.match(written, /^<\?xml version="1\.0" encoding="UTF-8"\?>/);
   assert.match(written, /<key>Label<\/key>/);
   assert.equal(written.endsWith("</plist>\n"), true, "a plist is a text file a person may read and fix");
