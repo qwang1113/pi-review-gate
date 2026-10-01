@@ -388,7 +388,6 @@ test("a settling run frees its repo — for exactly one successor", () => {
 test("a settled run's window is closed — the checkout it held is reclaimed (quality round P1)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
-  const scheduled = dueTask(home, repo, { name: "closing-task" });
   const tmux = fakeTmux();
   const scopeName = ownSessionName(daemonTmuxScope({
     home,
@@ -398,8 +397,11 @@ test("a settled run's window is closed — the checkout it held is reclaimed (qu
   }));
   assert.ok(scopeName !== undefined, "the daemon derives its own scope session name");
 
+  // NO TASK IN THIS REPO YET: these ticks exercise the SETTLE path, and a due
+  // task would fire a run of its own (which would then hold the repo and block
+  // the guard's branch below).
   const start = (runId: string, sessionId: string): void => {
-    appendScheduleRun(home, { kind: "run-started", runId, taskId: scheduled.id, sessionId, at: new Date().toISOString() });
+    appendScheduleRun(home, { kind: "run-started", runId, taskId: "sch-bbbb2222", sessionId, at: new Date().toISOString() });
   };
 
   // The run is over (done + a recorded round). Its window is the daemon's own,
@@ -429,6 +431,35 @@ test("a settled run's window is closed — the checkout it held is reclaimed (qu
     ]),
   }).tick();
   assert.equal(tmux.calls.filter((argv) => argv[0] === "kill-window").length, killsBefore, "别人的 window 不关");
+
+  // …AND IF THAT CLOSE HAD FAILED (quality round P2): the leftover window holds
+  // the repo, so the next due slot finds it through the guard and closes it
+  // again instead of only skipping forever.
+  dueTask(home, repo, { name: "closing-task-next" });
+  mkdirSync(join(repo, ".pi"), { recursive: true });
+  writeFileSync(
+    join(repo, ".pi", "session-presence.json"),
+    JSON.stringify({ sessionId: "sess-bbbb2222", pid: 4242, host: "host", at: new Date().toISOString() }),
+    { mode: 0o600 },
+  );
+  const kills = tmux.calls.filter((argv) => argv[0] === "kill-window").length;
+  createScheduler({
+    home,
+    runTmux: tmux,
+    observer: fakeObserver([
+      sessionFor("sess-bbbb2222", { state: "done", repo, tmux: { session: scopeName!, window: "@7", pane: "%7" } }),
+    ]),
+  }).tick();
+  assert.equal(
+    tmux.calls.filter((argv) => argv[0] === "kill-window").length,
+    kills + 1,
+    "已结算运行的遗留窗口在下一次到期时被补关",
+  );
+  assert.equal(
+    readScheduleRuns(home).filter((record) => record.kind === "run-settled" && record.runId === "run-bbbb2222").length,
+    1,
+    "补关不会重复结算",
+  );
 });
 
 test("a task whose launch fails is recorded as a skip, not retried every tick", () => {

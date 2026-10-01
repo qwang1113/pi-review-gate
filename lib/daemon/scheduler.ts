@@ -412,6 +412,19 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       return;
     }
     const records = readScheduleRuns(deps.home);
+    // WHICH SESSIONS WERE RUNS OF OURS THAT ALREADY SETTLED. A leftover window of
+    // one of those is an unfinished cleanup, not an occupant — see the guard
+    // inside the loop below (quality round P2, 2026-10-02).
+    const startedSessions = new Map<string, string>();
+    for (const record of records) {
+      if (record.kind === "run-started") startedSessions.set(record.runId, record.sessionId);
+    }
+    const settledSessions = new Set<string>();
+    for (const record of records) {
+      if (record.kind !== "run-settled") continue;
+      const sessionId = startedSessions.get(record.runId);
+      if (sessionId !== undefined) settledSessions.add(sessionId);
+    }
     // RUNS THAT NEVER REACHED THE LEDGER ARE STILL RUNNING: the session is
     // live, so it holds its repo and it must settle like any other run.
     const open = [...openRuns(records), ...unrecordedRuns.values()];
@@ -487,6 +500,19 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // still has the process.
         const sessionHolder = liveSessionHolder(task.repo, at);
         if (sessionHolder !== undefined) {
+          // A LEFTOVER WINDOW OF OURS IS NOT AN OCCUPANT FOREVER (quality round
+          // P2, 2026-10-02): closing a settled run's window is BEST-EFFORT — the
+          // settlement must never depend on tmux — so a close that failed, or a
+          // process killed between the two, left a window holding this repo
+          // with nothing left to retry it. Here is the retry: the one place
+          // that already has to name the occupant.
+          if (settledSessions.has(sessionHolder.sessionId)) {
+            const leftover = (collection ?? deps.observer.collect()).sessions
+              .find((candidate) => candidate.sessionId === sessionHolder.sessionId);
+            if (leftover !== undefined && closeRunWindow(deps, leftover)) {
+              log(`上一次结算没关掉的运行窗口 ${sessionHolder.sessionId} 已补关（${task.repo}）—— 下一个时间点起可以正常跑`);
+            }
+          }
           skipped(task, at, `repo ${task.repo} 上还有别的活会话 ${sessionHolder.sessionId}（最后心跳 ${sessionHolder.at}）占着这块 worktree —— 门禁不会为运行会话启动，契约继承不了（关掉那个会话，或等它的心跳过期）`, slot);
           continue;
         }
