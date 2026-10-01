@@ -181,7 +181,7 @@ function ScheduleRow({
 type FormState = { mode: ScheduleFormMode; task?: ScheduledTask };
 
 export default function SchedulesPage() {
-  const { refresh, generation } = useDaemon();
+  const { refresh, generation, connected } = useDaemon();
   const [data, setData] = useState<SchedulesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -203,12 +203,14 @@ export default function SchedulesPage() {
     }
   }, []);
 
-  // The panel's existing "the daemon side changed" moment is `generation`
-  // (`refresh()`); schedules have no SSE frame of their own, and this page does
-  // not open one.
+  // Two existing moments re-read this page, and both are needed: a `refresh()`
+  // (`generation`), and the stream coming back (`connected`) — the events that
+  // fired while it was down are gone, which is also why the provider re-reads
+  // its session snapshot on reopen. Schedules have no SSE frame of their own
+  // (§13), and this page does not open one.
   useEffect(() => {
     void load();
-  }, [load, generation]);
+  }, [load, generation, connected]);
 
   const toggle = async (task: ScheduledTask, enabled: boolean) => {
     setBusyId(task.id);

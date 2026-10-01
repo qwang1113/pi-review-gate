@@ -62,7 +62,7 @@ web/
     components/
       ui/               shadcn 组件（源码在本仓库，不是依赖）
       …                 业务组件：侧栏、顶栏、会话行、问题卡/批、输出流、门禁卡、启动跟踪条、错误边界
-    pages/              路由页面：会话 / 详情 / 待处理 / 发起任务 / 历史 / 设置 / token 门页
+    pages/              路由页面：会话 / 详情 / 待处理 / 发起任务 / 定时任务 / 历史 / 设置 / token 门页
 ```
 
 **新增一块功能放哪里**：数据形状进 `lib/types.ts`，出网调用进 `lib/api.ts`（不要在组件里直接 `fetch`），
@@ -79,6 +79,7 @@ web/
 | 会话详情 `/sessions/:id` | 上面的会话表 + SSE `output`（`?sessionId=` 带 replay，首帧即历史）+ `GET /api/questions` |
 | 待处理 `/questions` | `GET /api/questions`（5 秒轮询，SSE 里没有 question 事件）+ `POST /api/questions/:requestId/answer` |
 | 发起任务 `/new` 与 Sheet | `GET /api/repos`（候选仓库）+ `POST /api/tasks` |
+| 定时任务 `/schedules` | `GET /api/schedules`（在 `refresh()` 与流重连这两个既有刷新时机重读；契约里没有 schedules 的 SSE 帧）+ `POST /api/schedules/author`（新增 / 改需求：只起会话，不写表）+ `PUT` / `DELETE /api/schedules/:id` |
 | 历史 `/history` | `GET /api/notifications?limit=200` |
 | 设置 `/settings` | `GET /api/config?target=…` + `PUT /api/config` |
 | 详情页发送区 | `POST /api/sessions/:name/messages` |

@@ -83,7 +83,8 @@ daemon 起一个 authoring 会话跟你谈；
 - **会话**：在任何 pi 会话里直接说「每天 9 点跑一次 X」，agent 调 `schedule_task` 工具。
 
 两条路是同一条：**先反述需求 → 你确认 → goal 审计 → 你批准 goal → 契约落表**。
-面板只能改 `name` / `cron` / `enabled`（改名、改周期、启停）；**改需求或换 repo 一律回到
+面板的写路径（`PUT /api/schedules/:id`）只接受 `name` / `cron` / `enabled`；当前面板 UI 提供
+启停与改周期（改名请用会话里的 `schedule_task`）；**改需求或换 repo 一律回到
  authoring 会话重谈** —— 契约绑着你批准过的那两段文本的 hash，一个文本框悄悄改掉需求，
 这个定时任务就不再是你批准的那个了。
 
