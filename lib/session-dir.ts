@@ -75,12 +75,30 @@ export function sessionDirForCwd(
     process.env.PI_CODING_AGENT_SESSION_DIR ??
     process.env.TAU_CODING_AGENT_SESSION_DIR;
   if (envSessionDir) return resolve(normalizeSessionPath(envSessionDir, home));
-  const agentDir =
-    normalizeSessionPath(process.env.PI_CODING_AGENT_DIR ?? "", home) ||
-    normalizeSessionPath(process.env.TAU_CODING_AGENT_DIR ?? "", home) ||
-    join(home, ".pi", "agent");
   const enc = "--" + resolved.replace(/^[/\\\\]/, "").replace(/[/\\\\:]/g, "-") + "--";
-  return join(agentDir, "sessions", enc);
+  return join(piSessionsRoot(home), enc);
+}
+
+/**
+ * THE DIRECTORY PI KEEPS ITS PER-CWD SESSION SUBDIRECTORIES IN.
+ *
+ * A reader that starts from a session id and has no cwd to encode — the
+ * daemon's observer, which learns ids from panes, from the registry and from
+ * the run ledger — needs this root instead of one session's dir, and it has to
+ * come from the SAME rule as {@link sessionDirForCwd}: writer and reader
+ * agreeing on where a transcript lands is the whole of that rule.
+ *
+ * `home` is the USER home. pi resolves its agent dir from the environment or
+ * `$HOME`, and nothing this package adds — `RG_DAEMON_HOME` included — moves
+ * it; a reader that resolved this from the daemon's own home found no
+ * transcripts at all under the documented override (t6 acceptance).
+ */
+export function piSessionsRoot(home: string = homedir(), env: NodeJS.ProcessEnv = process.env): string {
+  const agentDir =
+    normalizeSessionPath(env.PI_CODING_AGENT_DIR ?? "", home) ||
+    normalizeSessionPath(env.TAU_CODING_AGENT_DIR ?? "", home) ||
+    join(home, ".pi", "agent");
+  return join(agentDir, "sessions");
 }
 
 /**

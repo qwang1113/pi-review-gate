@@ -53,7 +53,7 @@ import { sessionInboxPath, sessionNameProblem, sessionRegistryRoot } from "../se
 import { STATION_CAP_ENV } from "../repo-pr-policy.ts";
 import type { DeliveryStation } from "../delivery-station.ts";
 import { GATE_MODE_ENV } from "../task-mode.ts";
-import { daemonHome, DAEMON_HOME_ENV } from "./paths.ts";
+import { daemonHome, DAEMON_HOME_ENV, userHome } from "./paths.ts";
 import { ensureDaemonIdentity } from "./state.ts";
 import type { SessionObserver } from "./sessions.ts";
 
@@ -80,7 +80,18 @@ export interface SendMessageOutcome {
 }
 
 export interface ControlDeps {
+  /** The daemon's OWN home: its identity, its tmux scope, its questions. */
   home: string;
+  /**
+   * THE USER HOME the GATE writes the `@名字` registry under
+   * (`lib/daemon/paths.ts` `userHome()`), NOT the daemon's home — a session
+   * launched with `RG_DAEMON_HOME` set still registers its name under `$HOME`,
+   * because `sessionRegistryRoot()` reads `homedir()` and knows nothing about
+   * the daemon. Read from the daemon's own home, an inbox was written next to a
+   * registration nobody has, and the recipient never saw the message.
+   * Defaults to `userHome()`.
+   */
+  userHome?: string;
   runTmux: TmuxRunner;
   now?: () => number;
 }
@@ -102,7 +113,7 @@ export function sendSessionMessage(
   if (nameProblem !== undefined) return { ok: false, problem: `收件人名字不合法：${nameProblem}` };
   if (body.trim() === "") return { ok: false, problem: "消息正文是空的" };
 
-  const root = sessionRegistryRoot(deps.home);
+  const root = sessionRegistryRoot(deps.userHome ?? userHome());
   // ONE probe, closed over: the server identity cannot change mid-call, and the
   // registry asks per entry.
   const server = currentTmuxServer(deps.runTmux);
@@ -284,7 +295,7 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
     const live = liveSessionNames({
       runTmux: deps.runTmux,
       now: deps.now ?? ((): number => Date.now()),
-      root: sessionRegistryRoot(deps.home),
+      root: sessionRegistryRoot(deps.userHome ?? userHome()),
       tmuxServer: () => server,
     });
     if (live.live.some((entry) => entry.name === name) || live.unknown.some((entry) => entry.name === name)) {
@@ -339,7 +350,19 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
 }
 
 /**
- * CLOSE THE WINDOW A RUN CAME FROM — the daemon's own window, and only that.
+ * ONE WINDOW, ADDRESSED — which session it must sit in, and which window it is.
+ *
+ * `repo` is only the anchor the daemon's scope name is derived from; the target
+ * is not trusted, it is CHECKED against that derivation (below).
+ */
+export interface RunWindowTarget {
+  repo: string;
+  session: string;
+  window: string;
+}
+
+/**
+ * CLOSE A RUN'S WINDOW — the daemon's own window, and only that.
  *
  * A run is an ORDINARY loop session, and an ordinary session holds its worktree
  * until its PROCESS exits: the presence heartbeat is released on session
@@ -349,30 +372,34 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
  * "occupied" forever, and every later run of that repo would be skipped
  * (quality round P1, 2026-10-02).
  *
- * THE TARGET IS CHECKED, NOT TRUSTED: it must sit in the daemon's OWN scope
- * session (`ownSessionName` of the scope the daemon derives), which is also the
- * only session the safety door lets this call address. Anything else is left
- * alone — the user's own windows are not the daemon's to close.
+ * THE TARGET ARRIVES FROM ONE OF TWO PLACES, and both are needed:
+ *
+ *   - the OBSERVER's pane coordinates, for a session that is in the listing;
+ *   - the LAUNCH RECEIPT (`launchTask` returns `scopeSession` + `windowId`, and
+ *     the scheduler records them with the run), for a session whose pane lost
+ *     `@rg_sid` — the observer has no coordinates for it at all, and without
+ *     this second address that window could not be reclaimed while its process
+ *     lived, so the checkout stayed occupied until the user closed it by hand.
+ *
+ * AND IT IS CHECKED, NOT TRUSTED: it must name the daemon's OWN scope session
+ * for that repo (`ownSessionName` of the scope the daemon derives), which is
+ * also the only session the safety door lets this call address. Anything else
+ * is left alone — the user's own windows are not the daemon's to close.
  */
-export function closeRunWindow(
-  deps: ControlDeps,
-  session: { repo: string; tmux: { session: string; window: string } | null },
-): boolean {
-  const where = session.tmux;
-  if (where === null) return false;
+export function closeRunWindowAt(deps: ControlDeps, target: RunWindowTarget): boolean {
   const scope = daemonTmuxScope({
     home: deps.home,
     identity: ensureDaemonIdentity(deps.home),
     runTmux: deps.runTmux,
-    anchorRepo: session.repo,
+    anchorRepo: target.repo,
   });
   const scopeName = ownSessionName(scope);
-  if (scopeName === undefined || where.session !== scopeName) return false;
+  if (scopeName === undefined || target.session !== scopeName) return false;
   const run: TmuxRunner = (argv, env, extra) =>
     deps.runTmux(argv, env, [scopeName, ...(extra ?? [])]);
   // `-t <session>:<@window>`: the window ID (not its index, which moves), and
   // the session half is what the safety door compares against the declaration.
-  return run(["kill-window", "-t", `${scopeName}:${where.window}`]).ok;
+  return run(["kill-window", "-t", `${scopeName}:${target.window}`]).ok;
 }
 
 // ---------------------------------------------------------------------------

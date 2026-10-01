@@ -12,6 +12,16 @@
  *   3. `sessions/<encoded>/<ts>_<id>.jsonl`  the transcript: the session's cwd,
  *      its recent output, and the gate state it recorded about itself.
  *
+ * ── TWO OF THE THREE SOURCES ARE SOMEBODY ELSE'S FILES ──
+ *
+ * Which is why they are read from the home the OTHER process wrote them in,
+ * never from the daemon's own: pi's transcripts from pi's agent dir
+ * (`lib/session-dir.ts` `piSessionsRoot`) and the registry from
+ * `sessionRegistryRoot()`. `RG_DAEMON_HOME` moves the daemon's files and
+ * neither of those (lib/daemon/paths.ts `userHome()` says why). Reading them
+ * under the daemon's own home is what made every session look unobservable
+ * under the documented override.
+ *
  * ── THE STATE WORD IS REUSED, NOT REINVENTED ──
  *
  * {@link CHILD_STATES} is the vocabulary (`working`, `waiting-input`, `done`,
@@ -50,15 +60,22 @@ import { unmetRequirements } from "../gate-state-requirements.ts";
 import type { GateState } from "../gate-state.ts";
 import { extractGateState, readFileHead, readFileTail, readRecentEntries, transcriptSize, type OutputEntry } from "./transcript.ts";
 import { currentTmuxServer } from "../tmux-exec.ts";
-import { daemonAgentHome } from "./paths.ts";
+import { piSessionsRoot } from "../session-dir.ts";
+import { userHome } from "./paths.ts";
 
 const STATE_WORDS: ReadonlySet<string> = new Set(CHILD_STATES);
 const isStateWord = (value: string): value is ChildState => STATE_WORDS.has(value);
 
 /** How long the pane's own state word stays believable (lib/tmux-pane-state.ts). */
 const PANE_STATE_STALE_MS = PANE_STATE_STALE_S * 1_000;
-/** A transcript written to this recently is the weakest evidence of "still working". */
-const TRANSCRIPT_ACTIVE_MS = 120_000;
+/**
+ * A transcript written to this recently is the weakest evidence of "still
+ * working" — and, read the other way, of "a live process is behind it".
+ * Exported because the scheduler asks the SAME question of the same file when
+ * it decides whether a run it cannot observe has ended (lib/daemon/scheduler.ts
+ * `RunEvidence`); two windows would let the two disagree about one transcript.
+ */
+export const TRANSCRIPT_ACTIVE_MS = 120_000;
 /** How long the transcript index and the branch cache are reused. */
 const INDEX_TTL_MS = 5_000;
 const BRANCH_TTL_MS = 30_000;
@@ -89,6 +106,16 @@ export interface DaemonSession {
   lastActivityAt: string | null;
   rounds: { sent: number; recorded: number; lastVerdict: string | null };
   /**
+   * When the session's own gate recorded a COMPLETION (`declare_done`
+   * accepted), from the surviving sidecar state — `null` when it never did.
+   *
+   * It is the fact that separates "finished and now quiet" from "still
+   * working": `declare_done` releases the WORKTREE, not the PROCESS, so a
+   * finished run can keep holding its checkout (and renewing its presence
+   * heartbeat) for as long as the user leaves the window open.
+   */
+  completedAt: string | null;
+  /**
    * Did the transcript tail carry a gate-state record at all?
    *
    * FALSE means the daemon could not read what this session's gate last said
@@ -103,7 +130,13 @@ export interface DaemonSession {
 }
 
 export interface SessionObserverDeps {
-  home?: string;
+  /**
+   * THE USER HOME the observed processes write under — `$HOME`, and
+   * deliberately NOT the daemon's own (`RG_DAEMON_HOME`). See
+   * `lib/daemon/paths.ts` `userHome()` for which source follows which home.
+   * Defaults to that same function.
+   */
+  userHome?: string;
   runTmux: TmuxRunner;
   now?: () => number;
   /** Injected so the HTTP layer and the tests can run without git. */
@@ -206,13 +239,42 @@ function readRounds(state: Record<string, unknown> | undefined): DaemonSession["
   // rounds it has recorded — an in-flight round is sent and not yet recorded.
   const sent = typeof state.sentReviewRounds === "number" ? state.sentReviewRounds : undefined;
   const rounds = Array.isArray(state.rounds) ? state.rounds : [];
-  let lastVerdict: string | null = null;
-  const last = rounds[rounds.length - 1];
-  if (last && typeof last === "object") {
-    const verdict = (last as Record<string, unknown>).verdict;
-    if (typeof verdict === "string") lastVerdict = verdict;
-  }
-  return { sent: sent ?? rounds.length, recorded: rounds.length, lastVerdict };
+  return { sent: sent ?? rounds.length, recorded: rounds.length, lastVerdict: readVerdict(state) };
+}
+
+/**
+ * THE CONCLUSION STANDING FOR THIS SESSION'S CONTENT, read from where it
+ * survives `declare_done`.
+ *
+ * `state.review` IS the gate's binding — the field every ship decision reads
+ * (`unmetRequirements`) and the one `invalidateBindings` resets the moment the
+ * content moves. `state.rounds` is only its HISTORY, and an accepted
+ * `declare_done` clears that history (lib/declare-done-tool.ts, which must not
+ * stop doing so: the reset is what lets one session close one review loop and
+ * start the next task). Reading the history alone therefore made a run that
+ * ended exactly as it is told to end — READY, then `declare_done` —
+ * unreadable as `passed`, while a run interrupted mid-flight still carried its
+ * round and could be recorded as one (t6 acceptance, 2026-10-02). The daemon
+ * reads the conclusion; the trail it left is not the conclusion.
+ *
+ * `PENDING` is NOT a conclusion — it is the gate saying "no verdict stands for
+ * this content" (never reviewed, or invalidated by an edit) — and `null` is
+ * what this returns for it: a run may not be recorded `passed` on a verdict
+ * that has been taken back.
+ */
+function readVerdict(state: Record<string, unknown> | undefined): string | null {
+  const review = state?.review;
+  if (!review || typeof review !== "object") return null;
+  const verdict = (review as Record<string, unknown>).verdict;
+  return typeof verdict === "string" && verdict !== "PENDING" ? verdict : null;
+}
+
+/** `declare_done`'s completion record, when the session has one. */
+function readCompletedAt(state: Record<string, unknown> | undefined): string | null {
+  const completion = state?.completion;
+  if (!completion || typeof completion !== "object") return null;
+  const at = (completion as Record<string, unknown>).at;
+  return typeof at === "string" && at !== "" ? at : null;
 }
 
 /**
@@ -237,12 +299,12 @@ function readUnmet(state: Record<string, unknown> | undefined): string[] {
 }
 
 export function createSessionObserver(deps: SessionObserverDeps): SessionObserver {
-  const home = deps.home;
+  const observerHome = deps.userHome ?? userHome();
   const now = deps.now ?? ((): number => Date.now());
   const branchOf = deps.branchOf ?? defaultBranchOf;
-  const registryRoot = sessionRegistryRoot(home);
+  const registryRoot = sessionRegistryRoot(observerHome);
   const registryIO = nodeRegistryIO(registryRoot);
-  const sessionsRootPath = join(daemonAgentHome(home), "sessions");
+  const sessionsRootPath = piSessionsRoot(observerHome);
 
   let indexAt = 0;
   let index = new Map<string, TranscriptRef>();
@@ -385,6 +447,7 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
           transcript: null,
           lastActivityAt: null,
           rounds: { sent: 0, recorded: 0, lastVerdict: null },
+          completedAt: null,
           gateStateFound: false,
           unmet: [],
           registeredAt: null,
@@ -494,7 +557,15 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
         const session = ensure(sessionId);
         session.transcript = ref.path;
         session.lastActivityAt = new Date(ref.mtimeMs).toISOString();
-        session.state = "dead";
+        // THE FILE'S OWN AGE DECIDES, because a transcript still being written
+        // belongs to a LIVE session. Hard-coding `dead` here is how a run whose
+        // pane had lost its `@rg_sid` was read as finished while it was still
+        // working, and settled as `gone` 21 minutes before its READY (t6
+        // acceptance, 2026-10-02) — nothing about "no pane and no name"
+        // says "not running"; it says "nobody is holding this one open".
+        // A transcript that has STOPPED, with no pane and no registration
+        // behind it, is what `dead` is for.
+        session.state = at - ref.mtimeMs < TRANSCRIPT_ACTIVE_MS ? "working" : "dead";
         session.stateSource = "transcript";
       }
 
@@ -506,6 +577,7 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
           session.transcript = path;
           const gate = gateStateFor(path);
           session.rounds = readRounds(gate);
+          session.completedAt = readCompletedAt(gate);
           session.gateStateFound = gate !== undefined;
           session.unmet = readUnmet(gate);
           if (session.cwd === "") {

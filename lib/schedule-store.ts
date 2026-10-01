@@ -143,7 +143,30 @@ export interface NewScheduledTask extends ScheduleEditPatch {
 
 export type ScheduleRunOutcome = "passed" | "blocked" | "failed" | "gone";
 
-export interface ScheduleRunStarted { kind: "run-started"; runId: string; taskId: string; sessionId: string; at: string }
+/**
+ * ONE RUN STARTED — and, when the launch returned them, THE COORDINATES OF THE
+ * WINDOW IT RUNS IN.
+ *
+ * The coordinates are the LAUNCH RECEIPT (`lib/daemon/control.ts`
+ * `LaunchTaskOutcome`), kept here because they cannot be recovered later: the
+ * observer reads a run's window off its PANE, and a session whose pane lost
+ * `@rg_sid` has none — so a settlement could not close that window, and the
+ * live process kept the checkout "occupied" for as long as the user left it
+ * open. Both optional: an older record (or a launch that reported neither) has
+ * them missing, and a settlement with no window to name simply has nothing to
+ * close.
+ */
+export interface ScheduleRunStarted {
+  kind: "run-started";
+  runId: string;
+  taskId: string;
+  sessionId: string;
+  at: string;
+  /** The daemon's own tmux session the window was opened in. */
+  scopeSession?: string;
+  /** The tmux window id (`@N`) `launchTask` created for this run. */
+  windowId?: string;
+}
 export interface ScheduleRunSettled {
   kind: "run-settled"; runId: string; taskId: string; at: string;
   outcome: ScheduleRunOutcome; verdict: string | null; unmet: string[];

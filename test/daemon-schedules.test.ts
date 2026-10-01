@@ -44,6 +44,10 @@ async function harness(): Promise<Harness> {
   });
   const runtime = createRuntime({
     home,
+    // The scratch home plays the whole machine here: pi's transcripts and the
+    // gate's registry are read from the USER home (lib/daemon/paths.ts
+    // `userHome()`), never from the daemon's own.
+    userHome: home,
     port: 0,
     token,
     webDir,

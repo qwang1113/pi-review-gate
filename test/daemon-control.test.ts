@@ -39,7 +39,7 @@ function inboxLines(home: string, name: string): string[] {
 test("a message lands in the inbox in the module's own record shape", () => {
   const home = scratchHome();
   writeRegistry(home, registryEntry({ name: "t1-work", sessionId: "s-1", repo: "/repo", cwd: "/repo" }));
-  const outcome = sendSessionMessage({ home, runTmux: paneRunner([]), now: () => 1_700_000_000_000 }, {
+  const outcome = sendSessionMessage({ home, userHome: home, runTmux: paneRunner([]), now: () => 1_700_000_000_000 }, {
     to: "@t1-work",
     text: "please look at the daemon",
   });
@@ -62,10 +62,32 @@ test("a message lands in the inbox in the module's own record shape", () => {
   assert.equal(outcome.inbox, sessionInboxPath(sessionRegistryRoot(home), "t1-work"));
 });
 
+test("a message reaches the registry the GATE wrote, not one under the daemon's own home", () => {
+  // DEFECT 1's other half (t6 acceptance): the daemon hands `RG_DAEMON_HOME` to
+  // the sessions it launches, but the GATE resolves its registry from `$HOME`
+  // (`sessionRegistryRoot()`) and knows nothing about that variable. Read from
+  // the daemon's own home, every name came back "不在活会话里" under the
+  // documented override — the message was never sent.
+  const home = scratchHome(); // the USER home: where a session registers
+  const daemonHome = scratchHome(); // the daemon's own: where it used to look
+  writeRegistry(home, registryEntry({ name: "t1-work", sessionId: "s-1", repo: "/repo", cwd: "/repo" }));
+  const deps = { home: daemonHome, userHome: home, runTmux: paneRunner([]) };
+  const outcome = sendSessionMessage(deps, { to: "@t1-work", text: "hi" });
+  assert.equal(outcome.ok, true, outcome.problem ?? "");
+  // THE INBOX LANDS NEXT TO THAT REGISTRATION — which is where the recipient's
+  // own gate reads it, since its root is the same one.
+  assert.equal(inboxLines(home, "t1-work").length, 1);
+
+  // The daemon's home is not a second registry: a name that exists only there
+  // is not addressable at all.
+  writeRegistry(daemonHome, registryEntry({ name: "daemon-only", sessionId: "s-2", repo: "/repo", cwd: "/repo" }));
+  assert.equal(sendSessionMessage(deps, { to: "daemon-only", text: "hi" }).ok, false);
+});
+
 test("a message nobody can be reached at is refused, with the addresses that do work", () => {
   const home = scratchHome();
   writeRegistry(home, registryEntry({ name: "live-one", sessionId: "s-1", repo: "/repo", cwd: "/repo" }));
-  const outcome = sendSessionMessage({ home, runTmux: paneRunner([]) }, { to: "ghost", text: "hello" });
+  const outcome = sendSessionMessage({ home, userHome: home, runTmux: paneRunner([]) }, { to: "ghost", text: "hello" });
   assert.equal(outcome.ok, false);
   assert.match(outcome.problem ?? "", /不在活会话里/);
   assert.deepEqual(outcome.liveNames, ["live-one"]);
@@ -84,6 +106,7 @@ test("a name whose holder cannot be classified is refused fail-closed", () => {
   // tmux unreadable ⇒ the registry cannot separate "stuck" from "gone" ⇒ unknown.
   const outcome = sendSessionMessage({
     home,
+    userHome: home,
     runTmux: fakeRunner(() => ({ ok: false, stdout: "", stderr: "no server" })),
   }, { to: "stale-one", text: "hello" });
   assert.equal(outcome.ok, false);
@@ -92,9 +115,9 @@ test("a name whose holder cannot be classified is refused fail-closed", () => {
 
 test("an empty name, a bad name and an empty body are refused before any file is touched", () => {
   const home = scratchHome();
-  assert.equal(sendSessionMessage({ home, runTmux: paneRunner([]) }, { to: "", text: "x" }).ok, false);
-  assert.equal(sendSessionMessage({ home, runTmux: paneRunner([]) }, { to: "a", text: "x" }).ok, false);
-  assert.equal(sendSessionMessage({ home, runTmux: paneRunner([]) }, { to: "t1-work", text: "   " }).ok, false);
+  assert.equal(sendSessionMessage({ home, userHome: home, runTmux: paneRunner([]) }, { to: "", text: "x" }).ok, false);
+  assert.equal(sendSessionMessage({ home, userHome: home, runTmux: paneRunner([]) }, { to: "a", text: "x" }).ok, false);
+  assert.equal(sendSessionMessage({ home, userHome: home, runTmux: paneRunner([]) }, { to: "t1-work", text: "   " }).ok, false);
 });
 
 test("a pane id minted by another tmux server never counts as a live session", () => {
@@ -115,7 +138,7 @@ test("a pane id minted by another tmux server never counts as a live session", (
     if (argv[0] === "list-panes") return { ok: true, stdout: "%1\n", stderr: "" };
     return { ok: false, stdout: "", stderr: `unexpected: ${argv.join(" ")}` };
   });
-  const outcome = sendSessionMessage({ home, runTmux: runner }, { to: "old-one", text: "hi" });
+  const outcome = sendSessionMessage({ home, userHome: home, runTmux: runner }, { to: "old-one", text: "hi" });
   assert.equal(outcome.ok, false, "a stranger's pane is not this session");
   assert.match(outcome.problem ?? "", /不在活会话里/);
 
@@ -130,14 +153,14 @@ test("a pane id minted by another tmux server never counts as a live session", (
     heartbeatAt: new Date(Date.now() - 10 * 60_000).toISOString(),
     tmux: { session: "rg-old", window: "@1", pane: "%1", server: "/private/tmp/tmux-501/default,22388" },
   }));
-  assert.equal(sendSessionMessage({ home, runTmux: runner }, { to: "old-one", text: "hi" }).ok, true);
+  assert.equal(sendSessionMessage({ home, userHome: home, runTmux: runner }, { to: "old-one", text: "hi" }).ok, true);
 });
 
 test("a body too long for one line spills to a side file the record points at", () => {
   const home = scratchHome();
   writeRegistry(home, registryEntry({ name: "t1-work", sessionId: "s-1", repo: "/repo", cwd: "/repo" }));
   const body = "x".repeat(MAX_INLINE_RECORD_BYTES + 100);
-  const outcome = sendSessionMessage({ home, runTmux: paneRunner([]) }, { to: "t1-work", text: body });
+  const outcome = sendSessionMessage({ home, userHome: home, runTmux: paneRunner([]) }, { to: "t1-work", text: body });
   assert.equal(outcome.ok, true, outcome.problem ?? "");
   const line = inboxLines(home, "t1-work")[0]!;
   assert.ok(Buffer.byteLength(line, "utf8") <= MAX_INLINE_RECORD_BYTES + 1, "the appended line stays small");
@@ -168,7 +191,7 @@ test("launchTask opens a window in the daemon's own scope with mode, station and
     if (argv[0] === "list-panes") return { ok: true, stdout: "", stderr: "" };
     return { ok: true, stdout: "", stderr: "" };
   });
-  const outcome = launchTask({ home, runTmux: runner }, {
+  const outcome = launchTask({ home, userHome: home, runTmux: runner }, {
     repo: process.cwd(),
     task: "把 daemon 的文档补齐",
     mode: "loop",
@@ -202,7 +225,7 @@ test("launchTask opens a window in the daemon's own scope with mode, station and
 test("launchTask refuses a bad repo, mode, station or a name somebody holds", () => {
   const home = scratchHome();
   const runner = paneRunner([]);
-  const base = { home, runTmux: runner };
+  const base = { home, userHome: home, runTmux: runner };
   assert.match(launchTask(base, { repo: "/definitely/not/here", task: "x" }).problem ?? "", /不是存在的目录/);
   assert.match(launchTask(base, { repo: process.cwd(), task: "  " }).problem ?? "", /任务描述是空的/);
   assert.match(launchTask(base, { repo: process.cwd(), task: "x", mode: "turbo" }).problem ?? "", /门禁模式/);
@@ -216,7 +239,7 @@ test("launchTask refuses a bad repo, mode, station or a name somebody holds", ()
 test("a tmux that cannot list sessions refuses the launch instead of creating one", () => {
   const home = scratchHome();
   const outcome = launchTask(
-    { home, runTmux: fakeRunner(() => ({ ok: false, stdout: "", stderr: "no server" })) },
+    { home, userHome: home, runTmux: fakeRunner(() => ({ ok: false, stdout: "", stderr: "no server" })) },
     { repo: process.cwd(), task: "x" },
   );
   assert.equal(outcome.ok, false);
@@ -236,7 +259,7 @@ test("candidate repos come from running sessions and from the workspace roots", 
   writeRegistry(home, registryEntry({ name: "t1", sessionId: "s1", repo: repoA, cwd: repoA }));
   writeTranscript(home, { sessionId: "s2", cwd: repoB, records: [] });
 
-  const observer = createSessionObserver({ home, runTmux: paneRunner([]) });
+  const observer = createSessionObserver({ userHome: home, runTmux: paneRunner([]) });
   const repos = listCandidateRepos({ observer, workspaceRoots: [workspace] });
   const paths = repos.map((repo) => repo.path);
   assert.ok(paths.includes(repoA), "a running session's repo is offered");
@@ -268,7 +291,7 @@ test("a launch leaves no stray files in the agent home beyond its own scope reco
   const home = scratchHome();
   const runner = fakeRunner((argv) =>
     argv[0] === "list-sessions" ? { ok: true, stdout: "", stderr: "" } : { ok: true, stdout: "@1 %1\n", stderr: "" });
-  launchTask({ home, runTmux: runner }, { repo: process.cwd(), task: "x" });
+  launchTask({ home, userHome: home, runTmux: runner }, { repo: process.cwd(), task: "x" });
   const entries = readdirSync(join(home, ".pi", "agent", "rg-daemon"));
   assert.deepEqual(entries.sort(), ["identity", "scope-repo", "scope.json"]);
   assert.ok(readFileSync(join(home, ".pi", "agent", "rg-daemon", "scope-repo"), "utf8").includes(process.cwd()));

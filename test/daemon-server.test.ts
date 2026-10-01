@@ -59,6 +59,10 @@ async function harness(options: { withPanel?: boolean; webDir?: string } = {}): 
   writeTranscript(home, { sessionId: "abc123", cwd: "/Users/me/project", records: [assistantRecord("hello from the transcript")] });
   const runtime = createRuntime({
     home,
+    // The scratch home plays the whole machine: the observer reads pi's
+    // transcripts and the gate's registry from the USER home (lib/daemon/paths.ts
+    // `userHome()`), and in these tests that is this same directory.
+    userHome: home,
     port: 0,
     token,
     webDir,

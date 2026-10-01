@@ -122,6 +122,12 @@ CLI `pi-gate daemon status` 打印同一判定的结果与理由（在线返回�
 | `~/.pi/agent/rg-sessions/*.json` | 名字、repo、cwd、模式、pid、心跳（`lib/session-registry.ts` 的格式与存活判定） |
 | `tmux list-panes -a` 的 `@rg_*` 用户选项 | 活着的 pane、`kind`、状态词、`@rg_session_name` |
 
+**前两个源是别人的文件，读的是别人写的那个根**：`RG_DAEMON_HOME` 只搬 daemon 自己的东西（§11）。
+pi 的转写跟着 pi 自己的 agent 目录（`PI_CODING_AGENT_DIR` / `TAU_CODING_AGENT_DIR` 或 `$HOME/.pi/agent`，
+规则出自 `lib/session-dir.ts` 的 `piSessionsRoot`），`rg-sessions` 登记跟着 `sessionRegistryRoot()` 的 `$HOME`
+—— 观测侧（与发消息时的名字寻址）读的就是这两个根，即 `lib/daemon/paths.ts` 的 `userHome()`。
+待答问题（§7）不一样：它的写者是门禁会话，从 `RG_DAEMON_HOME` 拿到 daemon 的 home，所以那个两侧都读 daemon home。
+
 **状态词表复用 `CHILD_STATES`**（`lib/orchestrator-child-state.ts`）：
 `working | waiting-input | waiting-judge | done | idle | mode-changed | dead | stalled`。
 
@@ -130,7 +136,11 @@ CLI `pi-gate daemon status` 打印同一判定的结果与理由（在线返回�
 1. pane 上的 `@rg_state` 且 `@rg_state_at` 距今 < 90 s（`PANE_STATE_STALE_S`）⇒ 该词，`stateSource: "pane"`；
 2. pane 上有状态词但已过期 ⇒ `stalled`，`stateSource: "pane"`；
 3. 没有 pane 状态词 ⇒ 用注册表里的 `state`（心跳新鲜时），`stateSource: "registry"`；
-4. 没有注册表信息 ⇒ 转写文件 120 s 内有更新为 `working`，否则 `idle`，`stateSource: "transcript"`。
+4. 没有注册表信息 ⇒ 转写文件 120 s（`TRANSCRIPT_ACTIVE_MS`）内有更新为 `working`，否则 `idle`，`stateSource: "transcript"`。
+
+**只出现在「最近跑过」里的会话**（没有 pane、没有名字，靠转写 mtime 进列表）用的是同一条 120 s 判据，
+只是停下之后那个词是 `dead` 而不是 `idle`：`working` / `dead` 都由**文件自己的新旧**决定 ——
+正在被写的转写背后一定有一个活着的写者，把它读成 `dead` 会让调度器把还在跑的运行结算掉（§13.7）。
 
 **tmux 读不到是「信息缺失」，不是「没有会话」**：`tmuxReadable: false` 出现在列表里，
 pane 判定整体跳过，注册表与转写照常上报。
@@ -165,7 +175,8 @@ pane 判定整体跳过，注册表与转写照常上报。
 | `pid` | number \| null | 注册表里的 pid |
 | `transcript` | string \| null | 转写文件绝对路径 |
 | `lastActivityAt` | string \| null | 转写 mtime 与心跳取较晚者（ISO） |
-| `rounds` | `{sent,recorded,lastVerdict}` | 轮次：`sent` 读会话写下的 `sentReviewRounds`（本轮**发出**的）、`recorded` 是已落库条数、`lastVerdict` 是最后一条裁决 |
+| `rounds` | `{sent,recorded,lastVerdict}` | 轮次：`sent` 读会话写下的 `sentReviewRounds`（本轮**发出**的）、`recorded` 是已落库条数、`lastVerdict` 是门禁**仍然站着**的结论（`state.review.verdict`；`PENDING` 不算结论，读作 `null`） |
+| `completedAt` | string \| null | 会话自己记下的完成时刻（`state.completion.at`，即 `declare_done` 被接受）；`null` = 没完成过 |
 | `gateStateFound` | boolean | 转写尾部是否读到了门禁 state。**false ⇒ `rounds`/`unmet` 是占位值，不是结论**（面板必须显示「未知」而不是「无未满足项」） |
 | `unmet` | string[] | 该会话门禁自己算的未满足项（`unmetRequirements`，基于会话写进转写的 state） |
 | `registeredAt` / `heartbeatAt` | string \| null | 注册时间 / 最近心跳（ISO） |
@@ -608,7 +619,8 @@ data: <JSON>
 | `~/.pi/agent/rg-daemon/start.lock` | 0600 | `daemon start` 期间持有、结束即删；超过 30 s 可被接管（§12） |
 
 默认端口 **4597**（`--port` 可改）。`RG_DAEMON_HOME` 可覆盖 agent home（默认 `$HOME`），
-后台子进程靠它继承同一个 home。
+后台子进程靠它继承同一个 home。**它只搬 daemon 自己名下这些文件**：pi 的转写与
+`rg-sessions` 登记属于别的进程，按 `$HOME` 读（§5.1），观测侧不会跟着覆盖走。
 
 ## 12. CLI
 
@@ -716,13 +728,18 @@ pi-gate daemon uninstall
 
 | `kind` | 字段 |
 | --- | --- |
-| `run-started` | `runId`, `taskId`, `sessionId`, `at` |
+| `run-started` | `runId`, `taskId`, `sessionId`, `at`，以及 `scopeSession` / `windowId`（发起回执里的窗口坐标，可选；见下） |
 | `run-settled` | `runId`, `taskId`, `at`, `outcome`, `verdict`, `unmet` |
 | `run-skipped` | `taskId`, `at`, `reason` |
 
-`outcome` 的四个值：`passed`（会话**记录过 READY**）/ `blocked`（BLOCKED）/ `failed`（会话结束但结论不是这两个）/
-`gone`（读不到门禁 state，或会话异常消失）。**没有 READY 不记 passed** —— 这是「一次定时运行要过 reviewer」
-的机械落点。`verdict` 是 `rounds.lastVerdict`，`unmet` 原样带上。
+`outcome` 的四个值：`passed`（会话**记录过 READY**）/ `blocked`（BLOCKED）/ `failed`（会话结束但结论不是这两个）/`gone`（读不到门禁 state，或会话确证消失）。**没有 READY 不记 passed** —— 这是「一次定时运行要过 reviewer」
+的机械落点。`verdict` 取门禁**仍然站着的结论**（`state.review.verdict` / §5.2 的 `rounds.lastVerdict`），
+不是 `state.rounds` 那段历史：`declare_done` 会清空 `rounds` 而清不掉 `review`，所以正常结束
+（READY → `declare_done`）的运行记 `passed`，被撤回的判决（`PENDING`）不给 `passed`。`unmet` 原样带上。
+
+`run-started` 里的 `scopeSession` / `windowId` 是 `launchTask` 的回执，**记下来是因为事后读不回来**：
+会话的窗口平时是从它的 pane 上读的，而 pane 丢了 `@rg_sid` 就什么都没有了 —— 结算时正是靠这两个坐标
+把那次运行的窗口关掉（§13.7）。旧记录没有这两个字段，那种运行只能靠 pane 坐标或等进程退出。
 
 ### 13.7 调度器的行为（不在 HTTP 面上，但同属契约）
 
@@ -747,6 +764,14 @@ pi-gate daemon uninstall
   它要么自己重新谈一份 goal，要么停在那里等人。②「repo 被人占着」在发车前就被 `liveSessionHolder` 挡下了，
   但发车到会话真正 `session_start` 之间有**几秒**（pi 冷启动）：这期间新占住这个 checkout 的会话仍会让它落到这里 ——
   窗口很小，但不是零。
-- **结算**：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒ 写 `run-settled`，**并把这次运行的窗口关掉**（`lib/daemon/control.ts` 的 `closeRunWindow`，只关 daemon 自己那个 scope session 里的窗口）：
+- **结算**：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒ 写 `run-settled`，**并把这次运行的窗口关掉**（`lib/daemon/control.ts` 的 `closeRunWindowAt`，只关 daemon 自己那个 scope session 里的窗口）：
   普通会话要等**进程退出**才释放 worktree 占用（`declare_done` 不释放），留着的窗口会让这个 repo 永远“被占”，以后每次运行都被跳过。
-  刚起的会话在观测里要过一会儿才出现，这段宽限期内「没看见」不算消失。
+  **每一个 `outcome` 都会走这一步**，用两个地址里能用的那一个：会话还在列表里、pane 坐标读得到就用它；
+  pane 丢了 `@rg_sid`（观测不到那个窗口）而 checkout 心跳还新鲜（进程确实还在）就用 `run-started` 里记下的发起回执坐标（§13.6）。
+  两个地址都没有的结算（进程已经退了）本来就没什么可关的，tmux 自己会收回那个窗口。
+- **「观测不到」不是「已经结束」**：列表里没有这个会话时，先问它自己的记录 —— `<repo>/.pi/session-presence.json`
+  的心跳还新鲜且 `sessionId` 就是它、或它的转写还在动（`TRANSCRIPT_ACTIVE_MS`），就继续等；
+  刚起的会话在观测里要过一会儿才出现，这段宽限期（120 s）内「没看见」不算消失。
+  反过来，一个还占着自己 checkout 的活进程也不是「已结束」：`dead` / `idle` 的会话只有在它**没有**完成记录
+  （`state.completion`，即 `declare_done` 被接受）时才会被这条证据挡住 —— 跑着的运行不会被误结算，
+  而已经交卷的运行也不会因为窗口还开着就永远结算不了（t6 验收：一条活着的运行曾被提前 21 分钟结算成 `gone`）。

@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -78,6 +78,7 @@ function sessionFor(sessionId: string, over: Partial<DaemonSession> = {}): Daemo
     transcript: null,
     lastActivityAt: null,
     rounds: { sent: 1, recorded: 1, lastVerdict: "READY" },
+    completedAt: null,
     gateStateFound: true,
     unmet: [],
     registeredAt: null,
@@ -87,10 +88,10 @@ function sessionFor(sessionId: string, over: Partial<DaemonSession> = {}): Daemo
 }
 
 /** An observer that answers with a fixed session list — no tmux, no disk. */
-function fakeObserver(sessions: DaemonSession[]): SessionObserver {
+function fakeObserver(sessions: DaemonSession[], transcripts: Record<string, string> = {}): SessionObserver {
   return {
     collect: () => ({ now: new Date().toISOString(), tmuxReadable: true, sessions, problems: [] }),
-    transcriptFor: () => undefined,
+    transcriptFor: (sessionId) => transcripts[sessionId],
     outputFor: () => [],
   };
 }
@@ -197,6 +198,120 @@ test("settlement: only a recorded READY passes, and a vanished session is gone",
   assert.equal(settlementFor({ run: justStarted, session: undefined, now, graceMs: 0 }).outcome, "gone");
 });
 
+test("settlement: a session that declared done is passed on the verdict that outlives its rounds (t6 defect 3)", () => {
+  const run = {
+    kind: "run-started" as const,
+    runId: "run-3",
+    taskId: "sch-00000001",
+    sessionId: "sess-3",
+    at: new Date(2026, 9, 1, 9, 0).toISOString(),
+  };
+  const now = new Date(2026, 9, 1, 9, 30);
+  // EXACTLY what the observer reports for a session that got a READY and then
+  // `declare_done`d: the round history is cleared, the standing binding is not,
+  // and the completion record is there (lib/declare-done-tool.ts,
+  // lib/daemon/sessions.ts `readRounds`). Read off `rounds` alone this was
+  // `failed` / `verdict: null` — the normal end of a run could not be `passed`.
+  const declaredDone = sessionFor("sess-3", {
+    state: "idle",
+    completedAt: "2026-10-01T09:20:00.000Z",
+    rounds: { sent: 2, recorded: 0, lastVerdict: "READY" },
+  });
+  const decision = settlementFor({ run, session: declaredDone, now });
+  assert.equal(decision.outcome, "passed");
+  assert.equal(decision.verdict, "READY");
+  assert.equal(decision.reason, "settled");
+
+  // A completion settles the run even when the pane word never arrived: the
+  // window may still be open and the transcript freshly written, and the
+  // session's own statement that it finished is enough (it is what
+  // `declare_done` accepts).
+  assert.equal(
+    settlementFor({ run, session: sessionFor("sess-3", { state: "working", completedAt: "2026-10-01T09:20:00.000Z" }), now }).outcome,
+    "passed",
+  );
+  // …but the CONTENT still decides: the same completion with no standing
+  // verdict is a failure, not a pass.
+  assert.equal(
+    settlementFor({
+      run,
+      session: sessionFor("sess-3", {
+        state: "done",
+        completedAt: "2026-10-01T09:20:00.000Z",
+        rounds: { sent: 2, recorded: 0, lastVerdict: null },
+      }),
+      now,
+    }).outcome,
+    "failed",
+  );
+  // …and the pane word the gate derives from that same record releases the veto
+  // on its own: it is one fact read twice, and the transcript window can drop
+  // the record, so neither form may be the only way out (the run would occupy
+  // its repo for as long as the process lived).
+  assert.equal(
+    settlementFor({
+      run,
+      session: sessionFor("sess-3", { state: "done", rounds: { sent: 2, recorded: 0, lastVerdict: "READY" } }),
+      now,
+      evidence: { holdsCheckout: true, transcriptAt: null },
+    }).outcome,
+    "passed",
+  );
+});
+
+test("settlement: a run that still holds its checkout is not 'gone' (t6 defect 2)", () => {
+  const run = {
+    kind: "run-started" as const,
+    runId: "run-2",
+    taskId: "sch-00000001",
+    sessionId: "sess-2",
+    at: new Date(2026, 9, 1, 9, 0).toISOString(),
+  };
+  // TWENTY MINUTES past its start: absence of observation alone would settle
+  // this as gone here.
+  const now = new Date(2026, 9, 1, 9, 20);
+  const goneWithoutEvidence = settlementFor({ run, session: undefined, now });
+  assert.equal(goneWithoutEvidence.outcome, "gone");
+
+  assert.deepEqual(
+    settlementFor({ run, session: undefined, now, evidence: { holdsCheckout: true, transcriptAt: null } }),
+    { settle: false, outcome: null, verdict: null, unmet: [], reason: "running" },
+    "its own checkout heartbeat is a live process, not a closed run",
+  );
+  assert.equal(
+    settlementFor({
+      run,
+      session: undefined,
+      now,
+      evidence: { holdsCheckout: false, transcriptAt: new Date(2026, 9, 1, 9, 19, 30).toISOString() },
+    }).settle,
+    false,
+    "a transcript written seconds ago has a live writer",
+  );
+  // …and the evidence expires on its own: a transcript that stopped is not
+  // evidence any more (lib/daemon/sessions.ts TRANSCRIPT_ACTIVE_MS).
+  assert.equal(
+    settlementFor({
+      run,
+      session: undefined,
+      now,
+      evidence: { holdsCheckout: false, transcriptAt: new Date(2026, 9, 1, 9, 10).toISOString() },
+    }).outcome,
+    "gone",
+  );
+
+  // The same veto one word over: the observer calls the session `idle` (no
+  // pane, no name, its transcript quiet) while the process is blocked in a long
+  // command — it is alive, and its repo is not free yet.
+  const quiet = sessionFor("sess-2", { state: "idle", rounds: { sent: 1, recorded: 1, lastVerdict: "READY" } });
+  assert.equal(settlementFor({ run, session: quiet, now }).outcome, "passed");
+  assert.equal(
+    settlementFor({ run, session: quiet, now, evidence: { holdsCheckout: true, transcriptAt: null } }).settle,
+    false,
+    "a live process is not a finished run",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // the ledger's questions
 // ---------------------------------------------------------------------------
@@ -239,6 +354,10 @@ test("a tick fires a due task once, and a restart does not fire it again", () =>
   first.tick();
   const started = readScheduleRuns(home).filter((record) => record.kind === "run-started");
   assert.equal(started.length, 1);
+  // AND THE LAUNCH RECEIPT RIDES THE SAME LINE (t7): the window the settlement
+  // must close later, recorded where a restart can still find it.
+  assert.equal(started[0]!.windowId, "@3");
+  assert.ok((started[0]!.scopeSession ?? "").startsWith("rg-"));
 
   // Same slot, another tick — and then a whole new scheduler over the same
   // home, which is what a daemon restart is: one process becomes another.
@@ -460,6 +579,144 @@ test("a settled run's window is closed — the checkout it held is reclaimed (qu
     1,
     "补关不会重复结算",
   );
+});
+
+test("a settled run whose pane lost its @rg_sid is still closed by its launch receipt (t6 defect 2)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  const tmux = fakeTmux();
+  const scopeName = ownSessionName(daemonTmuxScope({
+    home,
+    identity: ensureDaemonIdentity(home),
+    runTmux: tmux,
+    anchorRepo: repo,
+  }));
+  assert.ok(scopeName !== undefined);
+  const added = addScheduledTask(home, scheduleTaskInput(repo, { name: "sidelined" }));
+  if (!added.ok) assert.fail(added.problem);
+  // THE LAUNCH RECEIPT IS ON THE LEDGER LINE (t7): once the pane has lost
+  // `@rg_sid`, the window id cannot be read back from anywhere else.
+  appendScheduleRun(home, {
+    kind: "run-started",
+    runId: "run-aaaa9999",
+    taskId: added.value.id,
+    sessionId: "sess-aaaa9999",
+    at: new Date(Date.now() - 60_000).toISOString(),
+    scopeSession: scopeName,
+    windowId: "@9",
+  });
+  // The run concluded (`declare_done`), and its checkout heartbeat is fresh: the
+  // process — and therefore the window — is still there. The OBSERVER has no
+  // pane for it, which is exactly the case that used to leave the checkout
+  // occupied until the user closed the window by hand.
+  mkdirSync(join(repo, ".pi"), { recursive: true });
+  writeFileSync(
+    join(repo, ".pi", "session-presence.json"),
+    JSON.stringify({ sessionId: "sess-aaaa9999", pid: 4242, host: "host", at: new Date().toISOString() }),
+    { mode: 0o600 },
+  );
+  const logs: string[] = [];
+  const scheduler = (): Scheduler => createScheduler({
+    home,
+    runTmux: tmux,
+    log: (message) => logs.push(message),
+    observer: fakeObserver([
+      sessionFor("sess-aaaa9999", {
+        repo,
+        tmux: null,
+        state: "working",
+        completedAt: new Date().toISOString(),
+        rounds: { sent: 1, recorded: 0, lastVerdict: "READY" },
+      }),
+    ]),
+  });
+  scheduler().tick();
+
+  const settled = readScheduleRuns(home).filter((record) => record.kind === "run-settled");
+  assert.equal(settled.length, 1, logs.join("\n"));
+  assert.equal(settled[0]!.outcome, "passed");
+  assert.ok(
+    tmux.calls.some((argv) => argv[0] === "kill-window" && argv.includes(`${scopeName}:@9`)),
+    `expected the RECORDED window to be closed, got: ${JSON.stringify(tmux.calls)}`,
+  );
+  // AND THE SAME COORDINATES ARE WHAT THE LEFTOVER GUARD RETRIES WITH. The fake
+  // tmux killed nothing, so the checkout heartbeat is still fresh: the next due
+  // slot finds the occupant through it and closes the window from the receipt,
+  // instead of only skipping this repo forever.
+  const stamped = updateScheduledTask(
+    home,
+    added.value.id,
+    { lastFiredAt: new Date(Date.now() - AN_OFFLINE_DAY_MS).toISOString() },
+    { from: "gate" },
+  );
+  if (!stamped.ok) assert.fail(stamped.problem);
+  scheduler().tick();
+  assert.ok(logs.some((message) => message.includes("已补关")), logs.join("\n"));
+});
+
+test("a run the listing cannot place is not settled while its own checkout still names it (t6 defect 2)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  const presence = join(repo, ".pi", "session-presence.json");
+  const writePresence = (sessionId: string, at: string): void => {
+    mkdirSync(join(repo, ".pi"), { recursive: true });
+    writeFileSync(presence, JSON.stringify({ sessionId, pid: 4242, host: "host", at }), { mode: 0o600 });
+  };
+  const settled = (): Array<{ outcome?: string }> => readScheduleRuns(home).filter((record) => record.kind === "run-settled");
+  // THE RUN'S TASK IS IN THE TABLE, because that is what names its checkout
+  // (`repoOfRun`) when the session itself cannot be placed. It is DISABLED so
+  // no due slot fires a second run into this test.
+  const added = addScheduledTask(home, scheduleTaskInput(repo, { name: "unplaceable-run", enabled: false }));
+  if (!added.ok) assert.fail(added.problem);
+  // TEN MINUTES OLD: well past the settle grace, so only evidence of life can
+  // keep this run open — and that is exactly the defect: the run settled `gone`
+  // 21 minutes BEFORE its session recorded the READY it ended up with.
+  appendScheduleRun(home, {
+    kind: "run-started",
+    runId: "run-eeee5555",
+    taskId: added.value.id,
+    sessionId: "sess-eeee5555",
+    at: new Date(Date.now() - 10 * 60_000).toISOString(),
+  });
+  const scheduler = createScheduler({ home, runTmux: fakeTmux(), observer: fakeObserver([]) });
+
+  // THE RUN'S OWN HEARTBEAT in the checkout it is working in: the observer could
+  // not place the session (its pane lost `@rg_sid`), but this says a live
+  // process is behind it — settling here frees the repo for a second writer.
+  writePresence("sess-eeee5555", new Date().toISOString());
+  scheduler.tick();
+  assert.equal(settled().length, 0, "观测不到 ≠ 确实结束");
+
+  // SOMEBODY ELSE, LONG AGO: a stale heartbeat is nobody (the same window the
+  // fire-side guard reads), and nothing else claims this run is alive.
+  writePresence("somebody-else", new Date(Date.now() - 5 * 60_000).toISOString());
+  scheduler.tick();
+  assert.equal(settled().length, 1);
+  assert.equal(settled()[0]!.outcome, "gone", "无任何存活迹象、宽限期也过了，才算 gone");
+});
+
+test("a run whose transcript is still moving is alive; one that stopped is not (t6 defect 2)", () => {
+  const home = scratchHome();
+  const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+  const transcript = join(home, "sess-ffff6666.jsonl");
+  writeFileSync(transcript, "\n");
+  appendScheduleRun(home, {
+    kind: "run-started",
+    runId: "run-ffff6666",
+    taskId: "sch-ffff6666",
+    sessionId: "sess-ffff6666",
+    at: startedAt,
+  });
+  const observer = fakeObserver([], { "sess-ffff6666": transcript });
+  const settled = (): Array<{ outcome?: string }> => readScheduleRuns(home).filter((record) => record.kind === "run-settled");
+
+  createScheduler({ home, runTmux: fakeTmux(), observer }).tick();
+  assert.equal(settled().length, 0, "转写还在动 ⇒ 有活着的写者，继续等");
+
+  const old = new Date(Date.now() - 10 * 60_000);
+  utimesSync(transcript, old, old);
+  createScheduler({ home, runTmux: fakeTmux(), observer }).tick();
+  assert.equal(settled()[0]?.outcome, "gone", "停下来的转写不再算存活证据");
 });
 
 test("a task whose launch fails is recorded as a skip, not retried every tick", () => {

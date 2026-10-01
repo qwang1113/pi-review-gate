@@ -71,7 +71,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { nextRunAfter } from "../cron-schedule.ts";
@@ -95,8 +95,9 @@ import {
   type ScheduleRunRecord,
   type ScheduleRunStarted,
 } from "../schedule-store.ts";
-import { launchTask, closeRunWindow } from "./control.ts";
+import { launchTask, closeRunWindowAt, type RunWindowTarget } from "./control.ts";
 import type { SessionObserver, DaemonSession } from "./sessions.ts";
+import { TRANSCRIPT_ACTIVE_MS } from "./sessions.ts";
 import type { TmuxRunner } from "../orchestrator-tmux.ts";
 
 /** How often the daemon looks for work. */
@@ -172,6 +173,26 @@ export function dueDecision(input: { task: ScheduledTask; now: Date; openRun: bo
 
 export type SettleReason = "settled" | "unseen" | "running";
 
+/**
+ * WHAT THE RUN'S OWN RECORDS SAY ABOUT IT — the two facts that answer "is this
+ * still running?" when the session listing cannot place the session at all.
+ *
+ * Both are written by the run itself, so neither is the daemon's own belief:
+ *
+ *   - `holdsCheckout`: `<repo>/.pi/session-presence.json` carries a FRESH
+ *     heartbeat whose `sessionId` is this run's — the record and the rule the
+ *     fire-side guard already reads (lib/session-exclusivity.ts). The gate
+ *     renews it every 10s and it lapses within a minute of the process dying,
+ *     so a hard kill cannot pin a run open with it.
+ *   - `transcriptAt`: the run's transcript mtime, `null` when the observer can
+ *     no longer see one. A file that moved a moment ago has a live writer by
+ *     definition — the observer reads the SAME window for its `working` word.
+ */
+export interface RunEvidence {
+  holdsCheckout: boolean;
+  transcriptAt: string | null;
+}
+
 export interface SettlementDecision {
   settle: boolean;
   /** Set when `settle` — the outcome the ledger gets. */
@@ -182,38 +203,90 @@ export interface SettlementDecision {
 }
 
 /**
- * What did this run end as? Read off the OBSERVED session, never off a guess:
+ * What did this run end as? Read off the OBSERVED session and the run's own
+ * records, never off a guess:
  *
  *   READY        ⇒ passed
  *   BLOCKED      ⇒ blocked
  *   anything else (no verdict, a verdict the gate did not record) ⇒ failed
- *   no readable gate state, or the session vanished   ⇒ gone
+ *   no readable gate state, or the run vanished  ⇒ gone
  *
  * `passed` is reachable ONLY through a recorded READY — that is the mechanical
  * half of "a scheduled run's output goes through the reviewer": a session that
  * merely stopped is not a success.
+ *
+ * ── NOT OBSERVED IS NOT THE SAME AS GONE ──
+ *
+ * The observer only knows what the machine publishes about a session, and a run
+ * whose pane lost its `@rg_sid` (or whose session never registered a name) can
+ * be alive and working while the listing cannot place it. Reading that absence
+ * as "it finished" settled a run as `gone` 21 minutes BEFORE the same session
+ * recorded its READY, and left its window holding the checkout (t6 acceptance,
+ * 2026-10-02). So the missing-session branch asks the run's OWN records first
+ * ({@link RunEvidence}) — a checkout it still holds, a transcript still being
+ * written — and only a run with no trace of life settles as gone.
+ *
+ * ── AND A LIVE PROCESS IS NOT A FINISHED RUN ──
+ *
+ * The same mistake one word over: a session the observer calls `dead` or
+ * `idle` (no pane, no name, its transcript quiet) may still be a live process
+ * blocked in a long command — `declare_done` releases the WORKTREE, not the
+ * process. The veto is the same evidence, and it yields to the one thing that
+ * really does end a run: the run's OWN statement that it is done — the recorded
+ * COMPLETION (`session.completedAt`, `declare_done` accepted) or the pane word
+ * derived from that same record (`done`). Either one, and the run settles even
+ * while its window is still open; the two are one fact read twice, which is why
+ * neither may be the only way out.
  */
 export function settlementFor(input: {
   run: ScheduleRunStarted;
   session: DaemonSession | undefined;
   now: Date;
   graceMs?: number;
+  /** The run's own facts, for the branches the listing cannot answer. */
+  evidence?: RunEvidence;
 }): SettlementDecision {
+  const nowMs = input.now.getTime();
+  const graceMs = input.graceMs ?? SETTLE_GRACE_MS;
+  const startedAt = Date.parse(input.run.at);
+  const sinceStart = Number.isFinite(startedAt) ? nowMs - startedAt : Number.POSITIVE_INFINITY;
+  // The two facts that mean "a live process is behind this run". Both are
+  // written by the run ITSELF, and both lapse on their own: the presence
+  // heartbeat is renewed every 10s and read through a 60s window, and a
+  // transcript that stopped moving ages out of this one.
+  const holdsCheckout = input.evidence?.holdsCheckout === true;
+  const transcriptAt = input.evidence?.transcriptAt ?? null;
+  const transcriptEpoch = transcriptAt === null ? Number.NaN : Date.parse(transcriptAt);
+  const writing = Number.isFinite(transcriptEpoch) && nowMs - transcriptEpoch < TRANSCRIPT_ACTIVE_MS;
+
   const session = input.session;
   if (session === undefined) {
-    const startedAt = Date.parse(input.run.at);
-    const graceMs = input.graceMs ?? SETTLE_GRACE_MS;
-    const vanished = !Number.isFinite(startedAt) || input.now.getTime() - startedAt >= graceMs;
-    return vanished
+    if (holdsCheckout || writing) {
+      return { settle: false, outcome: null, verdict: null, unmet: [], reason: "running" };
+    }
+    return sinceStart >= graceMs
       ? { settle: true, outcome: "gone", verdict: null, unmet: [], reason: "settled" }
       : { settle: false, outcome: null, verdict: null, unmet: [], reason: "unseen" };
   }
   const verdict = session.rounds.lastVerdict;
+  // THE RUN'S OWN STATEMENT THAT IT IS DONE ends it on its own — the recorded
+  // completion (`declare_done` accepted) or the pane word the gate derives from
+  // that same record. It does not depend on the pane being there at all, which
+  // matters for a session the observer can only see through its transcript.
+  //
+  // BOTH FORMS, not just the record: the transcript read window is 256 KiB
+  // (lib/daemon/sessions.ts), so a huge tool result can push the completion
+  // record out of it — and a run held open by the veto below with no way to
+  // ever settle would occupy its repo for as long as the process lives.
+  const concluded = session.completedAt !== null || session.state === "done";
   const ended =
-    session.state === "done" ||
+    concluded ||
     session.state === "dead" ||
     (session.state === "idle" && session.rounds.recorded > 0);
-  if (!ended) return { settle: false, outcome: null, verdict, unmet: session.unmet, reason: "running" };
+  // A RUN THAT STILL HOLDS ITS CHECKOUT HAS NOT ENDED — unless it concluded.
+  if (!ended || (holdsCheckout && !concluded)) {
+    return { settle: false, outcome: null, verdict, unmet: session.unmet, reason: "running" };
+  }
   const outcome: ScheduleRunOutcome = !session.gateStateFound
     ? "gone"
     : verdict === "READY"
@@ -330,6 +403,60 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     }
   }
 
+  /**
+   * WHAT THE RUN'S OWN RECORDS SAY ABOUT IT (see `RunEvidence`).
+   *
+   * Asked fresh on every tick, because both answers move: the presence
+   * heartbeat is renewed every 10s and lapses on its own, and a transcript
+   * stops growing the moment its session does. The presence file is the SAME
+   * one the fire-side guard reads (`liveSessionHolder`), asked here with the
+   * run's own identity — a fresh heartbeat by SOMEBODY ELSE in that checkout is
+   * not this run being alive.
+   */
+  function runEvidence(run: ScheduleRunStarted, repo: string | undefined, at: Date): RunEvidence {
+    const holder = repo === undefined || repo === "" ? undefined : liveSessionHolder(repo, at);
+    const path = deps.observer.transcriptFor(run.sessionId);
+    return {
+      holdsCheckout: holder !== undefined && holder.sessionId === run.sessionId,
+      transcriptAt: path === undefined ? null : mtimeIso(path),
+    };
+  }
+
+  /**
+   * WHICH WINDOW THIS SETTLEMENT MUST CLOSE, if any.
+   *
+   * Two addresses for one window, in the order of what the daemon really knows:
+   *
+   *   1. the pane coordinates the OBSERVER read — the session is in the listing
+   *      with a pane, so `kill-window` can be aimed at exactly that window;
+   *   2. the coordinates the LAUNCH RECEIPT recorded, for a run whose session
+   *      still holds its checkout while the observer has NO pane for it (its
+   *      pane lost `@rg_sid`, which is the shape this fix is about). Without
+   *      this address the daemon could not close that window at all, and the
+   *      live process kept the repo occupied until the user closed it by hand.
+   *
+   * A fresh checkout heartbeat is what licenses the second address: it is a
+   * live process in that repository, so there IS a window to close. (It also
+   * bounds the damage of a stale id: a recorded window belongs to the daemon's
+   * OWN scope session, where the worst case is closing a window the daemon
+   * opened itself.) A run with NEITHER has nothing to close — its process is
+   * gone, and tmux closes a window whose process exited — which is why a `gone`
+   * settlement logs no failed close.
+   */
+  function closeTargetFor(
+    run: ScheduleRunStarted,
+    session: DaemonSession | undefined,
+    evidence: RunEvidence,
+    repo: string | undefined,
+  ): RunWindowTarget | undefined {
+    if (session !== undefined && session.tmux !== null) {
+      return { repo: session.repo, session: session.tmux.session, window: session.tmux.window };
+    }
+    if (!evidence.holdsCheckout || run.scopeSession === undefined || run.windowId === undefined) return undefined;
+    const anchor = repo ?? session?.repo ?? "";
+    return anchor === "" ? undefined : { repo: anchor, session: run.scopeSession, window: run.windowId };
+  }
+
   /** Stamp the slot as dealt with — fired, skipped or failed alike. */
   function dealt(task: ScheduledTask, at: Date, slot: string): void {
     // REMEMBER FIRST, FORGET AFTER: between these two writes the process can
@@ -392,6 +519,11 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       taskId: task.id,
       sessionId: started.sessionId,
       at: at.toISOString(),
+      // THE LAUNCH RECEIPT, KEPT WITH THE RUN (see `ScheduleRunStarted`): the
+      // window cannot be read back off the pane once the pane has lost
+      // `@rg_sid`, and the settlement needs to close it.
+      ...(started.scopeSession === undefined ? {} : { scopeSession: started.scopeSession }),
+      ...(started.windowId === undefined ? {} : { windowId: started.windowId }),
     };
     // A SESSION IS ALREADY RUNNING: from here on the slot counts as dealt with
     // and this run holds its repo, whatever the disk does next.
@@ -433,10 +565,27 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // live, so it holds its repo and it must settle like any other run.
     const open = [...openRuns(records), ...unrecordedRuns.values()];
     const repos = new Map(table.file.tasks.map((task) => [task.id, task.repo] as const));
+    // THE WINDOW EACH RUN RECORDED, by session id: the receiver of a run's
+    // launch receipt can be closed by coordinates even when its pane has no
+    // `@rg_sid` to read them from (see `closeTargetFor` and the retry below).
+    const recordedWindows = new Map<string, RunWindowTarget>();
+    for (const record of records) {
+      if (record.kind !== "run-started" || record.scopeSession === undefined || record.windowId === undefined) continue;
+      recordedWindows.set(record.sessionId, {
+        repo: repos.get(record.taskId) ?? "",
+        session: record.scopeSession,
+        window: record.windowId,
+      });
+    }
 
     // SETTLE FIRST: a run that just ended must release its repo in THIS tick,
     // or the slot that is due right now gets blocked by its own predecessor.
     const collection = open.length === 0 ? undefined : deps.observer.collect();
+    const repoOfRun = (run: ScheduleRunStarted): string | undefined =>
+      repos.get(run.taskId) ??
+      // Its task is gone (deleted while the run was in flight): the session it
+      // started is the only thing left that can name the checkout.
+      collection?.sessions.find((candidate) => candidate.sessionId === run.sessionId)?.repo;
     const settled = new Set<string>();
     for (const run of open) {
       // ONE RUN'S FAILURE MUST NOT TAKE THE TICK WITH IT: a home that went
@@ -445,7 +594,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       // durable ledger.
       try {
         const session = collection?.sessions.find((candidate) => candidate.sessionId === run.sessionId);
-        const decision = settlementFor({ run, session, now: at });
+        const repo = repoOfRun(run);
+        const evidence = runEvidence(run, repo, at);
+        const decision = settlementFor({ run, session, now: at, evidence });
         if (!decision.settle) continue;
         appendScheduleRun(deps.home, {
           kind: "run-settled",
@@ -463,21 +614,18 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // holds its worktree until its PROCESS exits (`declare_done` does not
         // release it), so a settled run whose window stays open would keep its
         // repo "occupied" forever and every later run of it would be skipped.
-        // The daemon opened this window; the daemon closes it.
-        if (session !== undefined && !closeRunWindow(deps, session)) {
-          log(`运行 ${run.runId} 的窗口没能关掉（它会继续占着 ${session.repo}）`);
+        // The daemon opened this window; the daemon closes it — on EVERY
+        // settlement, whatever the outcome (the outcome only decides what the
+        // ledger says). WHICH window is `closeTargetFor`'s question.
+        const target = closeTargetFor(run, session, evidence, repo);
+        if (target !== undefined && !closeRunWindowAt(deps, target)) {
+          log(`运行 ${run.runId} 的窗口没能关掉（它会继续占着 ${target.repo}）`);
         }
       } catch (error) {
         log(`运行 ${run.runId} 结算失败（下次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
       }
     }
     const stillOpen = open.filter((run) => !settled.has(run.runId));
-    const repoOfRun = (run: ScheduleRunStarted): string | undefined =>
-      repos.get(run.taskId) ??
-      // Its task is gone (deleted while the run was in flight): the session it
-      // started is the only thing left that can name the checkout.
-      collection?.sessions.find((candidate) => candidate.sessionId === run.sessionId)?.repo;
-
     for (const task of table.file.tasks) {
       try {
         const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
@@ -513,7 +661,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           if (settledSessions.has(sessionHolder.sessionId)) {
             const leftover = (collection ?? deps.observer.collect()).sessions
               .find((candidate) => candidate.sessionId === sessionHolder.sessionId);
-            if (leftover !== undefined && closeRunWindow(deps, leftover)) {
+            // THE SAME TWO ADDRESSES THE SETTLEMENT USED: the pane's, when the
+            // observer has one, and otherwise the coordinates the launch
+            // receipt recorded — a session that lost `@rg_sid` is exactly the
+            // one whose leftover window would otherwise never be reclaimed.
+            const recorded = recordedWindows.get(sessionHolder.sessionId);
+            const target: RunWindowTarget | undefined = leftover !== undefined && leftover.tmux !== null
+              ? { repo: leftover.repo, session: leftover.tmux.session, window: leftover.tmux.window }
+              : recorded !== undefined && recorded.repo !== "" ? recorded : undefined;
+            if (target !== undefined && closeRunWindowAt(deps, target)) {
               log(`上一次结算没关掉的运行窗口 ${sessionHolder.sessionId} 已补关（${task.repo}）—— 下一个时间点起可以正常跑`);
             }
           }
@@ -564,6 +720,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     } finally {
       running = false;
     }
+  }
+}
+
+/** A file's mtime as ISO, or `null` when it cannot be read. */
+function mtimeIso(path: string): string | null {
+  try {
+    return new Date(statSync(path).mtimeMs).toISOString();
+  } catch {
+    return null;
   }
 }
 

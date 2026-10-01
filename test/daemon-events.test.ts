@@ -166,7 +166,7 @@ test("the watcher raises session, output and notification events on transitions"
           stderr: "",
         }
       : { ok: false, stdout: "", stderr: "unexpected" };
-  const observer = createSessionObserver({ home, runTmux: runner, now });
+  const observer = createSessionObserver({ userHome: home, runTmux: runner, now });
 
   const events: DaemonEvent[] = [];
   const hub = createSseHub();
@@ -219,7 +219,7 @@ test("a child session's transition is not raised as a notification (its manager 
           stderr: "",
         }
       : { ok: false, stdout: "", stderr: "unexpected" };
-  const observer = createSessionObserver({ home, runTmux: runner, now });
+  const observer = createSessionObserver({ userHome: home, runTmux: runner, now });
   const events: DaemonEvent[] = [];
   const hub = createSseHub();
   hub.add((event) => events.push(event), null);
@@ -254,6 +254,7 @@ function daemonSession(over: Partial<DaemonSession> = {}): DaemonSession {
     transcript: null,
     lastActivityAt: null,
     rounds: { sent: 0, recorded: 0, lastVerdict: null },
+    completedAt: null,
     gateStateFound: false,
     unmet: [],
     registeredAt: null,
@@ -363,7 +364,7 @@ test("the watcher does not read a transcript nobody is watching", async () => {
   const home = scratchHome();
   writeRegistry(home, registryEntry({ name: "t1-work", sessionId: "abc123", repo: "/repo", cwd: "/repo" }));
   writeTranscript(home, { sessionId: "abc123", cwd: "/repo", records: [] });
-  const observer = createSessionObserver({ home, runTmux: paneRunner([]) });
+  const observer = createSessionObserver({ userHome: home, runTmux: paneRunner([]) });
   const events: DaemonEvent[] = [];
   const hub = createSseHub();
   hub.add((event) => events.push(event), "somebody-else");
@@ -403,6 +404,7 @@ function watcherOverAPendingTranscript(options: { home: string; sessionId: strin
     transcript: null,
     lastActivityAt: null,
     rounds: { sent: 0, recorded: 0, lastVerdict: null },
+    completedAt: null,
     gateStateFound: false,
     unmet: [],
     registeredAt: null,

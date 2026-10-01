@@ -53,7 +53,7 @@ import {
 import { describeCron, parseCron } from "../cron-schedule.ts";
 import { readRecentEntries, readRecentEntriesWithOffset } from "./transcript.ts";
 import { tokenMatches } from "./state.ts";
-import { DAEMON_SCHEMA, daemonPackageVersion, notificationStorePath } from "./paths.ts";
+import { DAEMON_SCHEMA, daemonPackageVersion, notificationStorePath, userHome } from "./paths.ts";
 import { DEFAULT_WEB_DIR, servePanel, type StaticReply } from "./static.ts";
 import type { TmuxRunner } from "../orchestrator-tmux.ts";
 
@@ -71,7 +71,15 @@ export const MAX_REPLAY = 500;
 export const SSE_PING_MS = 15_000;
 
 export interface RuntimeOptions {
+  /** The daemon's own home (`RG_DAEMON_HOME` or `$HOME`): everything it writes. */
   home: string;
+  /**
+   * The USER home the observed processes write under — pi's transcripts and the
+   * gate's `@名字` registry (`lib/daemon/paths.ts` `userHome()`). Defaults to
+   * that function; a caller that set `RG_DAEMON_HOME` must pass the real user
+   * home here, or the daemon reads its own (empty) home for both.
+   */
+  userHome?: string;
   port: number;
   token: string;
   /** Roots whose immediate git subdirectories are offered as task targets. */
@@ -153,7 +161,8 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const workspaceRoots = opts.workspaceRoots ?? [];
   const runTmux = opts.runTmux ?? createDaemonTmuxRunner();
-  const observer = createSessionObserver({ home: opts.home, runTmux, ...(opts.now === undefined ? {} : { now: opts.now }) });
+  const observerHome = opts.userHome ?? userHome();
+  const observer = createSessionObserver({ userHome: observerHome, runTmux, ...(opts.now === undefined ? {} : { now: opts.now }) });
   const hub = createSseHub();
   const store = createNotificationStore(notificationStorePath(opts.home), { now });
   const watcher = createSessionWatcher({ observer, hub, ...(opts.now === undefined ? {} : { now: opts.now }), onError: log });
@@ -244,7 +253,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
           });
         }
         const body = asObject(ctx.body);
-        const outcome = sendSessionMessage({ home: opts.home, runTmux, now }, {
+        const outcome = sendSessionMessage({ home: opts.home, userHome: observerHome, runTmux, now }, {
           to: session.name,
           text: typeof body.text === "string" ? body.text : "",
           // NO `from` FROM THE REQUEST (reviewer P1, 2026-10-01): the sender is
@@ -267,7 +276,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
       pattern: segments("/api/tasks"),
       handler: (ctx): Reply => {
         const body = asObject(ctx.body);
-        const outcome = launchTask({ home: opts.home, runTmux, now }, {
+        const outcome = launchTask({ home: opts.home, userHome: observerHome, runTmux, now }, {
           repo: typeof body.repo === "string" ? body.repo : "",
           task: typeof body.task === "string" ? body.task : "",
           ...(typeof body.mode === "string" ? { mode: body.mode } : {}),
@@ -349,7 +358,7 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
         }
         // THIS ENDPOINT WRITES NO TABLE: the contract is written by the gate's
         // own tool, after the user approved it in the authoring session.
-        const outcome = launchTask({ home: opts.home, runTmux, now }, {
+        const outcome = launchTask({ home: opts.home, userHome: observerHome, runTmux, now }, {
           repo,
           task: authoringTaskText({ action, id, name, repo, cron, requirement }),
           mode: "loop",

@@ -51,6 +51,35 @@ export function daemonUserHome(env: NodeJS.ProcessEnv = process.env): string {
   return env[DAEMON_HOME_ENV] ?? homedir();
 }
 
+/**
+ * THE USER HOME — where the things the daemon READS ABOUT OTHERS are written.
+ *
+ * `daemonUserHome()` above relocates THIS DAEMON's files, and only those. The
+ * files the daemon observes belong to other processes, which resolve their own
+ * homes from `$HOME`:
+ *
+ *   - pi writes its transcripts under `<user home>/.pi/agent/sessions`, from
+ *     its own agent dir (`PI_CODING_AGENT_DIR` / `TAU_CODING_AGENT_DIR` or
+ *     `$HOME/.pi/agent`) — `lib/session-dir.ts` owns that rule in full;
+ *   - a gate session registers its `@名字` under
+ *     `<user home>/.pi/agent/rg-sessions` (`sessionRegistryRoot()`, which
+ *     reads `homedir()`).
+ *
+ * Neither knows `RG_DAEMON_HOME` exists, so a daemon that looked for them under
+ * its OWN home found nothing at all under the documented override — every
+ * session with `transcript: null` / `gateStateFound: false`, and a scheduled
+ * run that could only ever settle as `gone` (t6 acceptance, 2026-10-02). One
+ * reader, one writer, same home.
+ *
+ * The pending-question protocol is the OPPOSITE case on purpose and is not
+ * covered here: its writer is a gate session, which is TOLD the daemon's home
+ * through `RG_DAEMON_HOME` (`lib/daemon/control.ts` injects it at launch), so
+ * both sides resolve that one from `daemonHome()`.
+ */
+export function userHome(): string {
+  return homedir();
+}
+
 /** A session id used as a path segment must not be able to leave its directory. */
 const SAFE_ID = /^(?!.*\.\.)[A-Za-z0-9._-]{1,128}$/;
 
