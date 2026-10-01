@@ -698,9 +698,9 @@ pi-gate daemon uninstall
 
 - body 里出现 `requirement` / `repo` / `contract` ⇒ **`400`**，文案指向 `POST /api/schedules/author`
   （这一条由 store 的 `applyScheduleEdit({from:"panel"})` 判）。
-- 其它字段（含 `lastFiredAt`）⇒ **`400`**，文案列出面板能改的三个字段。**「只有这三个」的白名单在 endpoint
-  自己手里**（`PANEL_SCHEDULE_FIELDS`）：store 的 panel 规则（`applyScheduleEdit`）只挡 authored 字段，
-  `lastFiredAt` 它仍认（gate 盖戳靠的就是它）—— 这两条清单目前不一致。
+- 其它字段（含 `lastFiredAt`）⇒ **`400`**，文案列出面板能改的三个字段。这份白名单**只有一处**：
+  `lib/schedule-store.ts` 导出的 `PANEL_EDITABLE_FIELDS`（name / cron / enabled）—— `PUT` 把整个 body
+  交给 store 的 `applyScheduleEdit({ from: "panel" })` 判（gate 仍可盖 `lastFiredAt` 的槽位戳记）。
 - 未知 `id` ⇒ `404`；值不合法（cron 解析失败、name 形状或重名）⇒ `400`。
 - **`version` 冲突 ⇒ `400`**（「version 不匹配……有人同时改过，请重读」）：这次写入带走 handler 刚读到的 `version`（乐观锁）。PUT handler 从读到写是同步的，所以真正的窗口只有一个 —— **另一个进程**（会话里的 `schedule_task`、或另一个 daemon）在中间写过：那时 store 拒绝这次写入，而不是把两边合并。重读后再提交即可。
 
@@ -736,13 +736,17 @@ pi-gate daemon uninstall
   ① 该 repo 上还有**未结算的运行**（点名它的 `runId`）；② 该 repo 上还有**别的活会话**（点名 `sessionId` 与最后心跳）——
   判据是 `<repo>/.pi/session-presence.json` 里那条 **60 s 内**的心跳，与门禁自己拒第二个会话时用的**同一个函数**
   （`lib/session-exclusivity.ts`；哪怕那个会话已经 `declare_done`，只要进程还在就算）。② 是必需的：门禁不会为运行会话启动，
-  契约继承不了，发出去的会是一辆开不动的车（quality round P1，2026-10-02）。
+  契约继承不了，发出去的会是一辆开不动的车（quality round P1，2026-10-02）。daemon 自己开的运行窗口在结算时就关掉，所以
+  daemon 留下的旧窗口不会变成长期占用者。
 - **运行就是普通 loop 会话**：`RG_GATE_MODE=loop`、`RG_STATION_CAP=<契约里的 station>`、
   `RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`（本次运行的标识）；门禁在 `session_start` 按这两个变量
   把契约**从 `schedules.json` 读回来**（两个 hash 与文本相符 + 任务 repo 就是本会话 repo +
   台账里有本 runId 且 `sessionId` 就是本会话的 `run-started` 记录，四道闸全过才生效），再**写出**
   `.pi/loop-goal.md` 与 sidecar 的 `restatement` / `loopGoal`（`lib/schedule-run-contract.ts`）；
   任一道闸不过就什么都不写、只记一条日志（fail-closed）；那种情况下它没有契约可用（hash 不符、repo 不符、台账里没有本 runId 都会走到这里），
-  它要么自己重新谈一份 goal，要么停在那里等人 —— ②那种「repo 被人占着」在发车前就被挡下了，不会走到这一步。
-- **结算**：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒ 写 `run-settled`。
+  它要么自己重新谈一份 goal，要么停在那里等人。②「repo 被人占着」在发车前就被 `liveSessionHolder` 挡下了，
+  但发车到会话真正 `session_start` 之间有**几秒**（pi 冷启动）：这期间新占住这个 checkout 的会话仍会让它落到这里 ——
+  窗口很小，但不是零。
+- **结算**：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒ 写 `run-settled`，**并把这次运行的窗口关掉**（`lib/daemon/control.ts` 的 `closeRunWindow`，只关 daemon 自己那个 scope session 里的窗口）：
+  普通会话要等**进程退出**才释放 worktree 占用（`declare_done` 不释放），留着的窗口会让这个 repo 永远“被占”，以后每次运行都被跳过。
   刚起的会话在观测里要过一会儿才出现，这段宽限期内「没看见」不算消失。

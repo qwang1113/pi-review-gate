@@ -33,6 +33,9 @@ import {
   type ScheduledTask,
 } from "../lib/schedule-store.ts";
 import type { DaemonSession, SessionObserver } from "../lib/daemon/sessions.ts";
+import { daemonTmuxScope } from "../lib/daemon/control.ts";
+import { ensureDaemonIdentity } from "../lib/daemon/state.ts";
+import { ownSessionName } from "../lib/session-tmux-scope.ts";
 import { scheduleRunsPath } from "../lib/daemon/paths.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import { fakeRunner, scheduleContract, scheduleTaskInput, scratchHome, scratchRepo } from "./daemon-helpers.ts";
@@ -380,6 +383,52 @@ test("a settling run frees its repo — for exactly one successor", () => {
   assert.equal(skips.length, 1);
   assert.equal(skips[0]!.taskId, second.id);
   assert.match(skips[0]!.reason, new RegExp(fresh.runId));
+});
+
+test("a settled run's window is closed — the checkout it held is reclaimed (quality round P1)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  const scheduled = dueTask(home, repo, { name: "closing-task" });
+  const tmux = fakeTmux();
+  const scopeName = ownSessionName(daemonTmuxScope({
+    home,
+    identity: ensureDaemonIdentity(home),
+    runTmux: tmux,
+    anchorRepo: repo,
+  }));
+  assert.ok(scopeName !== undefined, "the daemon derives its own scope session name");
+
+  const start = (runId: string, sessionId: string): void => {
+    appendScheduleRun(home, { kind: "run-started", runId, taskId: scheduled.id, sessionId, at: new Date().toISOString() });
+  };
+
+  // The run is over (done + a recorded round). Its window is the daemon's own,
+  // so the daemon closes it — a session holds its worktree until its PROCESS
+  // exits, and `declare_done` does not release it.
+  start("run-bbbb2222", "sess-bbbb2222");
+  createScheduler({
+    home,
+    runTmux: tmux,
+    observer: fakeObserver([
+      sessionFor("sess-bbbb2222", { state: "done", repo, tmux: { session: scopeName!, window: "@7", pane: "%7" } }),
+    ]),
+  }).tick();
+  assert.ok(
+    tmux.calls.some((argv) => argv[0] === "kill-window" && argv.includes(`${scopeName}:@7`)),
+    `expected the daemon to close its own window, got: ${JSON.stringify(tmux.calls)}`,
+  );
+
+  // A session in SOMEBODY ELSE'S session is not the daemon's to close.
+  start("run-cccc3333", "sess-cccc3333");
+  const killsBefore = tmux.calls.filter((argv) => argv[0] === "kill-window").length;
+  createScheduler({
+    home,
+    runTmux: tmux,
+    observer: fakeObserver([
+      sessionFor("sess-cccc3333", { state: "done", repo, tmux: { session: "somebody-elses", window: "@8", pane: "%8" } }),
+    ]),
+  }).tick();
+  assert.equal(tmux.calls.filter((argv) => argv[0] === "kill-window").length, killsBefore, "别人的 window 不关");
 });
 
 test("a task whose launch fails is recorded as a skip, not retried every tick", () => {

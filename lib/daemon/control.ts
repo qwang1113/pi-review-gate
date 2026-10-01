@@ -338,6 +338,43 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
   };
 }
 
+/**
+ * CLOSE THE WINDOW A RUN CAME FROM — the daemon's own window, and only that.
+ *
+ * A run is an ORDINARY loop session, and an ordinary session holds its worktree
+ * until its PROCESS exits: the presence heartbeat is released on session
+ * shutdown, NOT on `declare_done` (lib/session-lifecycle.ts releases it in
+ * `onSessionShutdown`). The daemon starts these sessions, so the daemon is what
+ * must reclaim them — a settled run whose window stays open keeps the checkout
+ * "occupied" forever, and every later run of that repo would be skipped
+ * (quality round P1, 2026-10-02).
+ *
+ * THE TARGET IS CHECKED, NOT TRUSTED: it must sit in the daemon's OWN scope
+ * session (`ownSessionName` of the scope the daemon derives), which is also the
+ * only session the safety door lets this call address. Anything else is left
+ * alone — the user's own windows are not the daemon's to close.
+ */
+export function closeRunWindow(
+  deps: ControlDeps,
+  session: { repo: string; tmux: { session: string; window: string } | null },
+): boolean {
+  const where = session.tmux;
+  if (where === null) return false;
+  const scope = daemonTmuxScope({
+    home: deps.home,
+    identity: ensureDaemonIdentity(deps.home),
+    runTmux: deps.runTmux,
+    anchorRepo: session.repo,
+  });
+  const scopeName = ownSessionName(scope);
+  if (scopeName === undefined || where.session !== scopeName) return false;
+  const run: TmuxRunner = (argv, env, extra) =>
+    deps.runTmux(argv, env, [scopeName, ...(extra ?? [])]);
+  // `-t <session>:<@window>`: the window ID (not its index, which moves), and
+  // the session half is what the safety door compares against the declaration.
+  return run(["kill-window", "-t", `${scopeName}:${where.window}`]).ok;
+}
+
 // ---------------------------------------------------------------------------
 // Where could a task start?
 // ---------------------------------------------------------------------------

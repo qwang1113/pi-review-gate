@@ -106,14 +106,15 @@ daemon 起一个 authoring 会话跟你谈；
 - **同一个 repo 同时只有一个写者**。上一个运行还没结算时，同一 repo 的下一个任务不启动；
   同一 repo 上还有**别的活会话**时也不启动（哪怕那个会话已经 `declare_done`、只是窗口还开着）。
   两种情况都在台账里记一条 `run-skipped`，`reason` 写明是谁占着（`runId` 或 `sessionId`）—— 理由同上：
-  门禁不会为运行会话启动，那样它连契约都继承不了。
+  门禁不会为运行会话启动，那样它连契约都继承不了。（daemon 自己开的运行窗口在结算时就关掉，所以它不会变成长期占用者；
+  占住 checkout 的一般是你自己的会话。）
 
 **排障**：
 
 | 症状 | 看哪里 |
 | --- | --- |
 | 到点没动静 | `GET /api/schedules` 的 `nextRunAt`：落在**过去**说明欠着（下一个 tick 就处理）—— 但如果 `GET /api/schedules/:id/runs` 里最后一条 `run-started` 没有对应的 `run-settled`，它是在等那次运行结束；`enabled:false` 则根本没有下一次 |
-| 没跑起来 | `GET /api/schedules/:id/runs`：`run-skipped` 的 `reason` 说清为什么 —— repo 上还有**未结算的运行**（点名 `runId`）、repo 上还有**别的活会话**（点名 `sessionId` 与最后心跳；哪怕那个会话已经 `declare_done`，只要进程还在就算）、或起会话失败 |
+| 没跑起来 | `GET /api/schedules/:id/runs`：`run-skipped` 的 `reason` 说清为什么 —— repo 上还有**未结算的运行**（点名 `runId`）、repo 上还有**别的活会话**（点名 `sessionId` 与最后心跳；哪怕它已经 `declare_done`，只要进程还在就算）、或起会话失败 |
 | 会话起来了但不干活 | 面板打开那个会话（`GET /api/sessions` 里找 `RG_SCHEDULE_RUN` 对应的那条）—— 它就是一个普通会话，等回答 / 卡住都照旧显示 |
 | outcome 看不懂 | `passed` 只来自 READY；`gone` = 读不到门禁 state 或会话异常消失；`failed` = 结束了但结论不是 READY/BLOCKED |
 | 表坏了 | daemon **不会**把损坏的表当成空表：`GET /api/schedules` 报 500、`daemon.log` 里有原因；修好之前调度停摆（这是故意的） |

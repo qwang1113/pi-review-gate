@@ -91,7 +91,7 @@ import {
   type ScheduleRunRecord,
   type ScheduleRunStarted,
 } from "../schedule-store.ts";
-import { launchTask } from "./control.ts";
+import { launchTask, closeRunWindow } from "./control.ts";
 import type { SessionObserver, DaemonSession } from "./sessions.ts";
 import type { TmuxRunner } from "../orchestrator-tmux.ts";
 
@@ -442,6 +442,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         settled.add(run.runId);
         unrecordedRuns.delete(run.runId);
         log(`运行 ${run.runId}（任务 ${run.taskId}）结算：${decision.outcome}${decision.verdict === null ? "" : `（${decision.verdict}）`}`);
+        // AND LET GO OF THE CHECKOUT (quality round P1, 2026-10-02): a session
+        // holds its worktree until its PROCESS exits (`declare_done` does not
+        // release it), so a settled run whose window stays open would keep its
+        // repo "occupied" forever and every later run of it would be skipped.
+        // The daemon opened this window; the daemon closes it.
+        if (session !== undefined && !closeRunWindow(deps, session)) {
+          log(`运行 ${run.runId} 的窗口没能关掉（它会继续占着 ${session.repo}）`);
+        }
       } catch (error) {
         log(`运行 ${run.runId} 结算失败（下次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
       }
@@ -555,6 +563,13 @@ function slotKey(taskId: string, scheduledAt: Date | null): string {
  * session claims the main sidecar, so the only thing that can refuse it is a
  * fresh heartbeat by somebody else — and the fail-open direction is the
  * function's own (a missing, unreadable or nonsensical record is nobody).
+ *
+ * WHAT THIS DOES NOT CLOSE, said plainly: the session asks the SAME question
+ * again a few seconds later (pi's cold start), and a session that claims this
+ * checkout inside that window still lands in the failure this guard exists to
+ * avoid. The answer is not a bigger guard — the window is inherent — but the
+ * doc says so (docs/daemon/api.md §13.7) rather than promising the absence of a
+ * state that can still happen.
  */
 export function liveSessionHolder(repo: string, now: Date): PresenceRecord | undefined {
   let raw: string | undefined;
