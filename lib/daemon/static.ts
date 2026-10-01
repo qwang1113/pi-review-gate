@@ -21,7 +21,7 @@
  * can hold is how the gate's own size rule is earned.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -76,13 +76,20 @@ export function safeJoin(root: string, pathname: string): string | undefined {
   return candidate === base || candidate.startsWith(base.endsWith(sep) ? base : `${base}${sep}`) ? candidate : undefined;
 }
 
-function serveFile(path: string): StaticReply | undefined {
+function serveFile(path: string, rootReal: string | undefined): StaticReply | undefined {
   try {
-    if (!statSync(path).isFile()) return undefined;
+    // SYMLINKS DO NOT WIDEN THE ROOT (reviewer P1, 2026-10-01): `safeJoin` is a
+    // lexical check, and a symlink inside the build output pointing outside it
+    // satisfies the check while `statSync` follows it out of the directory. The
+    // RESOLVED path has to be inside the resolved root as well.
+    if (rootReal === undefined) return undefined;
+    const real = realpathSync(path);
+    if (real !== rootReal && !real.startsWith(rootReal.endsWith(sep) ? rootReal : `${rootReal}${sep}`)) return undefined;
+    if (!statSync(real).isFile()) return undefined;
     return {
       status: 200,
-      buffer: readFileSync(path),
-      contentType: CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream",
+      buffer: readFileSync(real),
+      contentType: CONTENT_TYPES[extname(real).toLowerCase()] ?? "application/octet-stream",
     };
   } catch {
     return undefined;
@@ -103,12 +110,18 @@ code{background:#f2f2f2;padding:.1rem .35rem;border-radius:4px}h1{font-size:1.3r
 
 /** The three-way answer: the file, the SPA fallback, or the explanation page. */
 export function servePanel(webDir: string, pathname: string): StaticReply {
+  let rootReal: string | undefined;
+  try {
+    rootReal = realpathSync(webDir);
+  } catch {
+    rootReal = undefined; // no build output at all — the page below says so
+  }
   const requested = safeJoin(webDir, pathname === "/" ? "/index.html" : pathname);
   if (requested !== undefined) {
-    const file = serveFile(requested);
+    const file = serveFile(requested, rootReal);
     if (file !== undefined) return file;
   }
-  const fallback = serveFile(join(webDir, "index.html"));
+  const fallback = serveFile(join(webDir, "index.html"), rootReal);
   if (fallback !== undefined) return { ...fallback, contentType: "text/html; charset=utf-8" };
   return { status: 200, text: missingBuildPage(webDir), contentType: "text/html; charset=utf-8" };
 }

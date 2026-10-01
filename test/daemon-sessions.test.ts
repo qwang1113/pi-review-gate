@@ -154,6 +154,27 @@ test("without a gate-state record the reading is marked unknown, not 'nothing pe
   assert.equal(session.rounds.sent, 0);
 });
 
+test("the tailer never bookmarks past an incomplete line, so a torn append is not lost", () => {
+  const home = scratchHome();
+  const path = writeTranscript(home, { sessionId: "s1", cwd: "/x", records: [assistantRecord("one")] });
+  const tailer = new TranscriptTailer();
+  tailer.prime(path);
+
+  const full = `${JSON.stringify(assistantRecord("中文消息：多字节内容，用来验证偏移是按字节算的"))}\n`;
+  const half = full.slice(0, Math.floor(full.length / 2));
+  appendFileSync(path, half);
+  assert.deepEqual(tailer.read(path), [], "a half-written line is not output");
+  appendFileSync(path, full.slice(half.length));
+  assert.deepEqual(
+    tailer.read(path).map((entry) => entry.text),
+    ["中文消息：多字节内容，用来验证偏移是按字节算的"],
+    "the completed line still arrives",
+  );
+  // …and the bookmark is a BYTE offset that still lines up afterwards.
+  appendFileSync(path, `${JSON.stringify(assistantRecord("after"))}\n`);
+  assert.deepEqual(tailer.read(path).map((entry) => entry.text), ["after"]);
+});
+
 test("sessions merge the pane, the registry and the transcript", () => {
   const home = scratchHome();
   writeRegistry(home, registryEntry({

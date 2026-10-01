@@ -1,4 +1,7 @@
 {
   "name": "web",
-  "private": true
+  "private": true,
+  "scripts": {
+    "build": "node -e \"console.log('web 面板尚未实现：构建脚本由 web-panel 任务提供。本次没有产出任何文件 —— daemon 会因此返回它的「面板还没构建」说明页（GET /）。')\""
+  }
 }

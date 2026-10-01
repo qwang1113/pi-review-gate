@@ -8,8 +8,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { createNotificationStore, createSessionWatcher, createSseHub, notificationKindFor, type DaemonEvent } from "../lib/daemon/events.ts";
 import { createSessionObserver, type DaemonSession } from "../lib/daemon/sessions.ts";
@@ -64,6 +65,23 @@ test("the ledger lets exactly one caller claim a fact", () => {
   assert.equal(store.list().find((entry) => entry.key === "k1")?.count, 2);
 });
 
+test("a claim re-reads the ledger, so a second writer does not erase the first one's claim", () => {
+  const home = scratchHome();
+  const path = join(home, "notifications.json");
+  const first = createNotificationStore(path);
+  const second = createNotificationStore(path);
+  assert.equal(first.claim({ key: "k1", kind: "done", sessionId: "s", title: "t1", body: "b1" }).claimed, true);
+  // `second` has never read the file: a cached read would decide against an
+  // empty ledger, overwrite it, and drop k1.
+  assert.equal(second.claim({ key: "k2", kind: "done", sessionId: "s", title: "t2", body: "b2" }).claimed, true);
+  assert.deepEqual(second.list().map((entry) => entry.key).sort(), ["k1", "k2"]);
+  assert.deepEqual(
+    (JSON.parse(readFileSync(path, "utf8")) as { entries: { key: string }[] }).entries.map((entry) => entry.key).sort(),
+    ["k1", "k2"],
+    "both claims survive on disk",
+  );
+});
+
 test("the ledger is a file: a second reader sees the first reader's claims", () => {
   const home = scratchHome();
   const path = join(home, "notifications.json");
@@ -72,6 +90,29 @@ test("the ledger is a file: a second reader sees the first reader's claims", () 
   const second = createNotificationStore(path);
   assert.equal(second.claim({ key: "shared", kind: "done", sessionId: "s", title: "t", body: "b" }).claimed, false);
   assert.equal(second.list().length, 1);
+});
+
+test("one key cannot be claimed while another caller holds its lock — and a stale lock is taken over", () => {
+  const home = scratchHome();
+  const storeFile = join(home, "notifications.json");
+  const store = createNotificationStore(storeFile);
+  const key = "等你回答 · project\u0000@t1 正在等你回答。";
+  const lock = join(
+    home,
+    "notification-claims",
+    `${createHash("sha256").update(key).digest("hex").slice(0, 32)}.lock`,
+  );
+  mkdirSync(dirname(lock), { recursive: true });
+
+  writeFileSync(lock, `${Date.now()}`, "utf8");
+  const busy = store.claim({ key, kind: "waiting-input", sessionId: "s1", title: "t", body: "b" });
+  assert.equal(busy.claimed, false, "a key being claimed by somebody else is not claimed twice");
+  assert.match(busy.reason ?? "", /另一个调用方/);
+
+  // A crash between create and remove must not refuse the key forever.
+  writeFileSync(lock, `${Date.now() - 10 * 60_000}`, "utf8");
+  assert.equal(store.claim({ key, kind: "waiting-input", sessionId: "s1", title: "t", body: "b" }).claimed, true);
+  assert.equal(existsSync(lock), false, "the winner releases the lock");
 });
 
 test("an unreadable ledger reads as empty (one extra banner, never silence)", () => {

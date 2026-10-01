@@ -556,7 +556,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 
 ---
 
-## 五、`lib/` 全量速查表（264 个模块）
+## 五、`lib/` 全量速查表（275 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -610,6 +610,17 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `copilot-review-state.ts` | L7 的状态机本体：状态、持久化形状、`arm` / `record` / `release` 三个转移、`copilotProblems`、sidecar 校验 `sanitizeCopilotState`；`CopilotReviewState.triage` 带用户自己的裁决，每个转移都带着它走 |
 | `copilot-probe-parse.ts` | L7 的 gh 输出纯解析：各 GraphQL query 常量、`parseCopilotProbe` / `parseCopilotTimeline` / `parseCopilotPayload` / `parsePrView` / `decidePrView`、可用性判定 `decideCopilotSupport`、`isCopilotAuthor`；认不出的形状一律是「没数据」，不抛不猜 |
 | `copilot-triage.ts` | L7 用户那半边的纯规则：轮次阈值（`COPILOT_TRIAGE_ASK_FROM_ROUND = 4` 起每条问题先问用户）、线程键（thread id + 最后一条评论 id）、「哪些还没表态」、四组裁决汇总、`triage` 块的 sanitize；无 IO/无时钟 |
+| `daemon/cli.ts` | `pi-gate daemon start|stop|status|install|uninstall`：start 幂等靠探测 + `start.lock`（`O_EXCL`，两个并发 start 不会各起一份，死主的锁可接管），stop 等进程真死再清记录，install/uninstall 是明确定位的占位（launchd 属 menubar-and-boot） |
+| `daemon/config.ts` | 四个配置文件的读（**敏感键整棵子树掩码**，非字符串也掩）/写（白名单 + `validateSlots` + 时间戳备份 + 原子写 + 保留 10 份）；配置路径与字段清单也在这里 |
+| `daemon/control.ts` | 写 inbox（与 `session-message-tools.ts` 逐字段一致，含溢出 side file）、`POST /api/tasks` 起会话（复用 `openScopeWindow` 与专属 session 派生，env 传 `RG_GATE_MODE`/`RG_STATION_CAP`）、候选仓库列表、daemon 自己的 tmux runner（只寻址自己派生的那个 session） |
+| `daemon/events.ts` | SSE hub + 会话 watcher（session/output/notification 事件）+ 通知去重存储（直接复用 `lib/user-notify.ts` 的 `decideNotify`/`recordNotify`/`notifyKey`/`buildUserNotifyMessage`，不另立一套）；`prime` 只在没有游标时建，**永不移动已有游标** |
+| `daemon/paths.ts` | daemon 的全部路径与常量（state / token / questions / notifications / identity / 日志）+ sessionId 作路径段的安全校验 |
+| `daemon/questions.ts` | 待答问题文件协议的实现（列待答、写答案）：身份 = (目录 sessionId, 文件名 requestId)，且必须与文件里的字段一致；答案用 `O_EXCL` 创建 ⇒ **先答者生效**；归一复用 `resolveAnswer` |
+| `daemon/server.ts` | 路由表 + 鉴权（0600 token、常量时间比较）+ SSE 帧格式 + 静态接线；**无策略**，每个 endpoint 只把请求转给上面某个模块 |
+| `daemon/sessions.ts` | 三源合并（rg-sessions 注册表 + tmux `@rg_*` + 转写）→ `DaemonSession`：状态词表复用 `CHILD_STATES`、存活复用 `classifyEntry`、未满足项复用 `unmetRequirements`；带 1s 采集 / 5s 索引 / 按 (path,size) 的 state 缓存，且每轮 collect 收尾按本轮触达的键回收（常驻进程不得无上限增长） |
+| `daemon/state.ts` | state 文件（0600，含 pid/port/startedAt/workspaceRoots，**不含 token**）、token（独立 0600 文件、常量时间比较）、**在线判定唯一实现** `probeDaemon`（state 可解析 + pid 活 + 带 token 的 `/api/health` 1s 内 200） |
+| `daemon/static.ts` | 静态托管：SPA fallback、路径穿越拒绝、产物缺失时返回说明页（200 而非 500）；`DEFAULT_WEB_DIR` 的解析（`fileURLToPath`，含空格/非 ASCII 的路径也认）在这里 |
+| `daemon/transcript.ts` | 会话 JSONL 的读取（head / tail / 按偏移的 tailer / 输出条目解析 / 门禁 state 抽取）：只读所需字节；offset 一律取「这次读自己的结束位置」，不重新 stat（重 stat 会把两次之间落盘的行既漏掉回放又跳过增量） |
 | `delivery-station.ts` | 交付站点（`precommit` / `commit` / `pr`）：类型、解析与缺省（缺失或非法一律读成 `precommit`）、严格度排序、「某站点放行哪些 `ShipCommandKind`」的纯判定与超站拦截文案（`stationShipProblem` / `STATION_SHIP_NEXT_STEPS`，只给用户能走的两条路、不给申诉假出路），以及 `declare_done` 的「到站」判定（`stationArrivalProblems`：`commit` 要工作区干净，`pr` 要三条证据之一 —— 门禁**亲眼看到**成功的 `gh pr create`（`GateState.shippedKinds`）、Copilot 周期已解析出的 PR 号，或**门禁自己查到的、当前分支上开着的 PR**（`lib/station-pr-evidence.ts`）—— **且本地 HEAD 已在它的 upstream 上**（`prEvidencePresent` / `prArrivalProven` 是唯一的两条谓词，扩展也调前者决定要不要发网络查询；「挂着旧 PR、本轮提交还在本地」——包括门禁自己在 PR 开着之后落的 checkpoint——一律判未到站）；无 fs、无时钟，goal 侧、plan 侧与 ship 门禁共用同一份枚举 |
 | `reason-editor.ts` | **门禁唯一的理由框**（2026-09-17，用户要求「和 pi 本身的输入框一致」）：`hostReasonEditor` 把 pi 自己的 `ExtensionEditorComponent`（多行、可粘贴、`ctrl+g` 进 $EDITOR）**连 abort 一起**装好 —— 不用 `ui.editor()` 是因为那个签名不收 `signal`，而这个门禁的对话框模型建立在「另一方先答就把框撤下」上（先答者生效、instruct 打断），一个活过自己答案的框会收下没人会读的输入。**两种 `undefined` 必须分开**：RPC 模式的 `ui.custom()` 不调 factory 就返回 `undefined`，把它读成「用户关框」会误停整场采访（`ask-user.ts` 的 `resolveQuestion`），所以判据是**factory 跑没跑**（跑了 ⇒ 是人关的；没跑 ⇒ 这个宿主根本渲染不了自定义组件 ⇒ 回退到 `ui.editor()`）。纯逻辑：组件经 `build` 注入，宿主两个调用经 `custom`/`fallback` 注入。pi 包的 `import()` 只在 `extensions/review-gate.ts` 一处，而且**按需**（`loadEditorComponent` 缓存结果、失败即降级）—— 模块作用域的静态值导入会让「在 pi 之外加载这个文件的宿主」（安装夹具、检查工具）在**加载期**就炸，整个扩展起不来只为了画一个框；拿不到组件类时直接回退到宿主自己的 `ui.editor`（多行、无 signal）。**回退路径的唯一补丁**是 `hostEditorFallback` + `raceReasonEditor`（2026-09-18，reviewer P1 两条）：适配器只把标题交给 pi 的 `ui.editor`（我们的 `opts` 进 prefill 位会让框里出现 `[object Object]`），自己读 signal；框撤不下来（那个签名不收 signal），但门禁**不能一直等它** —— abort 一到就结束等待；而且框由 **thunk 打开**，已 abort 的信号连框都不开（第一版收 promise，等于先开后弃，在屏幕上留下一个没人读的框）。`hostReasonEditor` 把自己的 `opts` 一并交给 fallback —— RPC 路径（custom 在、factory 不跑）以前只传标题，fallback 拿不到 signal，等于没修（reviewer P1 第二条）；custom 路径在进门前也查 `aborted`（否则先挂载组件再收尾，屏幕上会闪一个没人等的框，reviewer P1 第三条）|
 | `rejection-copy.ts` | **拒绝文案的唯一渲染器**（2026-09-16，用户决定）：门禁对 agent 说的每一句「不行」都渲成同一形状 —— `review-gate: <现象>` / `原因：<事实>` / `下一步：<你 / 用户 / 门禁> —— <动作>`。四个字段全是必填的（`RejectionParts` / `RejectionActor`），漏一个编译不过 —— 形状由代码保证，不靠作者记得 `docs/coding-standards.md` §7。本轮接入六条高频路径（`ask_user` 批次不合规、`judge_submit` 送审被拒、goal/plan 打回、`declare_done` 被拒、edit/write 被拦、ship 命令被拦），其余随日后改动收敛；**不是框架**：没有严重度、没有错误码、没有注册表 |

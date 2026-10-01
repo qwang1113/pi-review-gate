@@ -26,8 +26,9 @@
  * own identity for one notification.
  */
 
-import { basename, dirname } from "node:path";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import {
   buildUserNotifyMessage,
@@ -149,10 +150,23 @@ interface StoreFile {
 
 export function createNotificationStore(path: string, deps: { now?: () => number } = {}): NotificationStore {
   const now = deps.now ?? ((): number => Date.now());
+  const claimDirs = join(dirname(path), "notification-claims");
   let loaded: StoreFile | undefined;
+  let loadedAt = 0;
 
-  function read(): StoreFile {
-    if (loaded !== undefined) return loaded;
+  /**
+   * The ledger, re-read from disk when it may have moved on.
+   *
+   * `fresh` is REQUIRED for a claim (reviewer P1, 2026-10-01): the store is a
+   * file that more than one process can write, and a claim decided against a
+   * snapshot taken hours ago would drop every entry another writer appended in
+   * between — the per-key lock serialises the write, but only a fresh read sees
+   * what the last writer left. Readers (`list`) keep a short cache instead:
+   * a menu-bar poll that is seconds behind is not a correctness problem.
+   */
+  function read(fresh = false): StoreFile {
+    const at = now();
+    if (!fresh && loaded !== undefined && at - loadedAt < LIST_TTL_MS) return loaded;
     try {
       const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
       const entries = Array.isArray(raw.entries)
@@ -165,6 +179,7 @@ export function createNotificationStore(path: string, deps: { now?: () => number
       // that can only ever produce one extra banner, never silence.
       loaded = { schema: 1, history: emptyNotifyHistory(), entries: [] };
     }
+    loadedAt = at;
     return loaded;
   }
 
@@ -178,35 +193,25 @@ export function createNotificationStore(path: string, deps: { now?: () => number
       // The ledger is best effort: losing it costs one duplicate banner.
     }
     loaded = file;
+    loadedAt = now();
   }
 
   return {
     claim(input) {
-      const at = now();
-      const file = read();
-      const decision = decideNotify({ history: file.history, key: input.key, now: at });
-      const existing = file.entries.find((entry) => entry.key === input.key);
-      const firstSeenAt = existing?.firstSeenAt ?? new Date(at).toISOString();
-      if (!decision.send) {
-        return { claimed: false, firstSeenAt, count: existing?.count ?? 0, reason: decision.reason };
+      // ONE CLAIM PER KEY AT A TIME, ACROSS PROCESSES (reviewer P1, 2026-10-01).
+      // The ledger is a read-modify-write, and "the first caller wins" is only
+      // true if two callers cannot both read "not claimed yet". The arbitration
+      // is an `O_EXCL` lock file per key — the daemon is the documented writer,
+      // but a contract that depends on nobody else writing is not a guarantee.
+      const guard = claimGuard(claimDirs, input.key, now());
+      if (guard.kind === "busy") {
+        return { claimed: false, firstSeenAt: new Date(now()).toISOString(), count: 0, reason: guard.reason };
       }
-      const history = recordNotify(file.history, input.key, at);
-      const entry: NotificationEntry = {
-        key: input.key,
-        kind: input.kind,
-        sessionId: input.sessionId,
-        name: input.name ?? null,
-        title: sanitizeNotifyText(input.title, NOTIFY_TITLE_MAX),
-        body: sanitizeNotifyText(input.body, NOTIFY_BODY_MAX),
-        at: new Date(at).toISOString(),
-        firstSeenAt,
-        count: (existing?.count ?? 0) + 1,
-      };
-      const entries = [...file.entries.filter((candidate) => candidate.key !== input.key), entry]
-        .filter((candidate) => at - Date.parse(candidate.at) < NOTIFICATION_HISTORY_MS)
-        .slice(-NOTIFICATION_HISTORY_MAX);
-      persist({ schema: 1, history, entries });
-      return { claimed: true, firstSeenAt, count: entry.count };
+      try {
+        return decideAndRecord(input);
+      } finally {
+        guard.release();
+      }
     },
 
     list(opts = {}) {
@@ -222,6 +227,42 @@ export function createNotificationStore(path: string, deps: { now?: () => number
       return entries;
     },
   };
+
+  /** The claim itself, under the per-key lock. */
+  function decideAndRecord(input: {
+    key: string;
+    kind: string;
+    sessionId: string;
+    name?: string | null;
+    title: string;
+    body: string;
+  }): NotificationClaim {
+    const at = now();
+    const file = read(true);
+    const decision = decideNotify({ history: file.history, key: input.key, now: at });
+    const existing = file.entries.find((entry) => entry.key === input.key);
+    const firstSeenAt = existing?.firstSeenAt ?? new Date(at).toISOString();
+    if (!decision.send) {
+      return { claimed: false, firstSeenAt, count: existing?.count ?? 0, reason: decision.reason };
+    }
+    const history = recordNotify(file.history, input.key, at);
+    const entry: NotificationEntry = {
+      key: input.key,
+      kind: input.kind,
+      sessionId: input.sessionId,
+      name: input.name ?? null,
+      title: sanitizeNotifyText(input.title, NOTIFY_TITLE_MAX),
+      body: sanitizeNotifyText(input.body, NOTIFY_BODY_MAX),
+      at: new Date(at).toISOString(),
+      firstSeenAt,
+      count: (existing?.count ?? 0) + 1,
+    };
+    const entries = [...file.entries.filter((candidate) => candidate.key !== input.key), entry]
+      .filter((candidate) => at - Date.parse(candidate.at) < NOTIFICATION_HISTORY_MS)
+      .slice(-NOTIFICATION_HISTORY_MAX);
+    persist({ schema: 1, history, entries });
+    return { claimed: true, firstSeenAt, count: entry.count };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +284,51 @@ function notifiableFor(session: { mode: string; kind: string | null }): boolean 
     taskMode: session.mode as TaskMode,
     stateVariant: session.kind === "child" ? "child" : undefined,
   });
+}
+
+/** How long a READ of the ledger may be reused (a claim always re-reads). */
+const LIST_TTL_MS = 5_000;
+
+/** How long a claim lock may live before anyone may take it over. */
+export const CLAIM_LOCK_STALE_MS = 30_000;
+
+type ClaimGuard = { kind: "held"; release: () => void } | { kind: "busy"; reason: string };
+
+/**
+ * The per-key lock a claim runs under: an `O_EXCL` file, removed in a `finally`.
+ *
+ * A lock left behind by a crash is TAKEN OVER once it is older than
+ * {@link CLAIM_LOCK_STALE_MS} — otherwise one killed process would refuse that
+ * key forever, and a notification nobody could ever send is worse than one sent
+ * twice.
+ */
+function claimGuard(dir: string, key: string, at: number): ClaimGuard {
+  const path = join(dir, `${createHash("sha256").update(key).digest("hex").slice(0, 32)}.lock`);
+  const take = (): boolean => {
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path, `${at}`, { flag: "wx", mode: 0o600 });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (take()) return { kind: "held", release: () => { rmSync(path, { force: true }); } };
+
+  let heldAt = Number.NaN;
+  try {
+    heldAt = Number(readFileSync(path, "utf8"));
+  } catch {
+    heldAt = Number.NaN; // it vanished between the create and the read
+  }
+  if (Number.isFinite(heldAt) && at - heldAt < CLAIM_LOCK_STALE_MS) {
+    return { kind: "busy", reason: "这条通知正被另一个调用方 claim —— 同一个 key 同时只能有一个赢家，请重试" };
+  }
+  try {
+    rmSync(path, { force: true });
+  } catch { /* the loser of the takeover race reports busy below */ }
+  if (take()) return { kind: "held", release: () => { rmSync(path, { force: true }); } };
+  return { kind: "busy", reason: "这条通知正被另一个调用方 claim —— 同一个 key 同时只能有一个赢家，请重试" };
 }
 
 /** The event kind a state transition deserves, or none. */

@@ -7,10 +7,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { DAEMON_HOME_ENV, runDaemonCli, type CliIo } from "../lib/daemon/cli.ts";
+import { DAEMON_HOME_ENV, claimStartLock, runDaemonCli, type CliIo } from "../lib/daemon/cli.ts";
 import { probeDaemon, readDaemonState } from "../lib/daemon/state.ts";
 import { daemonStatePath, daemonTokenPath } from "../lib/daemon/paths.ts";
 import { freePort, scratchHome } from "./daemon-helpers.ts";
@@ -118,6 +119,59 @@ test("a stale state file whose process is gone is cleaned up by stop, not by a k
   assert.equal(existsSync(daemonStatePath(home)), false);
 });
 
+test("stop refuses to signal a pid the health check does not confirm as the daemon", async () => {
+  const home = scratchHome();
+  const { writeDaemonState, buildDaemonState } = await import("../lib/daemon/state.ts");
+  const { spawn } = await import("node:child_process");
+  const { pidAlive } = await import("../lib/session-registry.ts");
+  // A live process that is NOT the daemon — the shape a reused pid leaves.
+  const victim = spawn("sleep", ["30"], { stdio: "ignore" });
+  try {
+    writeDaemonState({ ...buildDaemonState(await freePort()), pid: victim.pid! }, home);
+    const result = await cli(home, ["daemon", "stop"]);
+    assert.equal(result.code, 1);
+    assert.match(result.err, /拒绝发 SIGTERM/);
+    assert.equal(pidAlive(victim.pid!), true, "an unconfirmed pid is never signalled");
+  } finally {
+    victim.kill("SIGKILL");
+  }
+});
+
+test("the start lock lets exactly one starter through, and reclaims a stale one", () => {
+  const home = scratchHome();
+  mkdirSync(join(home, ".pi", "agent", "rg-daemon"), { recursive: true });
+  const lock = join(home, ".pi", "agent", "rg-daemon", "start.lock");
+  assert.equal(claimStartLock(lock, 1_000), true, "the first starter claims it");
+  assert.equal(claimStartLock(lock, 1_001), false, "a live holder is not taken over");
+
+  // Stale: its holder is gone (or it outlived any start) — reclaimed, not left
+  // to block every future start.
+  writeFileSync(lock, `999999999 ${1_000}`, "utf8");
+  assert.equal(claimStartLock(lock, 1_001), true);
+  assert.match(readFileSync(lock, "utf8"), new RegExp(`^${process.pid} `));
+});
+
 test("the documented home override is the variable the detached child reads", () => {
   assert.equal(DAEMON_HOME_ENV, "RG_DAEMON_HOME");
+});
+
+test("RG_DAEMON_HOME reaches the CLI even when the caller passes its own io", async () => {
+  const home = scratchHome();
+  const lines: string[] = [];
+  const previous = process.env[DAEMON_HOME_ENV];
+  process.env[DAEMON_HOME_ENV] = home;
+  try {
+    const code = await runDaemonCli(["daemon", "status"], {
+      out: (line) => lines.push(line),
+      err: (line) => lines.push(line),
+    });
+    assert.equal(code, 1);
+    assert.ok(
+      lines.join("\n").includes(daemonStatePath(home)),
+      `status must look at the overridden home, saw:\n${lines.join("\n")}`,
+    );
+  } finally {
+    if (previous === undefined) delete process.env[DAEMON_HOME_ENV];
+    else process.env[DAEMON_HOME_ENV] = previous;
+  }
 });

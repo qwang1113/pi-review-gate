@@ -40,10 +40,9 @@
  * against. This module is its implementation; the document is its authority.
  */
 
-import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 import { resolveAnswer } from "../orchestrator-answer-rules.ts";
-import { writeFileAtomic } from "../atomic-write.ts";
 import {
   questionAnswerPath,
   questionPath,
@@ -189,6 +188,20 @@ function readJson(path: string): unknown {
   }
 }
 
+/**
+ * Is this question the one the PATH says it is?
+ *
+ * The identity of one ask is `(directory sessionId, filename requestId)`, and the
+ * file's own fields must agree with it (docs/daemon/api.md §7.2). Without this
+ * check a file planted at one path — or a producer that wrote a mismatched
+ * pair — is listed as a DIFFERENT request and, worse, the answer would be
+ * written under the path the daemon invented rather than the one the asking
+ * session is watching (reviewer P1, 2026-10-01).
+ */
+function matchesPath(question: DaemonQuestion, sessionId: string, requestId: string): boolean {
+  return question.sessionId === sessionId && question.requestId === requestId;
+}
+
 /** Is this question still waiting for an answer? */
 export function isPending(home: string, question: DaemonQuestion): boolean {
   try {
@@ -239,6 +252,10 @@ export function listPendingQuestions(home: string, opts: { sessionId?: string } 
         problems.push(`${sessionId}/${file}: ${parsed.problem}`);
         continue;
       }
+      if (!matchesPath(parsed.value, sessionId, requestId)) {
+        problems.push(`${sessionId}/${file}: 文件里的 sessionId/requestId 与路径不一致，不确定它属于哪次询问，已忽略`);
+        continue;
+      }
       if (!isPending(home, parsed.value)) continue;
       questions.push(parsed.value);
     }
@@ -260,8 +277,16 @@ export interface AnswerOutcome {
  * Answer one pending question.
  *
  * Refusals are all the same shape (nothing was written): an unknown request, a
- * question that already has an answer, or an answer `resolveAnswer` cannot read
- * against the rows the question offered.
+ * question whose file does not belong to the path it was found at, a question
+ * that already has an answer, or an answer `resolveAnswer` cannot read against
+ * the rows the question offered.
+ *
+ * FIRST ANSWER WINS, ATOMICALLY (reviewer P1, 2026-10-01): the answer file is
+ * created with `O_EXCL`, so the daemon and the pane (or two callers) racing on
+ * one request cannot both write — the loser gets EEXIST and is told the
+ * question is already answered. A plain atomic replace would have let the
+ * second write silently overwrite the first, which is the opposite of "谁先答
+ * 算谁的".
  */
 export function submitAnswer(
   home: string,
@@ -272,6 +297,9 @@ export function submitAnswer(
   if (!REQUEST_ID_PATTERN.test(input.requestId)) return { ok: false, problem: "requestId 不合法" };
   const parsed = parseQuestion(readJson(questionPath(home, input.sessionId, input.requestId)));
   if (!parsed.ok) return { ok: false, problem: `读不到这个问题：${parsed.problem}` };
+  if (!matchesPath(parsed.value, input.sessionId, input.requestId)) {
+    return { ok: false, problem: "问题的 sessionId/requestId 与它的路径不一致 —— 不向一个对不上的位置写答案" };
+  }
   if (!isPending(home, parsed.value)) return { ok: false, problem: "这个问题已经答过了（答案文件已存在）" };
   const resolved = resolveAnswer(
     { options: parsed.value.options, ...(parsed.value.multiple ? { multiple: true } : {}) },
@@ -290,8 +318,10 @@ export function submitAnswer(
   const path = questionAnswerPath(home, input.sessionId, input.requestId);
   try {
     mkdirSync(sessionQuestionsDir(home, input.sessionId), { recursive: true });
-    writeFileAtomic(path, `${JSON.stringify(answer, null, 2)}\n`);
+    writeFileSync(path, `${JSON.stringify(answer, null, 2)}\n`, { flag: "wx", mode: 0o600 });
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") return { ok: false, problem: "这个问题已经答过了（另一个回答先落地）" };
     return { ok: false, problem: `答案写入失败：${error instanceof Error ? error.message : String(error)}` };
   }
   return { ok: true, answer: answer.answer, path };

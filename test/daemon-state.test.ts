@@ -7,7 +7,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-
 import {
   buildDaemonState,
   clearDaemonState,
@@ -84,6 +83,33 @@ test("writePrivateFile creates missing parents and never leaves the temp sibling
   assert.equal(readFileSync(path, "utf8"), "secret\n");
   assert.equal(mode(path), 0o600);
   assert.deepEqual(readdirSync(dirname(path)), ["token"], "no temp sibling survives");
+});
+
+test("the state's tokenFile points into the home the daemon actually uses", () => {
+  const home = scratchHome();
+  const state = buildDaemonState(4597, Date.now(), [], home);
+  assert.equal(state.tokenFile, daemonTokenPath(home));
+  assert.notEqual(state.tokenFile, daemonTokenPath(), "defaulting to $HOME named a file nobody had written");
+});
+
+test("the probe talks to loopback, never to the address a state file claims", async () => {
+  const home = scratchHome();
+  ensureDaemonToken(home);
+  // A tampered/corrupt record: it names another host, and the probe carries the
+  // token — following it would hand the secret to whoever answers there.
+  writeDaemonState({ ...buildDaemonState(4597), baseUrl: "http://evil.example:4597" }, home);
+  const seen: string[] = [];
+  const probe = await probeDaemon({
+    home,
+    timeoutMs: 200,
+    fetchImpl: (async (input: string | URL | Request) => {
+      seen.push(String(input));
+      throw new Error("nothing listens there");
+    }) as unknown as typeof fetch,
+  });
+  assert.equal(probe.online, false);
+  assert.equal(seen.length, 1);
+  assert.match(seen[0]!, /^http:\/\/127\.0\.0\.1:4597\/api\/health$/);
 });
 
 test("the daemon identity is minted once and reused", () => {

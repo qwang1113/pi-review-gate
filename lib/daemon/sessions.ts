@@ -249,7 +249,17 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
   // ONE gate-state read per transcript VERSION: the last record lives at the end
   // of the file, so a session that produced no new output since the last tick
   // would otherwise cost another 256 KiB read every second.
+  //
+  // BOTH MAPS ARE PRUNED AT THE END OF EVERY COLLECT (2026-10-01, quality round
+  // P2): this is a resident process, and a cache keyed by "every transcript I
+  // have ever seen" is an unbounded leak in a daemon that runs for weeks. Only
+  // the keys this collect actually touched survive — the same walk that reads
+  // them also says which ones are still live.
   const gateStates = new Map<string, { size: number; gate: Record<string, unknown> | undefined }>();
+  // What THIS collect touched, so the two caches can be pruned to it (and the
+  // sets themselves are as short-lived as the call that fills them).
+  let touchedGateState = new Set<string>();
+  let touchedBranches = new Set<string>();
   // ONE collection per second serves every reader (the watcher, an HTTP list,
   // an SSE subscription): the sources are the file system and tmux, and three
   // callers asking in the same tick must not cost three scans.
@@ -266,6 +276,7 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
   }
 
   function gateStateFor(path: string): Record<string, unknown> | undefined {
+    touchedGateState.add(path);
     const size = transcriptSize(path);
     const cached = gateStates.get(path);
     if (cached !== undefined && size !== undefined && cached.size === size) return cached.gate;
@@ -274,7 +285,9 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
     return gate;
   }
 
-  function branch(cwd: string): string | null {    const cached = branches.get(cwd);
+  function branch(cwd: string): string | null {
+    touchedBranches.add(cwd);
+    const cached = branches.get(cwd);
     const at = now();
     if (cached !== undefined && at - cached.at < BRANCH_TTL_MS) return cached.value;
     let value: string | null = null;
@@ -316,6 +329,8 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
       const at = now();
       const cacheKey = `${opts.includeRecentMs ?? RECENT_SESSION_MS}:${opts.limit ?? SESSION_LIST_LIMIT}`;
       if (cached !== undefined && cached.key === cacheKey && at - cached.at < CACHE_TTL_MS) return cached.value;
+      touchedGateState = new Set<string>();
+      touchedBranches = new Set<string>();
       const problems: string[] = [];
       const includeRecentMs = opts.includeRecentMs ?? RECENT_SESSION_MS;
       const limit = opts.limit ?? SESSION_LIST_LIMIT;
@@ -498,6 +513,10 @@ export function createSessionObserver(deps: SessionObserverDeps): SessionObserve
       sessions.sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
       const trimmed = sessions.slice(0, limit);
       if (sessions.length > trimmed.length) problems.push(`会话多于 ${limit} 条，只返回最近 ${limit} 条`);
+      // PRUNE TO WHAT THIS WALK TOUCHED (see the maps' declaration): a resident
+      // daemon must not accumulate one entry per transcript it has ever seen.
+      for (const key of gateStates.keys()) if (!touchedGateState.has(key)) gateStates.delete(key);
+      for (const key of branches.keys()) if (!touchedBranches.has(key)) branches.delete(key);
       const value: SessionCollection = { now: new Date(at).toISOString(), tmuxReadable, sessions: trimmed, problems };
       cached = { key: cacheKey, at, value };
       return value;

@@ -38,7 +38,6 @@ import {
   daemonStatePath,
   daemonTokenPath,
 } from "./paths.ts";
-
 /** The public half of the daemon's identity, as it sits on disk. */
 export interface DaemonState {
   schema: typeof DAEMON_SCHEMA;
@@ -113,7 +112,18 @@ export function readDaemonState(home?: string): DaemonState | undefined {
   }
 }
 
-export function buildDaemonState(port: number, now: number = Date.now(), workspaceRoots: readonly string[] = []): DaemonState {
+export function buildDaemonState(
+  port: number,
+  now: number = Date.now(),
+  workspaceRoots: readonly string[] = [],
+  /**
+   * The agent home this daemon actually uses. Passed so `tokenFile` POINTS AT
+   * THE FILE THAT EXISTS: defaulting to `homedir()` here while the CLI wrote the
+   * token under an override produced a state file naming a path nobody had
+   * written (reviewer P1, 2026-10-01 — a test-only home made it visible).
+   */
+  home?: string,
+): DaemonState {
   return {
     schema: DAEMON_SCHEMA,
     pid: process.pid,
@@ -121,7 +131,7 @@ export function buildDaemonState(port: number, now: number = Date.now(), workspa
     startedAt: new Date(now).toISOString(),
     version: daemonPackageVersion(),
     baseUrl: daemonBaseUrl(port),
-    tokenFile: daemonTokenPath(),
+    tokenFile: daemonTokenPath(home),
     ...(workspaceRoots.length === 0 ? {} : { workspaceRoots: [...workspaceRoots] }),
   };
 }
@@ -219,7 +229,14 @@ export async function probeDaemon(opts: {
   if (token === undefined) return { online: false, state, reason: "token 文件缺失或读不出来" };
   const doFetch = opts.fetchImpl ?? fetch;
   try {
-    const response = await doFetch(`${state.baseUrl}/api/health`, {
+    // THE ADDRESS IS OURS, NOT THE FILE'S (reviewer P1, 2026-10-01). `baseUrl`
+    // is read out of a file, and this call carries the TOKEN: a tampered or
+    // corrupt record pointing at another host would hand the secret to whatever
+    // answers there. The daemon only ever listens on loopback, so the rule is
+    // computed here — 127.0.0.1 + the recorded port — and the field is treated
+    // as a description of where it was started, never as an instruction.
+    const url = `${daemonBaseUrl(state.port)}/api/health`;
+    const response = await doFetch(url, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(opts.timeoutMs ?? DAEMON_PROBE_TIMEOUT_MS),
     });

@@ -217,7 +217,11 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
         const outcome = sendSessionMessage({ home: opts.home, runTmux, now }, {
           to: session.name,
           text: typeof body.text === "string" ? body.text : "",
-          ...(typeof body.from === "string" ? { from: body.from } : {}),
+          // NO `from` FROM THE REQUEST (reviewer P1, 2026-10-01): the sender is
+          // the daemon and nothing else. A caller-supplied name would let any
+          // holder of the token write into another session's inbox dressed as
+          // that session — the panel is not a peer, and it must not be able to
+          // claim to be one.
         });
         if (!outcome.ok) return bad(400, outcome.problem ?? "发送失败", { liveNames: outcome.liveNames ?? [] });
         return ok({ ok: true, messageId: outcome.messageId, at: outcome.at, inbox: outcome.inbox, to: session.name });
@@ -453,7 +457,12 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
       reply(res, servePanel(webDir, pathname));
       return;
     }
-    const provided = bearer(req) ?? url.searchParams.get("token");
+    // THE QUERY TOKEN IS AN SSE-ONLY EXCEPTION (reviewer P1, 2026-10-01):
+    // `EventSource` cannot set a header, so that one endpoint has to take it in
+    // the URL — and a URL is exactly where a secret must not otherwise live
+    // (shell history, proxy logs, browser history). Every other call uses the
+    // Authorization header.
+    const provided = bearer(req) ?? (pathname === "/api/events" ? url.searchParams.get("token") : undefined);
     if (!tokenMatches(provided, opts.token)) {
       reply(res, bad(401, "缺少或错误的 token —— Authorization: Bearer <token>（SSE 可用 ?token=）"));
       return;

@@ -33,7 +33,7 @@
  * lands next to it.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { writeFileAtomic } from "../atomic-write.ts";
@@ -131,7 +131,11 @@ export function maskSecrets(value: unknown, key = "", sensitive = false): unknow
     }
     return out;
   }
-  if (touchesSecret && typeof value === "string" && value !== "") return CONFIG_MASK;
+  // A SECRET'S TYPE IS NOT A LOOPHOLE (reviewer P1, 2026-10-01): masking only
+  // strings left a numeric or boolean value under `apiTokens` in the clear.
+  // Everything a sensitive-named key can hold is masked — including a number,
+  // because the panel has no use for it and the name says it is a credential.
+  if (touchesSecret && value !== null && value !== undefined) return CONFIG_MASK;
   return value;
 }
 
@@ -297,15 +301,22 @@ export function validateConfigValue(
   if (segments === undefined) return `路径不合法：${JSON.stringify(path)}`;
   const leaf = segments[segments.length - 1]!;
 
-  if (value === null) return undefined; // delete — allowed for every listed field
+  // THE WHITELIST COMES FIRST — A DELETE IS A WRITE TOO (reviewer P1,
+  // 2026-10-01). Accepting `null` before the check let any caller remove any
+  // path in settings.json (`packages`, `extensions`, …): the list bounds what
+  // this endpoint may change, and removing a key changes the file as much as
+  // setting it.
+  const refusal = fieldRefusal(target, path, segments);
+  if (refusal !== undefined) return refusal;
+
+  if (value === null) return undefined; // delete of a LISTED field
 
   if (isSensitiveKey(leaf) && typeof value === "string" && value === CONFIG_MASK) {
     return "掩码不能写回 —— 要保留原值就不要提交这个字段";
   }
 
   if (target === "settings") {
-    const spec = SETTINGS_FIELDS.find((candidate) => candidate.path === path);
-    if (spec === undefined) return `${path} 不在可编辑清单里`;
+    const spec = SETTINGS_FIELDS.find((candidate) => candidate.path === path)!;
     if (spec.kind === "boolean") return typeof value === "boolean" ? undefined : `${path} 需要布尔值`;
     if (typeof value !== "string") return `${path} 需要字符串`;
     if (path === "defaultThinkingLevel" && !THINKING_LEVELS.has(value)) {
@@ -318,23 +329,36 @@ export function validateConfigValue(
   }
 
   if (target === "models") {
-    if (segments.length !== 3 || segments[0] !== "providers" || !MODEL_PROVIDER_FIELDS.some((f) => f.path === leaf)) {
-      return `${path} 不在可编辑清单里（可改的是 providers.<provider>.apiKey|baseUrl|api）`;
-    }
     return typeof value === "string" && value.trim() !== "" ? undefined : `${path} 需要非空字符串`;
   }
 
-  // gate-global / gate-project
-  if (segments.length !== 3 || segments[0] !== "agents") return `${path} 不在可编辑清单里（可改的是 agents.<role>.slots|auto|prompt）`;
   const role = segments[1]!;
-  if (!KNOWN_AGENTS.includes(role) && !isWorkerRoleName(role)) return `${path}：${role} 不是门禁认识的角色名`;
   if (leaf === "auto") return typeof value === "boolean" ? undefined : `${path} 需要布尔值`;
   if (leaf === "prompt") {
     if (!isWorkerRoleName(role)) return `${path}：只有 worker 预设有自己的 prompt`;
     return typeof value === "string" && value.trim() !== "" ? undefined : `${path} 需要非空字符串`;
   }
-  if (leaf === "slots") return Array.isArray(value) ? undefined : `${path} 需要字符串数组`;
-  return `${path} 不在可编辑清单里`;
+  return Array.isArray(value) ? undefined : `${path} 需要字符串数组`;
+}
+
+/** Is this path one of the fields this target allows at all? */
+function fieldRefusal(target: ConfigTargetName, path: string, segments: string[]): string | undefined {
+  if (target === "settings") {
+    return SETTINGS_FIELDS.some((candidate) => candidate.path === path) ? undefined : `${path} 不在可编辑清单里`;
+  }
+  if (target === "models") {
+    const leaf = segments[segments.length - 1]!;
+    return segments.length === 3 && segments[0] === "providers" && MODEL_PROVIDER_FIELDS.some((f) => f.path === leaf)
+      ? undefined
+      : `${path} 不在可编辑清单里（可改的是 providers.<provider>.apiKey|baseUrl|api）`;
+  }
+  if (segments.length !== 3 || segments[0] !== "agents") {
+    return `${path} 不在可编辑清单里（可改的是 agents.<role>.slots|auto|prompt）`;
+  }
+  const role = segments[1]!;
+  if (!KNOWN_AGENTS.includes(role) && !isWorkerRoleName(role)) return `${path}：${role} 不是门禁认识的角色名`;
+  const leaf = segments[segments.length - 1]!;
+  return leaf === "auto" || leaf === "prompt" || leaf === "slots" ? undefined : `${path} 不在可编辑清单里`;
 }
 
 /** Validate a SLOT LIST with the gate's own validator (registry included). */
@@ -373,6 +397,7 @@ export function writeConfig(
     return { ok: false, problem: error instanceof Error ? error.message : String(error) };
   }
   const existing = readJsonIfExists(file);
+  const existed = existing.exists;
   if (existing.exists && existing.value === undefined) {
     return { ok: false, problem: `${file} 不是合法 JSON —— 先手工修好，daemon 不会覆盖一个读不出来的文件` };
   }
@@ -390,6 +415,19 @@ export function writeConfig(
   }
   const next = withPath(existing.value, segments, value === null ? undefined : value);
 
+  // MODELS: ONLY THE PROVIDERS THAT ALREADY EXIST (reviewer P1, 2026-10-01).
+  // `fields` lists `providers.<p>.…` for the providers the file HAS, and a
+  // write that could invent a provider would make that list a lie — the panel
+  // may edit a credential, not mint a provider entry.
+  if (target === "models") {
+    const provider = segments[1]!;
+    const providers = readPath(existing.value, ["providers"]);
+    const known = providers !== null && typeof providers === "object" ? Object.keys(providers as Record<string, unknown>) : [];
+    if (!known.includes(provider)) {
+      return { ok: false, problem: `providers.${provider} 不在现有配置里（已知：${known.join("、") || "无"}）—— 本接口只能改已存在的 provider` };
+    }
+  }
+
   let backup: string | undefined;
   if (existing.exists) {
     // `20260102T030405Z` — sortable, filesystem-safe, and readable as a time.
@@ -404,6 +442,12 @@ export function writeConfig(
   try {
     mkdirSync(dirname(file), { recursive: true });
     writeFileAtomic(file, `${JSON.stringify(next, null, 2)}\n`);
+    // A FILE WE CREATE IS PRIVATE (reviewer P1, 2026-10-01). `writeFileAtomic`
+    // preserves an existing mode, but a brand-new config file got the process
+    // umask — usually 0644 — and this surface can hold an API key (`models.json`
+    // exists for exactly that). 0600 costs nothing: pi reads these files as the
+    // same user.
+    if (!existed) chmodSync(file, 0o600);
   } catch (error) {
     return { ok: false, problem: `写入失败：${error instanceof Error ? error.message : String(error)}` };
   }

@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -78,6 +78,17 @@ test("withPath copies the tree instead of mutating it", () => {
   assert.deepEqual(withPath({ a: 1, b: 2 }, ["a"], undefined), { b: 2 });
   assert.deepEqual(readPath(next, ["a", "b"]), 2);
   assert.equal(readPath(next, ["a", "zzz"]), undefined);
+});
+
+test("a sensitive key masks every value it can hold, not just a string", () => {
+  const masked = maskSecrets({ apiTokens: { text: "sk-x", numeric: 12345, flag: true }, theme: "dark" }, "") as {
+    apiTokens: Record<string, unknown>;
+    theme: string;
+  };
+  assert.equal(masked.apiTokens.text, CONFIG_MASK);
+  assert.equal(masked.apiTokens.numeric, CONFIG_MASK, "a number under a credential name is still a credential");
+  assert.equal(masked.apiTokens.flag, CONFIG_MASK);
+  assert.equal(masked.theme, "dark");
 });
 
 test("settings: reads are masked, writes are whitelisted and typed", () => {
@@ -152,6 +163,40 @@ test("models: an apiKey is masked on read and writable by path", () => {
 
   assert.match(validateConfigValue("models", "providers.acme.models", [], { home }) ?? "", /不在可编辑清单/);
   assert.match(validateConfigValue("models", "providers", "x", { home }) ?? "", /不在可编辑清单/);
+});
+
+test("a config file the daemon creates is private, and an existing mode is kept", () => {
+  const home = scratchHome();
+  const settings = configPath("settings", home);
+  assert.equal(writeConfig("settings", "theme", "dark", { home }).ok, true);
+  assert.equal(statSync(settings).mode & 0o777, 0o600, "a file we create may hold a credential — 0600");
+
+  // An existing mode is PRESERVED, not tightened behind the user's back.
+  chmodSync(settings, 0o644);
+  assert.equal(writeConfig("settings", "theme", "light", { home }).ok, true);
+  assert.equal(statSync(settings).mode & 0o777, 0o644);
+});
+
+test("a delete may not touch a field the whitelist does not list", () => {
+  const home = scratchHome();
+  const path = seedSettings(home, { theme: "dark", packages: ["npm:something"] });
+  const refused = writeConfig("settings", "packages", null, { home });
+  assert.equal(refused.ok, false);
+  assert.match(refused.problem ?? "", /不在可编辑清单里/);
+  assert.deepEqual((JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>).packages, ["npm:something"]);
+  assert.equal(writeConfig("settings", "theme", null, { home }).ok, true, "a listed field can still be deleted");
+});
+
+test("models: a provider the file does not have cannot be created through this endpoint", () => {
+  const home = scratchHome();
+  seedModels(home);
+  const madeUp = writeConfig("models", "providers.invented.apiKey", "sk-new", { home });
+  assert.equal(madeUp.ok, false);
+  assert.match(madeUp.problem ?? "", /不在现有配置里/);
+  const raw = JSON.parse(readFileSync(configPath("models", home), "utf8")) as { providers: Record<string, unknown> };
+  assert.equal(raw.providers.invented, undefined);
+  // The provider that IS there stays editable.
+  assert.equal(writeConfig("models", "providers.acme.baseUrl", "https://other.test/v1", { home }).ok, true);
 });
 
 test("gate: a slot list is judged by the gate's own validateSlots", () => {

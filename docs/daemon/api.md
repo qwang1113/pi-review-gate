@@ -19,12 +19,15 @@
 
 ## 2. 鉴权
 
-**每一个 `/api/*` 请求都要带 token**，两种等价形式：
+**每一个 `/api/*` 请求都要带 token**，两种形式：
 
 ```
-Authorization: Bearer <token>          # 首选
-?token=<token>                          # SSE 必须用这个（EventSource 不能设 header）
+Authorization: Bearer <token>          # 唯一形式，除下一个例外
+?token=<token>                          # 只为 SSE（GET /api/events）保留
 ```
+
+**query token 是 SSE 专属例外**：`EventSource` 不能设 header，所以那一个 endpoint 必须能从 URL 拿。
+URL 会进 shell 历史 / 代理日志 / 浏览器历史，所以**其他任何 endpoint 都不接受 query token**（带了也是 401）。
 
 token 由 daemon 首次启动时生成，写在 **`~/.pi/agent/rg-daemon.token`（权限 0600）**，
 32 字节随机（base64url）。它**不写进 state 文件**、不进日志、不在任何错误响应里回显。
@@ -68,7 +71,10 @@ token 由 daemon 首次启动时生成，写在 **`~/.pi/agent/rg-daemon.token`�
 
 1. state 文件存在、可读、是合法 JSON、`schema === 1`；
 2. `state.pid` 进程活着（`kill(pid, 0)` 成功或 `EPERM`）；
-3. 带 token 的 `GET {state.baseUrl}/api/health` 在 **1000 ms** 内返回 `200`。
+3. 带 token 的 `GET http://127.0.0.1:<state.port>/api/health` 在 **1000 ms** 内返回 `200`。
+
+第 3 条的地址是**算出来的**（`127.0.0.1` + 记录里的端口），**不是文件里的 `baseUrl`**：这个请求
+带着 token，跟着一个被篡改/损坏的 `baseUrl` 走就是把密钥送出去。`baseUrl` 只是描述它当初在哪里起来。
 
 **探测失败或超时的唯一含义是「不能断定在线」**，消费方必须按**不在线**处理。它：
 
@@ -300,6 +306,7 @@ pi --session-id <uuid> [--name <name>] -- <任务描述> [+ 起名提示]
   `models-store.json` 的注册表）。模型解析不到、思考级别不支持、槽位数超限都会被拒并说明原因。
 - `settings.defaultThinkingLevel` → `KNOWN_THINKING_LEVELS`；`tuiMode` → `regular|fullscreen`。
 - 路径本身：点分、每段 `[A-Za-z0-9_-]{1,64}`、拒绝 `__proto__`/`constructor`/`prototype`、最多 8 段。
+- **`models` 只能改已存在的 provider**：`providers.<p>.…` 中的 `<p>` 必须在现有文件里（本接口可改凭据，不可凭空创建 provider）。
 - **掩码不能写回**：敏感字段提交 `••••••••` 会被拒（要保留原值就别提交这个字段）。
 - 文件当前不是合法 JSON ⇒ 拒写（daemon 不覆盖一个读不出来的文件）。
 
@@ -400,8 +407,8 @@ daemon 据此不再列出它。
 - 成功 `200`：`{ "ok": true, "requestId": "q-3f2a", "answer": "甲", "path": "/…/q-3f2a.answer.json" }`
 - 拒绝 `400`：问题读不到 / 已经答过（答案文件已存在）/ 答案不在选项里 / 缺 `sessionId`。
 
-**先答者生效**：答案文件一旦存在，第二份答案被拒。人类在 pane 里答了，门禁删掉问题文件，
-面板这边自然消失。
+**先答者生效**：答案文件以 **`O_EXCL`** 创建，所以 daemon 与 pane（或两个调用方）同时回答时
+只有一个能写进去，另一个拿到「已经答过了」；已经存在的答案文件**不会被覆盖**。
 
 ---
 
@@ -466,6 +473,11 @@ daemon 在会话状态**发生迁移**时推出 `notification` 事件（不是�
 **`claimed: true` 才是「你发」**：第一个声明的调用方负责发这条通知，后面拿到的都是
 `claimed: false`（重复）。存储读不出来时按「没有任何记录」处理——只会多一条横幅，绝不静默。
 
+**同一个 key 同时只能有一个赢家（跨进程）**：claim 的读-改-写在一个**每 key 的 `O_EXCL` 锁**下
+完成（锁文件在 `~/.pi/agent/rg-daemon/notification-claims/`），撞上锁的调用方得到
+`claimed:false` + `reason`（重试即可，不是「已发过」）。超过 **30 秒**的锁可被接管——一个被杀死的
+进程不得把这个 key 永久封死。
+
 #### `GET /api/notifications?since=<ISO>&limit=<n>`
 
 ```json
@@ -483,7 +495,7 @@ daemon 在会话状态**发生迁移**时推出 `notification` 事件（不是�
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `token` | — | **必填**（EventSource 不能设 header） |
+| `token` | — | **必填**（EventSource 不能设 header，这是 query token 的唯一例外） |
 | `sessionId` | 全部 | 只订阅一个会话（含它的 `output`/`session`/`notification`） |
 | `replay` | 30 | 订阅时先回放该会话最近 N 条输出（0 = 不回放；上限 500） |
 
@@ -518,11 +530,15 @@ data: <JSON>
 ## 10. 静态托管（web 面板）
 
 - 目录：`<包根>/web/dist`（web 工作区的构建输出；`npm run build:web` 生成）。
+- **构建脚本由 web-panel 任务落地**：本任务只提供接口（`build:web`）与占位 `web/package.json`。
+  在它实现之前 `npm run build:web` **会正常退出并说明没有产出**，于是本目录不存在——那正是下面的说明页要讲的事（不是故障）。
 - 发布包里也带上它（`package.json` 的 `files` 含 `web/dist/`），否则装出来的包永远只有说明页。
   构建产物由 web-panel 任务产生：**发布前必须先 `npm run build:web`**。
 - `GET /` 与任何**非 `/api/*`** 路径都从这里取文件（按扩展名给 `Content-Type`）。
 - **SPA fallback**：路径在磁盘上不存在时回 `index.html`（前端路由刷新不 404）。
 - 路径穿越（`../`、绝对路径、NUL）一律解析不出去，落回 fallback。
+- **符号链接不能把范围放大**：命中路径会被 `realpath` 解析，解析结果必须仍在 `web/dist` 解析后的真路径之内——
+  指向目录外的链接按「未命中」处理（落回 fallback），不会把目录外的文件发出去。
 - **产物不存在**时返回 `200` + 说明页（告诉用户跑 `npm run build:web`），**不是 500**。
 
 ---
@@ -554,5 +570,7 @@ pi-gate daemon uninstall    # 同上
 
 - `start` 先探测：**已在线就打印它、退 0，不启第二份**；离线才 spawn 后台进程，
   并在**探测成功之后**才报「已启动」（10 s 预算，超时报错并指向日志）。
-- `stop` 发 `SIGTERM`，等它真的退出（≤8 s），然后清掉自己那条 state 记录；不强杀。
+- `stop` 先做**带 token 的健康检查**确认那个 pid 仍是 daemon（pid 会被复用，杀错进程是这条命令唯一的破坏性动作）；
+  健康检查没确认且 pid 还活着 ⇒ **拒绝发 SIGTERM**并说明原因。确认后才 SIGTERM，等它真的退出（≤8 s），
+  然后清掉自己那条 state 记录；不强杀。
 - `status` 打印 state 与在线判定理由，在线退 0、离线退 1。

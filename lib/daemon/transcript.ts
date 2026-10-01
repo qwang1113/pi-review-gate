@@ -187,19 +187,31 @@ export function readFileHead(path: string, maxBytes: number): string | undefined
   return newline < 0 ? raw : raw.slice(0, newline);
 }
 
-/** The last `maxBytes` of a file, plus whether anything before it was cut off. */
-export function readFileTail(path: string, maxBytes: number = TAIL_BYTES): { text: string; truncated: boolean } | undefined {
+/**
+ * The last `maxBytes` of a file, plus whether anything before it was cut off
+ * and END — the file size this read actually stopped at.
+ *
+ * `end` is the reason this returns a third field at all (2026-10-01, quality
+ * round P2): a reader that re-`stat`ed the file to learn where its read ended
+ * can be handed a number the file has already grown past, and the bytes in
+ * between are then neither in the read nor after it. Returned from the read
+ * itself, the number cannot lie.
+ */
+export function readFileTail(
+  path: string,
+  maxBytes: number = TAIL_BYTES,
+): { text: string; truncated: boolean; end: number } | undefined {
   const size = transcriptSize(path);
   if (size === undefined) return undefined;
   const from = Math.max(0, size - maxBytes);
   const raw = readRange(path, from, size);
   if (raw === undefined) return undefined;
-  if (from === 0) return { text: raw, truncated: false };
+  if (from === 0) return { text: raw, truncated: false, end: size };
   // Cutting at a byte boundary can split a UTF-8 sequence; the first partial
   // line is dropped rather than repaired, since a JSON line cannot be
   // completed from its tail anyway (the bytes before it were never read).
   const firstNewline = raw.indexOf("\n");
-  return { text: firstNewline < 0 ? "" : raw.slice(firstNewline + 1), truncated: true };
+  return { text: firstNewline < 0 ? "" : raw.slice(firstNewline + 1), truncated: true, end: size };
 }
 
 /** The last `count` output entries, oldest first. */
@@ -213,6 +225,10 @@ export function readRecentEntries(path: string, count: number): OutputEntry[] {
  * A subscriber that wants the recent past and then the live tail needs both
  * halves from ONE read: replaying and then bookmarking separately leaves a
  * window in which an append is neither replayed nor tailed.
+ *
+ * `offset` is the END OF THAT READ, never a fresh `stat` — a second stat could
+ * already be past bytes the read never saw, and the tail would then start after
+ * them (2026-10-01, quality round P2).
  */
 export function readRecentEntriesWithOffset(path: string, count: number): { entries: OutputEntry[]; offset: number | undefined } {
   const tail = readFileTail(path);
@@ -221,7 +237,7 @@ export function readRecentEntriesWithOffset(path: string, count: number): { entr
   for (const line of tail.text.split("\n")) entries.push(...parseOutputLine(line));
   return {
     entries: count > 0 ? entries.slice(-count) : entries,
-    offset: transcriptSize(path),
+    offset: tail.end,
   };
 }
 
@@ -258,9 +274,24 @@ export class TranscriptTailer {
     if (size === from) return [];
     const chunk = readRange(path, from, size);
     if (chunk === undefined) return [];
-    this.offsets.set(path, size);
+    const lastNewline = chunk.lastIndexOf("\n");
+    if (lastNewline < 0) {
+      // NOT ONE COMPLETE LINE in this window: leave the bookmark where it is so
+      // these bytes are read again once the line is finished. Advancing past a
+      // half-written line would read its remainder next tick — a JSON fragment
+      // that parses as nothing — and the record would be lost for good
+      // (reviewer P1, 2026-10-01).
+      return [];
+    }
+    // THE BOOKMARK IS ADVANCED BY BYTES, not by characters: the offset is a byte
+    // position in the file while `lastNewline` indexes a decoded string, and a
+    // transcript full of Chinese makes the two differ. `Buffer.byteLength` of
+    // the complete prefix is the exact number of bytes consumed — the prefix
+    // ends at a newline, so it is whole by construction.
+    const consumed = Buffer.byteLength(chunk.slice(0, lastNewline + 1), "utf8");
+    this.offsets.set(path, from + consumed);
     const entries: OutputEntry[] = [];
-    for (const line of chunk.split("\n")) entries.push(...parseOutputLine(line));
+    for (const line of chunk.slice(0, lastNewline).split("\n")) entries.push(...parseOutputLine(line));
     return entries;
   }
 

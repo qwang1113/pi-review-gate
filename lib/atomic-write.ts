@@ -15,7 +15,7 @@
  * TARGET directory because rename is only atomic within a filesystem.
  */
 
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** Temp sibling used for one atomic write. Exported for the tests' benefit. */
@@ -27,10 +27,34 @@ export function tempPathFor(path: string, pid: number = process.pid): string {
  * Write `content` to `path` atomically, creating the parent directory. Throws
  * what fs throws: callers that treat their state as best-effort catch it, the
  * ones that must not lose data let it propagate.
+ *
+ * THE REPLACEMENT KEEPS THE TARGET'S PERMISSIONS (reviewer P1, 2026-10-01). A
+ * temp file created at the process umask is usually 0644, so replacing a 0600
+ * file with it made the result world-readable — a config holding an API key is
+ * exactly the file that must not silently lose its mode. The mode is applied at
+ * creation (umask can only CLEAR bits) and re-asserted after the rename, which
+ * is what keeps a restrictive file restrictive through the swap.
  */
 export function writeFileAtomic(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true });
+  const existing = existingMode(path);
   const tmp = tempPathFor(path);
-  writeFileSync(tmp, content);
+  writeFileSync(tmp, content, existing === undefined ? undefined : { mode: existing });
   renameSync(tmp, path);
+  if (existing !== undefined) {
+    try {
+      chmodSync(path, existing);
+    } catch {
+      /* the creation mode already carried it; a failed chmod is not a data loss */
+    }
+  }
+}
+
+/** The target's permission bits, or undefined when it does not exist yet. */
+function existingMode(path: string): number | undefined {
+  try {
+    return statSync(path).mode & 0o777;
+  } catch {
+    return undefined;
+  }
 }

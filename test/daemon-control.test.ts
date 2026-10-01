@@ -97,6 +97,42 @@ test("an empty name, a bad name and an empty body are refused before any file is
   assert.equal(sendSessionMessage({ home, runTmux: paneRunner([]) }, { to: "t1-work", text: "   " }).ok, false);
 });
 
+test("a pane id minted by another tmux server never counts as a live session", () => {
+  const home = scratchHome();
+  // A stale registration whose pane id EXISTS on the server we are talking to —
+  // but was minted by a different one (a restarted server reuses `%1`).
+  writeRegistry(home, registryEntry({
+    name: "old-one",
+    sessionId: "s1",
+    repo: "/repo",
+    cwd: "/repo",
+    pid: 999_999_999,
+    heartbeatAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    tmux: { session: "rg-old", window: "@1", pane: "%1", server: "/private/tmp/tmux-501/old,111" },
+  }));
+  const runner = fakeRunner((argv) => {
+    if (argv[0] === "display-message") return { ok: true, stdout: "/private/tmp/tmux-501/default,22388\n", stderr: "" };
+    if (argv[0] === "list-panes") return { ok: true, stdout: "%1\n", stderr: "" };
+    return { ok: false, stdout: "", stderr: `unexpected: ${argv.join(" ")}` };
+  });
+  const outcome = sendSessionMessage({ home, runTmux: runner }, { to: "old-one", text: "hi" });
+  assert.equal(outcome.ok, false, "a stranger's pane is not this session");
+  assert.match(outcome.problem ?? "", /不在活会话里/);
+
+  // …and the same entry IS live when the server matches (the pane id means what
+  // the record says it means).
+  writeRegistry(home, registryEntry({
+    name: "old-one",
+    sessionId: "s1",
+    repo: "/repo",
+    cwd: "/repo",
+    pid: 999_999_999,
+    heartbeatAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    tmux: { session: "rg-old", window: "@1", pane: "%1", server: "/private/tmp/tmux-501/default,22388" },
+  }));
+  assert.equal(sendSessionMessage({ home, runTmux: runner }, { to: "old-one", text: "hi" }).ok, true);
+});
+
 test("a body too long for one line spills to a side file the record points at", () => {
   const home = scratchHome();
   writeRegistry(home, registryEntry({ name: "t1-work", sessionId: "s-1", repo: "/repo", cwd: "/repo" }));

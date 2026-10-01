@@ -158,6 +158,19 @@ test("a question with no options takes free text (the panel's own input box)", (
   assert.equal(outcome.answer, "随便写点什么");
 });
 
+test("a question whose fields disagree with its path is ignored, never answered", () => {
+  const home = scratchHome();
+  // The file sits at session-1/q-1.json but claims another session and request.
+  writeQuestion(home, "session-1", "q-1", question({ sessionId: "session-2", requestId: "q-9" }));
+  const listed = listPendingQuestions(home);
+  assert.deepEqual(listed.questions, [], "an ask whose identity does not match its path is not listed");
+  assert.match(listed.problems[0] ?? "", /与路径不一致/);
+
+  const outcome = submitAnswer(home, { sessionId: "session-1", requestId: "q-1", answer: "甲" });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.problem ?? "", /不一致/);
+});
+
 test("answering a request that was never written is a refusal with the reason", () => {
   const home = scratchHome();
   const outcome = submitAnswer(home, { sessionId: "session-1", requestId: "q-none", answer: "甲" });

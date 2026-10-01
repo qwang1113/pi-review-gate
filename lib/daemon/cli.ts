@@ -27,8 +27,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdirSync, openSync } from "node:fs";
+import { mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createRuntime } from "./server.ts";
@@ -66,7 +67,6 @@ const defaultIo = (): CliIo => ({
   out: (line) => process.stdout.write(`${line}\n`),
   err: (line) => process.stderr.write(`${line}\n`),
   reexec: [process.execPath, fileURLToPath(import.meta.url)],
-  ...(process.env[DAEMON_HOME_ENV] === undefined ? {} : { home: process.env[DAEMON_HOME_ENV] }),
 });
 
 const USAGE = `用法：pi-gate daemon <start|stop|status|install|uninstall> [选项]
@@ -136,7 +136,7 @@ async function runForeground(args: Args, io: CliIo, home: string): Promise<numbe
     io.err(`无法监听 127.0.0.1:${args.port} —— ${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
-  writeDaemonState(buildDaemonState(port, Date.now(), args.workspaceRoots), home);
+  writeDaemonState(buildDaemonState(port, Date.now(), args.workspaceRoots, home), home);
   io.out(`pi-gate daemon 已在 http://127.0.0.1:${port} 监听（pid ${process.pid}）`);
   io.out(`token 文件：${daemonTokenPath(home)}（0600，内容不会回显）`);
   if (args.workspaceRoots.length > 0) io.out(`工作区根目录：${args.workspaceRoots.join("、")}`);
@@ -164,7 +164,61 @@ async function start(args: Args, io: CliIo, home: string): Promise<number> {
   }
   if (args.foreground) return runForeground(args, io, home);
 
-  mkdirSync(daemonHome(home), { recursive: true });  const logFd = openSync(daemonLogPath(home), "a", 0o600);
+  // ONE START AT A TIME (reviewer P1, 2026-10-01). Probing and spawning are two
+  // steps, and two `start`s running them concurrently both see "offline" and
+  // both spawn — the contract is "never a second one". The lock is the missing
+  // step, and it is a file created with O_EXCL so exactly one starter wins;
+  // a stale one (its starter died, or it is older than any start could take) is
+  // reclaimed rather than left to block every future start.
+  const lockPath = join(daemonHome(home), "start.lock");
+  mkdirSync(daemonHome(home), { recursive: true });
+  const claimed = claimStartLock(lockPath);
+  if (!claimed) {
+    io.err("另一个 `pi-gate daemon start` 正在启动中（start.lock）—— 等它结束再试，或先 `pi-gate daemon status` 看结果。");
+    return 1;
+  }
+  try {
+    return await spawnDaemon(args, io, home);
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+}
+
+/** How long a start lock may live before anybody may take it over. */
+const START_LOCK_STALE_MS = 30_000;
+
+/** Create the start lock, or take over one whose owner is gone. */
+export function claimStartLock(lockPath: string, now: number = Date.now()): boolean {
+  const body = `${process.pid} ${now}`;
+  try {
+    writeFileSync(lockPath, body, { flag: "wx", mode: 0o600 });
+    return true;
+  } catch {
+    // Somebody holds it — take it over only when that is provably stale.
+  }
+  let holder: number | undefined;
+  let heldAt: number | undefined;
+  try {
+    const [pid, at] = readFileSync(lockPath, "utf8").trim().split(" ");
+    holder = Number(pid);
+    heldAt = Number(at);
+  } catch {
+    return false;
+  }
+  const alive = holder !== undefined && Number.isInteger(holder) && pidAlive(holder);
+  const fresh = heldAt !== undefined && Number.isFinite(heldAt) && now - heldAt < START_LOCK_STALE_MS;
+  if (alive && fresh) return false;
+  try {
+    rmSync(lockPath, { force: true });
+    writeFileSync(lockPath, body, { flag: "wx", mode: 0o600 });
+    return true;
+  } catch {
+    return false; // another starter won the takeover race
+  }
+}
+
+async function spawnDaemon(args: Args, io: CliIo, home: string): Promise<number> {
+  const logFd = openSync(daemonLogPath(home), "a", 0o600);
   const reexec = io.reexec ?? [process.execPath, fileURLToPath(import.meta.url)];
   const child = spawn(
     reexec[0]!,
@@ -209,6 +263,21 @@ async function stop(io: CliIo, home: string): Promise<number> {
     clearDaemonState(state.pid, home);
     return 0;
   }
+  // CONFIRM IT IS STILL THE DAEMON BEFORE SIGNALLING (reviewer P1, 2026-10-01).
+  // A pid is reused: the number in a stale state file can belong to something
+  // else entirely by now, and killing that is the one destructive thing this
+  // command could do. The port answering with OUR token is the proof that the
+  // pid it names is the daemon; without that proof, stop refuses rather than
+  // guesses (a daemon whose health check is wedged is stopped by hand).
+  const probe = await probeDaemon({ home });
+  if (!probe.online || probe.state?.pid !== state.pid) {
+    io.err(
+      `拒绝发 SIGTERM：pid ${state.pid} 活着，但带 token 的健康检查没有确认它就是 daemon` +
+        `（${probe.reason}）—— pid 可能已被复用，杀错进程比多看一眼贵得多。` +
+        "确认它是什么之后再手动处理，或删掉 state 文件里的记录。",
+    );
+    return 1;
+  }
   try {
     process.kill(state.pid, "SIGTERM");
   } catch (error) {
@@ -246,7 +315,12 @@ function notImplemented(command: string, io: CliIo): number {
 }
 
 export async function runDaemonCli(argv: readonly string[], io: CliIo = defaultIo()): Promise<number> {
-  const home = io.home ?? homedir();
+  // THE HOME IS RESOLVED HERE, ONCE (reviewer P1, 2026-10-01): it used to be
+  // read inside `defaultIo`, so every caller that passed its own `io` — the
+  // `pi-gate` bin entry among them — silently fell back to `$HOME` and the
+  // documented `RG_DAEMON_HOME` override did nothing. An explicit `io.home`
+  // still wins (a caller that already knows), then the environment, then $HOME.
+  const home = io.home ?? process.env[DAEMON_HOME_ENV] ?? homedir();
   // `pi-gate daemon start …`: the word `daemon` is part of the address, and the
   // same entry point is re-executed for the detached child — dropping it here
   // keeps one reading of the command line instead of two.

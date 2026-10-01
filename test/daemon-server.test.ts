@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { createRuntime, type Runtime } from "../lib/daemon/server.ts";
@@ -118,6 +118,23 @@ test("every /api call needs the token, and the token is never echoed", async () 
   }
 });
 
+test("the query token is an SSE-only exception: every other endpoint wants a header", async () => {
+  const h = await harness();
+  try {
+    const viaQuery = await fetch(`http://127.0.0.1:${h.port}/api/sessions?token=${h.token}`);
+    assert.equal(viaQuery.status, 401, "a token in a URL ends up in logs and history — headers everywhere else");
+    const viaHeader = await h.call("/api/sessions?limit=1");
+    assert.equal(viaHeader.status, 200);
+    // SSE still takes it in the URL: EventSource cannot set a header.
+    const controller = new AbortController();
+    const stream = await fetch(`http://127.0.0.1:${h.port}/api/events?replay=0&token=${h.token}`, { signal: controller.signal });
+    assert.equal(stream.status, 200);
+    controller.abort();
+  } finally {
+    await h.runtime.stop();
+  }
+});
+
 test("GET /api/health reports the daemon's own facts", async () => {
   const h = await harness();
   try {
@@ -203,6 +220,24 @@ test("GET /api/repos and POST /api/tasks answer their documented shapes", async 
     });
     assert.equal(refused.status, 400);
     assert.match(((await refused.json()) as { error: string }).error, /不是存在的目录/);
+  } finally {
+    await h.runtime.stop();
+  }
+});
+
+test("the inbox sender is the daemon, never a name the request supplied", async () => {
+  const h = await harness();
+  try {
+    const sent = await h.json<{ ok: boolean; inbox: string }>("/api/sessions/t1-work/messages", {
+      method: "POST",
+      body: JSON.stringify({ text: "伪装测试", from: "t1-work" }),
+    });
+    assert.equal(sent.ok, true);
+    const line = readFileSync(sent.inbox, "utf8").trim().split("\n").pop()!;
+    const record = JSON.parse(line) as { from: string; fromSessionId: string; fromMode: string };
+    assert.equal(record.from, "daemon", "a token holder must not be able to sign as another session");
+    assert.equal(record.fromSessionId, "daemon");
+    assert.equal(record.fromMode, "daemon");
   } finally {
     await h.runtime.stop();
   }
@@ -455,6 +490,25 @@ test("static: the panel is served, an unknown route falls back to index.html", a
     assert.equal(safeJoin("/srv/web", "/ok/../secret"), "/srv/web/secret", "a path that resolves inside the root is served from inside it");
     const notThere = await h.call("/%2e%2e/%2e%2e/etc/passwd");
     assert.match(await notThere.text(), /id=app/, "a traversal attempt is just an unknown route");
+  } finally {
+    await h.runtime.stop();
+  }
+});
+
+test("static: a symlink out of the build directory is not served", async () => {
+  const home = scratchHome();
+  const webDir = join(home, "web");
+  const outside = join(home, "secret.txt");
+  mkdirSync(webDir, { recursive: true });
+  writeFileSync(outside, "TOP SECRET", "utf8");
+  writeFileSync(join(webDir, "index.html"), "<!doctype html><div id=app></div>", "utf8");
+  symlinkSync(outside, join(webDir, "leak.txt"));
+  const h = await harness({ webDir, withPanel: false });
+  try {
+    const leaked = await h.call("/leak.txt");
+    const body = await leaked.text();
+    assert.ok(!body.includes("TOP SECRET"), "a symlink must not widen the static root");
+    assert.match(body, /id=app/, "it falls back to the panel like any other unknown path");
   } finally {
     await h.runtime.stop();
   }
