@@ -67,9 +67,18 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { nextRunAfter } from "../cron-schedule.ts";
 import { normalizeRepoPath, STATION_CAP_ENV } from "../repo-pr-policy.ts";
+import {
+  checkSessionExclusivity,
+  parsePresence,
+  PRESENCE_FILENAME,
+  type PresenceRecord,
+} from "../session-exclusivity.ts";
+import { GATE_MODE_ENV } from "../task-mode.ts";
 import {
   appendScheduleRun,
   readScheduleRuns,
@@ -461,6 +470,18 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           skipped(task, at, `repo ${task.repo} 上还有未结算的运行 ${holder.runId}（任务 ${holder.taskId}，${holder.at} 起）—— 两个写者不能同时进同一个 checkout`, slot);
           continue;
         }
+        // ANOTHER SESSION'S CHECKOUT IS NO MORE SHARABLE THAN ANOTHER RUN'S.
+        // The gate will REFUSE to arm the session this tick would start, and a
+        // session that cannot arm cannot adopt its contract: it would sit on
+        // L8 with every edit blocked. Skip it (recorded, with the occupant's
+        // name) instead of starting a run that cannot work — the user's own
+        // window counts here even after `declare_done`: the holder is whoever
+        // still has the process.
+        const sessionHolder = liveSessionHolder(task.repo, at);
+        if (sessionHolder !== undefined) {
+          skipped(task, at, `repo ${task.repo} 上还有别的活会话 ${sessionHolder.sessionId}（最后心跳 ${sessionHolder.at}）占着这块 worktree —— 门禁不会为运行会话启动，契约继承不了（关掉那个会话，或等它的心跳过期）`, slot);
+          continue;
+        }
         // A RUN STARTED IN THIS TICK IS OPEN TOO: without adding it, two tasks in
         // one repo that are both due would both start here — the second seeing a
         // `stillOpen` computed before the first one existed.
@@ -515,6 +536,43 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
  */
 function slotKey(taskId: string, scheduledAt: Date | null): string {
   return `${taskId}@${scheduledAt === null ? "" : scheduledAt.getTime()}`;
+}
+
+/**
+ * THE LIVE SESSION HOLDING THIS CHECKOUT, if there is one.
+ *
+ * A scheduled run is an ORDINARY loop session: it arms the gate in the
+ * checkout, and the gate refuses to arm a second session in a worktree someone
+ * else holds (lib/session-exclusivity.ts, `.pi/session-presence.json`, a 10s
+ * heartbeat with a 60s window). A run that cannot arm cannot adopt its contract
+ * either — `adoptScheduledRunContract` fails closed when it cannot persist — so
+ * it would sit there with L8 blocking every edit while the ledger called it
+ * "running", and the user would see none of it. THAT IS WHY THE SCHEDULER ASKS
+ * BEFORE IT FIRES (quality round P1, 2026-10-02): the same question the session
+ * itself will ask, through the SAME function, so the two cannot drift.
+ *
+ * It is asked with the RUN's identity, not the daemon's: an ordinary loop
+ * session claims the main sidecar, so the only thing that can refuse it is a
+ * fresh heartbeat by somebody else — and the fail-open direction is the
+ * function's own (a missing, unreadable or nonsensical record is nobody).
+ */
+export function liveSessionHolder(repo: string, now: Date): PresenceRecord | undefined {
+  let raw: string | undefined;
+  try {
+    raw = readFileSync(join(repo, ".pi", PRESENCE_FILENAME), "utf8");
+  } catch {
+    return undefined; // no record = nobody claims this checkout
+  }
+  const verdict = checkSessionExclusivity({
+    env: { [GATE_MODE_ENV]: "loop" },
+    // The run's session id does not exist yet, so it is neither the holder nor
+    // the holder's heir — exactly the question "is somebody else in here".
+    sessionId: undefined,
+    existing: parsePresence(raw),
+    repoRoot: repo,
+    now: now.getTime(),
+  });
+  return verdict.ok ? undefined : verdict.holder;
 }
 
 /** The opening message a scheduled run starts with. */

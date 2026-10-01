@@ -280,8 +280,20 @@ function versionProblem(expected: unknown, actual: number): string | undefined {
 
 /** Fields only the authoring flow may write. */
 const AUTHORED_FIELDS: readonly string[] = Object.freeze(["requirement", "repo", "contract"]);
-/** Everything an edit may name at all. */
-const EDITABLE_FIELDS: readonly string[] = Object.freeze(["name", "cron", "enabled", "lastFiredAt", ...AUTHORED_FIELDS]);
+/**
+ * What a PANEL edit may touch — the three fields a text form can change
+ * without changing what the task IS.
+ *
+ * EXPORTED because it is a rule, not a copy: the daemon's `PUT` handler used to
+ * carry its own second list (`PANEL_SCHEDULE_FIELDS`), and the two had already
+ * drifted — the store accepted `lastFiredAt` (the scheduler's slot stamp, never
+ * an authored field) while the endpoint refused it, so which fields a panel
+ * could REALLY write depended on which door the call came through (quality
+ * round P1, 2026-10-02). One list, asked by both sides.
+ */
+export const PANEL_EDITABLE_FIELDS: readonly string[] = Object.freeze(["name", "cron", "enabled"]);
+/** Everything an edit may name at all (the gate keeps the union: it stamps `lastFiredAt`). */
+const EDITABLE_FIELDS: readonly string[] = Object.freeze([...PANEL_EDITABLE_FIELDS, "lastFiredAt", ...AUTHORED_FIELDS]);
 
 /** The refusal a panel edit gets when it reaches for an authored field. */
 export function scheduleAuthoringRefusal(problem: string): string {
@@ -307,18 +319,30 @@ export function applyScheduleEdit(request: { from: ScheduleEditOrigin; patch: Sc
   if (from !== "panel" && from !== "gate") {
     return { ok: false, problem: `未知的编辑来源 ${JSON.stringify(from)}：只接受 "panel" 或 "gate"` };
   }
+  if (from === "panel") {
+    const touched = AUTHORED_FIELDS.filter((field) => Object.hasOwn(patch, field));
+    if (touched.length > 0) {
+      return { ok: false, problem: scheduleAuthoringRefusal(`panel 来源的 patch 碰到了 ${touched.join("、")}`) };
+    }
+    // THE PANEL'S OWN LIST, before the union check below: a panel caller that
+    // names `lastFiredAt` must be told which three fields it MAY write, not
+    // shown the gate's wider vocabulary (that message is what let the two
+    // lists drift apart in the first place).
+    const notPanel = Object.keys(patch).filter((key) => !PANEL_EDITABLE_FIELDS.includes(key));
+    if (notPanel.length > 0) {
+      return {
+        ok: false,
+        problem: `面板只能改 ${PANEL_EDITABLE_FIELDS.join(" / ")}（收到 ${notPanel.join("、")}）——` +
+          " 需求、repo 与契约请走 POST /api/schedules/author",
+      };
+    }
+  }
   const unknown = Object.keys(patch).filter((key) => !EDITABLE_FIELDS.includes(key));
   if (unknown.length > 0) {
     return {
       ok: false,
       problem: `不认识的字段 ${unknown.join("、")} —— 能改的只有 ${EDITABLE_FIELDS.join(" / ")}`,
     };
-  }
-  if (from === "panel") {
-    const touched = AUTHORED_FIELDS.filter((field) => Object.hasOwn(patch, field));
-    if (touched.length > 0) {
-      return { ok: false, problem: scheduleAuthoringRefusal(`panel 来源的 patch 碰到了 ${touched.join("、")}`) };
-    }
   }
   return { ok: true, patch };
 }

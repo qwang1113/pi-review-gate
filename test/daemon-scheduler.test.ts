@@ -12,6 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   createScheduler,
@@ -266,6 +267,47 @@ test("a tick fires a due task once, and a restart does not fire it again", () =>
   assert.match(opening, /\.pi\/loop-goal\.md/);
   assert.match(opening, /judge_submit/);
   assert.match(opening, /declare_done/);
+});
+
+test("a run is not fired into a checkout another LIVE SESSION holds (quality round P1)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  const task = dueTask(home, repo, { name: "held-repo-task" });
+  const presence = join(repo, ".pi", "session-presence.json");
+  const writePresence = (at: string): void => {
+    mkdirSync(join(repo, ".pi"), { recursive: true });
+    writeFileSync(presence, JSON.stringify({ sessionId: "other-session", pid: 4242, host: "host", at }), { mode: 0o600 });
+  };
+  const scheduler = createScheduler({ home, runTmux: fakeTmux(), observer: fakeObserver([]) });
+
+  // A FRESH heartbeat = somebody is working in that checkout right now. The
+  // gate would refuse to arm the run's session, and a run that cannot arm
+  // cannot adopt its contract — so nothing is started.
+  writePresence(new Date().toISOString());
+  scheduler.tick();
+  let records = readScheduleRuns(home);
+  assert.equal(records.filter((record) => record.kind === "run-started").length, 0, "被占用的 checkout 里不出发起会话");
+  const skips = records.filter((record) => record.kind === "run-skipped");
+  assert.equal(skips.length, 1, "占用写成一条 run-skipped，而不是一辆开不动的车");
+  assert.match(skips[0]!.reason, /other-session/, "reason 点名占用者");
+
+  // The skip stamps the slot like any other decision: the next tick is quiet.
+  scheduler.tick();
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-skipped").length, 1);
+
+  // A LAPSED heartbeat is nobody (the exclusivity rule's own fail-open
+  // direction): with the slot put back in the past, the run goes out.
+  writePresence(new Date(Date.now() - 5 * 60_000).toISOString());
+  const rewound = updateScheduledTask(
+    home,
+    task.id,
+    { lastFiredAt: new Date(Date.now() - AN_OFFLINE_DAY_MS).toISOString() },
+    { from: "gate" },
+  );
+  assert.equal(rewound.ok, true);
+  scheduler.tick();
+  records = readScheduleRuns(home);
+  assert.equal(records.filter((record) => record.kind === "run-started").length, 1, "过期心跳不挡车");
 });
 
 test("a repo with an unsettled run blocks the next one, and the skip names the holder", () => {

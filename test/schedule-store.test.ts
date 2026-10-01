@@ -289,6 +289,15 @@ test("a panel edit may touch name / cron / enabled — and nothing else", () => 
     assert.match(result.problem, /authoring 会话/);
     assert.match(result.problem, /需求\/repo\/契约/);
   }
+  // `lastFiredAt` IS NOT A PANEL FIELD (quality round P1, 2026-10-02): it is the
+  // scheduler's slot stamp, and the store's panel branch used to accept it while
+  // the daemon's PUT handler refused it — so which fields a panel could really
+  // write depended on which door the call came through. One list now, and the
+  // gate keeps its own way to stamp a dealt-with slot.
+  const panelStamp = updateScheduledTask(home, id, { lastFiredAt: new Date().toISOString() }, { from: "panel" });
+  assert.equal(panelStamp.ok, false, "panel 不能盖调度器的槽位戳记");
+  if (!panelStamp.ok) assert.match(panelStamp.problem, /面板只能改 name \/ cron \/ enabled/);
+
   // The refusals never wrote: version and content are where they were.
   assert.equal(readSchedules(home).ok && (readSchedules(home) as { ok: true; file: { version: number } }).file.version, 1);
   assert.equal(findScheduledTask(home, id)?.repo, repo);
@@ -305,6 +314,11 @@ test("a panel edit may touch name / cron / enabled — and nothing else", () => 
   assert.equal(allowed.value.cron, "*/30 * * * *");
   assert.equal(allowed.value.enabled, false);
   assert.equal(allowed.value.id, id, "the id is store-managed and never rewritten");
+
+  // …and the SAME field the panel was just refused is what the gate stamps with.
+  const gateStamp = updateScheduledTask(home, id, { lastFiredAt: "2026-10-01T00:00:00.000Z" }, { from: "gate" });
+  assert.equal(gateStamp.ok, true, "the gate may stamp the slot it dealt with");
+  assert.equal(gateStamp.ok && gateStamp.value.lastFiredAt, "2026-10-01T00:00:00.000Z");
 });
 
 test("a gate edit may carry the contract", () => {

@@ -40,7 +40,6 @@ import { listPendingQuestions, submitAnswer } from "./questions.ts";
 import { readConfig, writeConfig, type ConfigTargetName } from "./config.ts";
 import { createDaemonTmuxRunner, launchTask, listCandidateRepos, sendSessionMessage } from "./control.ts";
 import {
-  applyScheduleEdit,
   findScheduledTask,
   readScheduleRuns,
   readSchedules,
@@ -64,9 +63,6 @@ export const MAX_BODY_BYTES = 512 * 1024;
 /** `GET /api/schedules/:id/runs` — the ledger window a caller gets when it names no `limit`. */
 export const DEFAULT_RUNS_LIMIT = 50;
 export const MAX_RUNS_LIMIT = 500;
-
-/** A patch a panel may send to `PUT /api/schedules/:id`. */
-const PANEL_SCHEDULE_FIELDS: readonly string[] = Object.freeze(["cron", "enabled", "name"]);
 
 /** How many output entries a fresh subscription replays unless it asks otherwise. */
 export const DEFAULT_REPLAY = 30;
@@ -374,25 +370,17 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
       handler: (ctx): Reply => {
         const found = taskById(opts.home, ctx.params.id!);
         if ("reply" in found) return found.reply;
-        const body = asObject(ctx.body);
-        const patch: ScheduleEditPatch = {};
-        if (Object.hasOwn(body, "cron")) patch.cron = body.cron as string;
-        if (Object.hasOwn(body, "enabled")) patch.enabled = body.enabled as boolean;
-        if (Object.hasOwn(body, "name")) patch.name = body.name as string;
-        const extra = Object.keys(body).filter((key) => !PANEL_SCHEDULE_FIELDS.includes(key));
-        if (extra.length > 0) {
-          // THE AUTHORING RULE IS NOT RESTATED HERE: the whole body goes to the
-          // one implementation, which names the authoring path for a contract
-          // field and lists the fields a panel may touch for anything else.
-          const verdict = applyScheduleEdit({ from: "panel", patch: body as ScheduleEditPatch });
-          return bad(400, verdict.ok
-            ? `面板只能改 ${PANEL_SCHEDULE_FIELDS.join(" / ")}（收到 ${extra.join("、")}）—— 需求、repo 与契约请走 POST /api/schedules/author`
-            : verdict.problem);
-        }
+        // THE AUTHORING RULE IS NOT RESTATED HERE (quality round P1, 2026-10-02):
+        // the whole body goes to the store, which owns the panel's field list
+        // (`PANEL_EDITABLE_FIELDS`) as well as the authored-field refusal. This
+        // endpoint used to keep a SECOND list, and the two had already drifted:
+        // the store accepted `lastFiredAt` while this handler refused it, so
+        // which fields a panel could really write depended on the door.
+        //
         // THE VERSION WE JUST READ GOES INTO THE WRITE: the scheduler stamps
         // `lastFiredAt` on the same document, and a panel edit that lost that
         // race must be refused ("请重读") rather than overwrite a newer slot.
-        const outcome = updateScheduledTask(opts.home, found.task.id, patch, {
+        const outcome = updateScheduledTask(opts.home, found.task.id, asObject(ctx.body) as ScheduleEditPatch, {
           from: "panel",
           expectedVersion: found.version,
         });

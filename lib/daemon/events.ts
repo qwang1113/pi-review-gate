@@ -16,21 +16,29 @@
  *      throttling (`decideNotify` / `notifyKey` / `NOTIFY_DEDUP_MS` /
  *      `NOTIFY_RATE_WINDOW_MS`, lib/user-notify.ts) is called — this module only
  *      supplies the history that rule reads (this key's claim file plus the
- *      recent sends) and records the outcome per key, so the terminal notifier
- *      and the menu-bar app still make the same decision from the same key.
+ *      recent sends) and records the outcome per key.
  *
- * ── WHY THE TITLE AND THE KEY ARE BUILT HERE, WITH THE GATE'S OWN HELPERS ──
+ * ── THE LEDGER HAS ONE SENDER, AND THAT IS THE DESIGN ──
  *
- * The whole point of the ledger is that two senders agree on what "the same
- * fact" is. `buildUserNotifyMessage` + `notifyKey` are exactly what the
- * terminal side already uses, so a banner the menu-bar app sends is recognised
- * by the terminal side — and vice versa — instead of each side inventing its
- * own identity for one notification.
+ * Only the menu-bar app claims from it (`POST /api/notifications/claim`); the
+ * terminal side keeps its own history in the session sidecar and never reads
+ * this store, and the two sides' keys are not equal anyway — their `detail`
+ * differs (`@名字 正在等你回答。` vs 「对话框标题 · 正文」). What keeps both
+ * senders from raising one banner is NOT this ledger but the presence election
+ * (docs/daemon/api.md §8.1): the terminal suppresses itself entirely while the
+ * app is there and able to post. This store's job is the app's OWN repeats.
+ *
+ * `buildUserNotifyMessage` + `notifyKey` are used here because they are the
+ * gate's own spelling of "what this fact is called" — the app's banners say what
+ * the terminal would have said, and the event stream and the ledger agree about
+ * which fact is which.
  */
 
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, chmodSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+
+import { writeFileAtomic } from "../atomic-write.ts";
 
 import {
   buildUserNotifyMessage,
@@ -167,7 +175,26 @@ export interface NotificationStore {
  * per-key decision is `link(2)` on that key's own file (atomic and exclusive by
  * construction, no lock at all), and the history is an APPEND, which cannot lose
  * another writer's line.
+ *
+ * THE ONE PLACE THAT DOES REWRITE THE HISTORY IS `prune`, and it says so: it
+ * keeps only the rate window's lines, through a temp file + rename, so a reader
+ * never observes half a history — but an APPEND that lands inside that window is
+ * still lost with the line it was written on. The cost is bounded and was
+ * accepted when the append-only shape was chosen: one missing count can lift
+ * the rate limit by exactly one banner.
+ *
+ * The store's own DIRECTORIES are 0700 (docs/daemon/api.md §8.3), and the mode
+ * is re-asserted rather than only passed to `mkdir`: a directory that existed
+ * before this rule (or was made by hand) would otherwise keep its looser bits —
+ * the same reason `history.jsonl` is chmod-ed after every append.
  */
+function privateDir(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(path, 0o700);
+  } catch { /* the creation mode already carried it; a failed chmod is not a lost claim */ }
+}
+
 export function createNotificationStore(dir: string, deps: { now?: () => number } = {}): NotificationStore {
   const now = deps.now ?? ((): number => Date.now());
   const claimsDir = join(dir, "claims");
@@ -256,7 +283,7 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
       let won = false;
       let lostToWriter = false;
       try {
-        mkdirSync(claimsDir, { recursive: true, mode: 0o700 });
+        privateDir(claimsDir);
         const tmp = `${claimPathFor(input.key)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
         writeFileSync(tmp, `${JSON.stringify(entry)}\n`, { flag: "wx", mode: 0o600 });
         try {
@@ -300,7 +327,7 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
         };
       }
       try {
-        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        privateDir(dir);
         // 0600 at CREATION, and `prune` re-asserts it: each line here is a
         // notification key, which is the rendered title+body (session names,
         // task names) — not something for every user on the machine (reviewer
@@ -364,7 +391,10 @@ export function createNotificationStore(dir: string, deps: { now?: () => number 
             return false;
           }
         });
-      writeFileSync(historyPath, kept.length === 0 ? "" : `${kept.join("\n")}\n`, { mode: 0o600 });
+      // TEMP FILE + RENAME, not a truncating rewrite: a reader (another claim)
+      // must never see half a history, even though losing an append that lands
+      // inside this window is accepted (see the module header).
+      writeFileAtomic(historyPath, kept.length === 0 ? "" : `${kept.join("\n")}\n`, { mode: 0o600 });
     } catch { /* pruning is housekeeping, never a reason to fail a claim */ }
   }
 }

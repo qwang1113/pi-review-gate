@@ -732,13 +732,17 @@ pi-gate daemon uninstall
   记在内存里（`unrecordedSlots` / `unrecordedRuns`，按龄回收）：已经起出去的会话收不回来，
   「同一个时间点不重复起」因此在坏盘上也成立。错过的时间点**不补跑**：离线一周的任务上线后只跑一次，
   然后按下一个时间点走。
-- **一个 repo 同时只有一个运行**：该 repo 上还有未结算运行时本次不启动，写一条 `run-skipped`，
-  `reason` 点名占着它的 `runId`（两个写者进同一个 checkout 会互相覆盖）。
+- **一个 repo 同时只有一个写者**：两类占用都会让本次**不启动**，各写一条 `run-skipped`、`reason` 点名占着它的那一方：
+  ① 该 repo 上还有**未结算的运行**（点名它的 `runId`）；② 该 repo 上还有**别的活会话**（点名 `sessionId` 与最后心跳）——
+  判据是 `<repo>/.pi/session-presence.json` 里那条 **60 s 内**的心跳，与门禁自己拒第二个会话时用的**同一个函数**
+  （`lib/session-exclusivity.ts`；哪怕那个会话已经 `declare_done`，只要进程还在就算）。② 是必需的：门禁不会为运行会话启动，
+  契约继承不了，发出去的会是一辆开不动的车（quality round P1，2026-10-02）。
 - **运行就是普通 loop 会话**：`RG_GATE_MODE=loop`、`RG_STATION_CAP=<契约里的 station>`、
   `RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`（本次运行的标识）；门禁在 `session_start` 按这两个变量
   把契约**从 `schedules.json` 读回来**（两个 hash 与文本相符 + 任务 repo 就是本会话 repo +
   台账里有本 runId 且 `sessionId` 就是本会话的 `run-started` 记录，四道闸全过才生效），再**写出**
   `.pi/loop-goal.md` 与 sidecar 的 `restatement` / `loopGoal`（`lib/schedule-run-contract.ts`）；
-  任一道闸不过就什么都不写、只记一条日志，运行会话只好自己重新谈 goal（fail-closed）。
+  任一道闸不过就什么都不写、只记一条日志（fail-closed）；那种情况下它没有契约可用（hash 不符、repo 不符、台账里没有本 runId 都会走到这里），
+  它要么自己重新谈一份 goal，要么停在那里等人 —— ②那种「repo 被人占着」在发车前就被挡下了，不会走到这一步。
 - **结算**：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒ 写 `run-settled`。
   刚起的会话在观测里要过一会儿才出现，这段宽限期内「没看见」不算消失。

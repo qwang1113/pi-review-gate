@@ -8,7 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { createNotificationStore, createSessionWatcher, createSseHub, notificationKindFor, type DaemonEvent } from "../lib/daemon/events.ts";
@@ -73,23 +73,35 @@ test("the ledger lets exactly one caller claim a fact", () => {
   at += 11 * 60_000;
   assert.equal(store.claim({ key: "k1", kind: "waiting-input", sessionId: "s1", title: "等你回答", body: "有人问你" }).claimed, true);
   assert.equal(store.list().find((entry) => entry.key === "k1")?.count, 2);
+
+  // THE CONTRACT'S PERMISSIONS (docs/daemon/api.md §8.3): the store's own
+  // directories are 0700 — and RE-ASSERTED, so a ledger that has been around
+  // since before the rule (or that the user loosened) is tightened on the next
+  // claim rather than keeping its looser bits forever.
+  const dir = join(home, "notifications");
+  assert.equal(statSync(dir).mode & 0o777, 0o700, "the store dir is 0700");
+  assert.equal(statSync(join(dir, "claims")).mode & 0o777, 0o700, "the claims dir is 0700");
+  if (process.getuid?.() !== 0) {
+    chmodSync(dir, 0o755);
+    store.claim({ key: "k4", kind: "done", sessionId: "s1", title: "任务完成", body: "好了" });
+    assert.equal(statSync(dir).mode & 0o777, 0o700, "a loosened dir is tightened again on the next claim");
+  }
 });
 
 test("a ledger that cannot be written is fail-open: the caller still sends it", () => {
   const home = scratchHome();
   const dir = join(home, "notifications");
-  mkdirSync(join(dir, "claims"), { recursive: true });
+  mkdirSync(dir, { recursive: true });
+  // THE LEDGER IS UNWRITABLE BECAUSE `claims` IS NOT A DIRECTORY: the store
+  // re-asserts 0700 on its own directories on the way in (docs/daemon/api.md
+  // §8.3), so “chmod it read-only” would be repaired by the very call under
+  // test — a file in the directory's place cannot be.
+  writeFileSync(join(dir, "claims"), "not a directory\n");
   const store = createNotificationStore(dir);
-  if (process.getuid?.() === 0) return; // root ignores the mode; nothing to test
-  chmodSync(join(dir, "claims"), 0o500);
-  try {
-    const outcome = store.claim({ key: "k", kind: "done", sessionId: "s", title: "t", body: "b" });
-    assert.equal(outcome.claimed, true, "a storage failure must never answer 'duplicate'");
-    assert.equal(outcome.status, "claimed");
-    assert.match(outcome.reason ?? "", /fail-open/);
-  } finally {
-    chmodSync(join(dir, "claims"), 0o700);
-  }
+  const outcome = store.claim({ key: "k", kind: "done", sessionId: "s", title: "t", body: "b" });
+  assert.equal(outcome.claimed, true, "a storage failure must never answer 'duplicate'");
+  assert.equal(outcome.status, "claimed");
+  assert.match(outcome.reason ?? "", /fail-open/);
 });
 
 test("claims for DIFFERENT keys never collide (one file per key, no shared document)", () => {
