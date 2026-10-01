@@ -12,10 +12,19 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { dirname, join } from "node:path";
 
 import { createNotificationStore, createSessionWatcher, createSseHub, notificationKindFor, type DaemonEvent } from "../lib/daemon/events.ts";
-import { createSessionObserver, type DaemonSession } from "../lib/daemon/sessions.ts";
+import { createSessionObserver, type DaemonSession, type SessionObserver } from "../lib/daemon/sessions.ts";
 import { buildUserNotifyMessage, notifyKey } from "../lib/user-notify.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
-import { paneLine, paneRunner, registryEntry, scratchHome, writeRegistry, writeTranscript } from "./daemon-helpers.ts";
+import {
+  agentHome,
+  assistantRecord,
+  paneLine,
+  paneRunner,
+  registryEntry,
+  scratchHome,
+  writeRegistry,
+  writeTranscript,
+} from "./daemon-helpers.ts";
 
 test("the hub routes to the right subscribers and survives a throwing writer", () => {
   const hub = createSseHub();
@@ -349,5 +358,102 @@ test("the watcher does not read a transcript nobody is watching", async () => {
   const watcher = createSessionWatcher({ observer, hub, intervalMs: 60_000 });
   watcher.tick();
   assert.equal(events.filter((event) => event.event === "output").length, 0);
+  watcher.stop();
+});
+
+/**
+ * A watcher over ONE synthetic session whose transcript appears only when the
+ * returned `state.exists` is flipped — the panel's own moment, right after
+ * `POST /api/tasks`.
+ */
+function watcherOverAPendingTranscript(options: { home: string; sessionId: string; now?: () => number }) {
+  const state = { exists: false };
+  const transcript = join(
+    agentHome(options.home),
+    "sessions",
+    "--repo--",
+    `2026-01-01T00-00-00-000Z_${options.sessionId}.jsonl`,
+  );
+  const session: DaemonSession = {
+    sessionId: options.sessionId,
+    name: null,
+    kind: "loop",
+    repo: "/repo",
+    cwd: "/repo",
+    branch: null,
+    mode: "loop",
+    state: "working",
+    stateAt: null,
+    stateSource: "registry",
+    alive: true,
+    tmux: null,
+    pid: 4242,
+    transcript: null,
+    lastActivityAt: null,
+    rounds: { sent: 0, recorded: 0, lastVerdict: null },
+    gateStateFound: false,
+    unmet: [],
+    registeredAt: null,
+    heartbeatAt: null,
+  };
+  const observer = {
+    collect: () => ({ now: new Date().toISOString(), tmuxReadable: true, problems: [], sessions: [session] }),
+    transcriptFor: (id: string) => (id === options.sessionId && state.exists ? transcript : undefined),
+    outputFor: () => [],
+  } as unknown as SessionObserver;
+  const hub = createSseHub();
+  const events: DaemonEvent[] = [];
+  hub.add((event) => events.push(event), options.sessionId);
+  const watcher = createSessionWatcher({
+    observer,
+    hub,
+    intervalMs: 60_000,
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
+  return { state, events, watcher };
+}
+
+test("a subscription made before the transcript exists still receives its first output", () => {
+  const home = scratchHome();
+  const sessionId = "abc123";
+  const { state, events, watcher } = watcherOverAPendingTranscript({ home, sessionId });
+
+  // THE PANEL'S OWN MOMENT: a session started seconds ago has written nothing
+  // yet (`POST /api/tasks` then straight into the detail page).
+  watcher.prime(sessionId);
+  watcher.tick();
+  assert.equal(events.filter((event) => event.event === "output").length, 0, "no file yet, so nothing to send — yet");
+
+  // Everything the file will hold was written AFTER the subscription.
+  writeTranscript(home, { sessionId, cwd: "/repo", records: [assistantRecord("第一句话")] });
+  state.exists = true;
+
+  watcher.tick();
+  const output = events.find((event) => event.event === "output");
+  assert.ok(output, "the first output written after the subscription must reach it, not be bookmarked away");
+  const entries = (output.data as { entries: { text: string }[] }).entries;
+  assert.equal(entries[0]?.text, "第一句话");
+  watcher.stop();
+});
+
+test("a bookmark for a transcript that never appears expires instead of accumulating", () => {
+  const home = scratchHome();
+  const sessionId = "never-writes";
+  let clock = 1_700_000_000_000;
+  const { state, events, watcher } = watcherOverAPendingTranscript({ home, sessionId, now: () => clock });
+
+  // A stale deep link (or a session that disappeared before the subscription)
+  // parks a bookmark nobody will ever use. The panel keeps one global
+  // subscription alive, so "the subscriber is gone" cannot be observed — time
+  // is the bound, and the trade-off is deliberate: past the TTL the transcript
+  // is treated as history rather than as output written after the subscription.
+  watcher.prime(sessionId);
+  clock += 61_000;
+  watcher.tick();
+
+  writeTranscript(home, { sessionId, cwd: "/repo", records: [assistantRecord("迟到的话")] });
+  state.exists = true;
+  watcher.tick();
+  assert.equal(events.filter((event) => event.event === "output").length, 0, "an expired bookmark does not replay history");
   watcher.stop();
 });

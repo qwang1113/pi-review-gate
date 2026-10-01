@@ -43,7 +43,7 @@
 import { linkSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 
-import { resolveAnswer } from "../orchestrator-answer-rules.ts";
+import { resolveAnswer, resolveAnswerList } from "../orchestrator-answer-rules.ts";
 import {
   questionAnswerPath,
   questionPath,
@@ -291,7 +291,16 @@ export interface AnswerOutcome {
  */
 export function submitAnswer(
   home: string,
-  input: { sessionId: string; requestId: string; answer: string; by?: "daemon" | "user"; reason?: string },
+  input: {
+    sessionId: string;
+    requestId: string;
+    /** Free-form text a human (or the panel's decline row) typed. */
+    answer?: string;
+    /** Already-split rows: the caller picked these options, so do not re-parse them as text. */
+    answers?: readonly string[];
+    by?: "daemon" | "user";
+    reason?: string;
+  },
 ): AnswerOutcome {
   const idProblem = sessionIdProblem(input.sessionId);
   if (idProblem !== undefined) return { ok: false, problem: idProblem };
@@ -302,10 +311,11 @@ export function submitAnswer(
     return { ok: false, problem: "问题的 sessionId/requestId 与它的路径不一致 —— 不向一个对不上的位置写答案" };
   }
   if (!isPending(home, parsed.value)) return { ok: false, problem: "这个问题已经答过了（答案文件已存在）" };
-  const resolved = resolveAnswer(
-    { options: parsed.value.options, ...(parsed.value.multiple ? { multiple: true } : {}) },
-    input.answer,
-  );
+  const request = { options: parsed.value.options, ...(parsed.value.multiple ? { multiple: true } : {}) };
+  // TWO SHAPES, TWO READINGS (quality round P1, 2026-10-01): a list of rows is
+  // matched row by row, a text answer keeps the human reading it always had.
+  const resolved =
+    input.answers === undefined ? resolveAnswer(request, input.answer ?? "") : resolveAnswerList(request, input.answers);
   if (!resolved.ok) return { ok: false, problem: resolved.reason };
   const answer: DaemonAnswer = {
     schema: QUESTION_SCHEMA,

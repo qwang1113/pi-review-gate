@@ -355,20 +355,30 @@ export function listCandidateRepos(opts: {
   workspaceRoots: readonly string[];
 }): RepoCandidate[] {
   const byPath = new Map<string, RepoCandidate>();
+  // "Running now" beats "seen recently" beats "sits under a workspace root":
+  // the panel groups by this word, so one path must carry its STRONGEST reason.
+  const RANK: Record<RepoCandidate["source"], number> = { session: 2, history: 1, root: 0 };
   const add = (path: string, source: RepoCandidate["source"], lastSeenAt?: string): void => {
     const clean = path.trim();
     if (clean === "" || !existsSync(clean)) return;
     const existing = byPath.get(clean);
     if (existing !== undefined) {
-      if (existing.source !== "session" && source === "session") byPath.set(clean, { ...existing, source, ...(lastSeenAt === undefined ? {} : { lastSeenAt }) });
+      if (RANK[source] > RANK[existing.source]) byPath.set(clean, { ...existing, source, ...(lastSeenAt === undefined ? {} : { lastSeenAt }) });
       return;
     }
     byPath.set(clean, { path: clean, name: basename(clean), source, ...(lastSeenAt === undefined ? {} : { lastSeenAt }) });
   };
 
   for (const session of opts.observer.collect({ includeRecentMs: 7 * 24 * 60 * 60 * 1_000 }).sessions) {
-    if (session.repo !== "" && isRepoRoot(session.repo)) add(session.repo, "session", session.lastActivityAt ?? undefined);
-    else if (session.cwd !== "" && isRepoRoot(session.cwd)) add(session.cwd, "session", session.lastActivityAt ?? undefined);
+    const where = session.repo !== "" && isRepoRoot(session.repo)
+      ? session.repo
+      : session.cwd !== "" && isRepoRoot(session.cwd) ? session.cwd : "";
+    if (where === "") continue;
+    // A session whose pane is gone is HISTORY, not a running one — the contract
+    // (§5.6) declares both words and the panel renders one group per word, so a
+    // finished session listed as 「正在运行」 is the lie that distinction exists
+    // to prevent.
+    add(where, session.alive ? "session" : "history", session.lastActivityAt ?? undefined);
   }
   for (const root of opts.workspaceRoots) {
     let entries: string[] = [];

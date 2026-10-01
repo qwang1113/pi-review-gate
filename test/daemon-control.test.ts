@@ -244,6 +244,13 @@ test("candidate repos come from running sessions and from the workspace roots", 
   assert.ok(paths.includes(join(workspace, "gamma")), "a git repo one level under a workspace root is offered");
   assert.ok(!paths.includes(join(workspace, "not-a-repo")));
   assert.equal(new Set(paths).size, paths.length, "no duplicates");
+  // The three source words are a CONTRACT (docs/daemon/api.md §5.6) and the
+  // panel renders one group per word — a finished session offered as a running
+  // one is what this distinction exists to prevent.
+  const sources = new Map(repos.map((repo) => [repo.path, repo.source]));
+  assert.equal(sources.get(repoA), "session", "a live session's repo is a running one");
+  assert.equal(sources.get(repoB), "history", "a transcript with no pane left is history");
+  assert.equal(sources.get(join(workspace, "gamma")), "root");
 });
 
 test("safeWindowName strips what tmux would expand and caps the length", () => {

@@ -18,6 +18,7 @@ import {
   submitAnswer,
 } from "../lib/daemon/questions.ts";
 import { questionAnswerPath, questionPath, sessionQuestionsDir } from "../lib/daemon/paths.ts";
+import { MULTI_ANSWER_SEPARATOR } from "../lib/multi-choice-dialog.ts";
 import { scratchHome } from "./daemon-helpers.ts";
 
 const question = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -176,4 +177,102 @@ test("answering a request that was never written is a refusal with the reason", 
   const outcome = submitAnswer(home, { sessionId: "session-1", requestId: "q-none", answer: "甲" });
   assert.equal(outcome.ok, false);
   assert.match(outcome.problem ?? "", /读不到这个问题/);
+});
+
+test("a structured answers list is read row by row — option text may hold the parser's own separators", () => {
+  const home = scratchHome();
+  // Both rows contain a separator the free-text parser splits on.
+  const options = ["A 方案 / 主路径", "B, 备选", "C 方案"];
+  const at = (requestId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> =>
+    question({ requestId, options, multiple: true, recommended: null, defaultChecked: [], ...overrides });
+  writeQuestion(home, "session-1", "q-list", at("q-list"));
+  writeQuestion(home, "session-1", "q-text", at("q-text"));
+
+  const asList = submitAnswer(home, { sessionId: "session-1", requestId: "q-list", answers: [options[0]!, options[1]!] });
+  assert.equal(asList.ok, true, asList.problem ?? "结构化列表应当被接受");
+  assert.equal(asList.answer, [options[0], options[1]].join(MULTI_ANSWER_SEPARATOR));
+
+  // THE SAME TWO ROWS AS ONE STRING cannot survive: the text path has to split
+  // what it is given, and the fragments match several rows. That is exactly
+  // why the list is handed over as a list.
+  const asText = submitAnswer(home, {
+    sessionId: "session-1",
+    requestId: "q-text",
+    answer: [options[0], options[1]].join(MULTI_ANSWER_SEPARATOR),
+  });
+  assert.equal(asText.ok, false);
+
+  // A single-choice question takes one row, however many the caller sends.
+  writeQuestion(home, "session-1", "q-single", at("q-single", { multiple: false, recommended: options[0] }));
+  const tooMany = submitAnswer(home, {
+    sessionId: "session-1",
+    requestId: "q-single",
+    answers: [options[0]!, options[2]!],
+  });
+  assert.equal(tooMany.ok, false);
+
+  // One unreadable row refuses the whole answer — guessing which half was
+  // meant is how a wrong tick gets minted.
+  writeQuestion(home, "session-1", "q-junk", at("q-junk"));
+  const junk = submitAnswer(home, {
+    sessionId: "session-1",
+    requestId: "q-junk",
+    answers: [options[0]!, "不存在的一项"],
+  });
+  assert.equal(junk.ok, false);
+  assert.match(junk.problem ?? "", /读不出来/);
+
+  // The letters a single row would accept still work element by element.
+  writeQuestion(home, "session-1", "q-letters", at("q-letters"));
+  const letters = submitAnswer(home, { sessionId: "session-1", requestId: "q-letters", answers: ["A", "B"] });
+  assert.equal(letters.ok, true, letters.problem ?? "字母也应当被认出来");
+  assert.equal(letters.answer, [options[0], options[1]].join(MULTI_ANSWER_SEPARATOR));
+
+  // Whitspace around an element is not part of the row, and an empty element is
+  // no row at all — the text path trims, so this one must too.
+  writeQuestion(home, "session-1", "q-spaced", at("q-spaced"));
+  const spaced = submitAnswer(home, {
+    sessionId: "session-1",
+    requestId: "q-spaced",
+    answers: [`  ${options[0]}  `, ""],
+  });
+  assert.equal(spaced.ok, true, spaced.problem ?? "首尾空白应当被忽略");
+  assert.equal(spaced.answer, options[0]);
+
+  // An empty element must not become “the only choice” on a one-option question
+  // (`readRow` would match it against every option, and there is just one).
+  writeQuestion(home, "session-1", "q-blank", question({ requestId: "q-blank", options: ["唯一"], recommended: "唯一" }));
+  const blank = submitAnswer(home, { sessionId: "session-1", requestId: "q-blank", answers: [""] });
+  assert.equal(blank.ok, false, "空元素不是一行");
+});
+
+test("a decline row is one answer on both paths, and never travels with a picked row", () => {
+  const home = scratchHome();
+  const options = ["甲", "乙", "✎ 不选，我说明原因"];
+  const at = (requestId: string): Record<string, unknown> => question({ requestId, options, recommended: options[0] });
+  const line = "✎ 不选，我说明原因：理由写在这里";
+
+  writeQuestion(home, "session-1", "q-decline-list", at("q-decline-list"));
+  const asList = submitAnswer(home, { sessionId: "session-1", requestId: "q-decline-list", answers: [line] });
+  assert.equal(asList.ok, true, asList.problem ?? "退路行应当被接受");
+  assert.equal(asList.answer, line);
+
+  writeQuestion(home, "session-1", "q-decline-text", at("q-decline-text"));
+  const asText = submitAnswer(home, { sessionId: "session-1", requestId: "q-decline-text", answer: line });
+  assert.equal(asText.answer, line, "两种形状对同一个意图给出同一个答案");
+
+  writeQuestion(home, "session-1", "q-decline-mixed", at("q-decline-mixed"));
+  const mixed = submitAnswer(home, { sessionId: "session-1", requestId: "q-decline-mixed", answers: ["甲", line] });
+  assert.equal(mixed.ok, false, "退路行不能和别的选项一起提交");
+
+  // A blank slot is not company: the contract says empty elements are skipped,
+  // and the decline row must still count as standing alone.
+  writeQuestion(home, "session-1", "q-decline-padded", at("q-decline-padded"));
+  const padded = submitAnswer(home, {
+    sessionId: "session-1",
+    requestId: "q-decline-padded",
+    answers: [line, ""],
+  });
+  assert.equal(padded.ok, true, padded.problem ?? "空槽不应把退路行变成“和别人一起提交”");
+  assert.equal(padded.answer, line);
 });

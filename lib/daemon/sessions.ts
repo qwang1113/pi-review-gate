@@ -81,7 +81,7 @@ export interface DaemonSession {
   /** ISO of the pane's last state write, when there is one. */
   stateAt: string | null;
   /** Which source produced `state` — so a consumer can weigh it. */
-  stateSource: "pane" | "registry" | "transcript" | "process";
+  stateSource: "pane" | "registry" | "transcript";
   alive: boolean;
   tmux: { session: string; window: string; pane: string } | null;
   pid: number | null;

@@ -246,6 +246,8 @@ pi --session-id <uuid> [--name <name>] -- <任务描述> [+ 起名提示]
 
 环境变量：`RG_GATE_MODE=<mode>`、`RG_STATION_CAP=<station>`（交付站点上限）。
 
+**`mode` 只对 `loop` / `orchestrator` 真的生效（2026-10-01 实测）**：`RG_GATE_MODE` 是**spawner 交底**的通道，门禁只接受更**严**的起点（`lib/task-mode.ts` 的 `requestedModeFromEnv` 只认 enforced 模式；`explore` 只对一个 worker pane 生效）。所以用 `mode: "normal"` 起出来的会话**不是** normal：它起步时是 undecided（行为等于 loop，fail-closed），要降级得由会话里的 agent 自己走确认框问用户（或用户 `/gate-mode`）。daemon 不自行加限制，也不假称已经生效；面板对这两个值如实标注。
+
 拒绝（`400`，附具体原因）：repo 不是存在的目录 / 任务描述为空 / mode 或 station 不认识 /
 名字不合法（kebab-case，2–32）/ 名字已被活会话或生死不明者占用 / tmux 读不到。
 
@@ -403,9 +405,16 @@ daemon 据此不再列出它。
 请求：`{ "sessionId": "abc123", "answer": "A" }` 或 `{ "sessionId": "abc123", "answers": ["甲","丙"] }`，
 外加可选 `reason`、`by`。
 
-- 答案按 **`resolveAnswer`**（`lib/orchestrator-answer-rules.ts`，与编排层代答同一条规则）归一：
-  选项原文、字母（`A`/`a`/`A.`）、1 起序号都接受；单选只收一行，多选可收多行（逗号/顿号/
-  空格/`+`/`/` 分隔）；超出范围或读不出来**整条拒绝**，不猜。
+- **两种形状，两种读法**：
+  - `answer`（字符串）是按**人类输入**读的：`resolveAnswer`（`lib/orchestrator-answer-rules.ts`，
+    与编排层代答同一条规则）认选项原文、字母（`A`/`a`/`A.`）、1 起序号；单选只收一行，
+    多选可收多行（逗号/顿号/空格/`+`/`/` 分隔）；超出范围或读不出来**整条拒绝**，不猜。
+    唯一例外是门禁模板的退路行：整串**以退路行开头时原样接受**（理由是回答本身）。
+  - `answers`（字符串数组）是**已经切分好的行**，每个元素是一行：逐个元素读（先逐字精确匹配，
+    再按上面单行的读法认字母/序号），**不再按分隔符切分** —— 选项原文自己含空格或 `/` 时，
+    重新拼接再解析会把它们切碎（「同时匹配 N 个选项」或拼出没人选过的组合）。元素首尾空白忽略，
+    空元素跳过；单选给多行整条拒绝，退路行只能单独出现。实现是 `resolveAnswerList`，
+    与字符串路径共用同一条 `readRow` 读法。
 - 成功 `200`：`{ "ok": true, "requestId": "q-3f2a", "answer": "甲", "path": "/…/q-3f2a.answer.json" }`
 - 拒绝 `400`：问题读不到 / 已经答过（答案文件已存在）/ 答案不在选项里 / 缺 `sessionId`。
 

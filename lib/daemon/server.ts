@@ -305,21 +305,27 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
         const body = asObject(ctx.body);
         const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
         if (sessionId === "") return bad(400, "缺少 sessionId —— 一个问题由 (sessionId, requestId) 一起定位");
-        const parts: string[] = [];
-        if (Array.isArray(body.answers)) {
-          for (const item of body.answers) {
-            if (typeof item === "string") parts.push(item);
-          }
-          if (parts.length === 0) return bad(400, "answers 里没有可读的选项");
-        } else if (typeof body.answer === "string") {
-          parts.push(body.answer);
-        } else {
+        // TWO SHAPES, TWO MEANINGS (quality round P1, 2026-10-01): `answers`
+        // arrives ALREADY SPLIT — one element per chosen row — and is handed
+        // over as a list. Joining it here and letting the text parser split it
+        // again would cut an option's own text apart whenever it contains a
+        // separator (` / `, `、`, `,`, `+`, a space). `answer` is text somebody
+        // typed and keeps the reading it always had.
+        const structured =
+          Array.isArray(body.answers)
+            ? body.answers.filter((item): item is string => typeof item === "string")
+            : undefined;
+        const answerText = typeof body.answer === "string" ? body.answer : undefined;
+        if (structured === undefined && answerText === undefined) {
           return bad(400, "缺少 answer（字符串）或 answers（字符串数组）");
+        }
+        if (structured !== undefined && structured.length === 0) {
+          return bad(400, "answers 里没有可读的选项");
         }
         const outcome = submitAnswer(opts.home, {
           sessionId,
           requestId: ctx.params.requestId!,
-          answer: parts.join(" / "),
+          ...(structured === undefined ? { answer: answerText ?? "" } : { answers: structured }),
           by: body.by === "user" ? "user" : "daemon",
           ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
         });
@@ -409,13 +415,21 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
       // reachable, and `replay=0` means "do not send me the past", not "skip the
       // window between now and my first tick". The replay's own end offset is
       // the bookmark, so the tail picks up exactly what the replay did not.
+      //
+      // AND PRIME EVEN WHEN THE TRANSCRIPT DOES NOT EXIST YET (quality round P1,
+      // 2026-10-01): a session started seconds ago — what the panel does right
+      // after `POST /api/tasks` — has written nothing, and skipping the bookmark
+      // there cost this subscriber every byte written until the file's first
+      // sight. `watcher.prime` remembers where reading should start and plants
+      // it the moment the transcript appears.
       const path = observer.transcriptFor(sessionId);
-      if (path !== undefined) {
-        const replay = replayCount === 0 ? { entries: [], offset: undefined } : readRecentEntriesWithOffset(path, replayCount);
-        watcher.prime(sessionId, replay.offset);
-        if (replay.entries.length > 0) {
-          write({ event: "output", data: { sessionId, entries: replay.entries, replay: true } });
-        }
+      const replay =
+        path === undefined || replayCount === 0
+          ? { entries: [], offset: undefined }
+          : readRecentEntriesWithOffset(path, replayCount);
+      watcher.prime(sessionId, replay.offset);
+      if (replay.entries.length > 0) {
+        write({ event: "output", data: { sessionId, entries: replay.entries, replay: true } });
       }
     }
     const unsubscribe = hub.add(write, sessionId);
