@@ -175,20 +175,24 @@ test("name / repo / cron / contract are all validated before anything is written
   if (idClash.ok) return;
   assert.match(idClash.problem, /已经被另一个调度任务用了/);
   assert.equal(readSchedules(home).ok, true, "the refused write left a readable table");
+});
 
-  // …and the same on the rename path. Onto its OWN id is legal and must stay
-  // readable (the read side checks both keys before adding either); onto
-  // ANOTHER task's id it is refused on the write side, so the table never
-  // becomes one the read side would reject.
-  const ownId = updateScheduledTask(
-    home,
-    first.value.id,
-    { name: first.value.id },
-    { from: "panel", expectedVersion: 1 },
-  );
+test("a rename onto its own id is legal, onto another task's id is refused", () => {
+  const home = scratch();
+  const repo = scratch();
+  const first = addScheduledTask(home, taskInput(repo));
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+
+  // id and name share one namespace, but a task named after its OWN id is not a
+  // collision — the read side checks both keys before it records either, and
+  // this state is reachable through a legal rename.
+  const ownId = updateScheduledTask(home, first.value.id, { name: first.value.id }, { from: "panel" });
   assert.equal(ownId.ok, true);
   assert.equal(readSchedules(home).ok, true, "a task may carry its own id as its name");
 
+  // Onto ANOTHER task's id it is refused on the write side, so a successful
+  // write can never be a table the read side would reject.
   const second = addScheduledTask(home, taskInput(scratch(), { name: "second-task", cron: "0 12 * * *" }));
   assert.equal(second.ok, true);
   if (!second.ok) return;

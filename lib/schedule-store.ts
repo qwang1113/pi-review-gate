@@ -222,19 +222,19 @@ export function readSchedules(home: string): SchedulesRead {
   // `updateScheduledTask` rename and it reads back fine); moving the two
   // `taken.set` calls above the check would turn that state into a "duplicate"
   // and make the whole table unreadable (the round-8 P1 class).
-  const taken = new Map<string, string>();
+  const taken = new Map<string, ScheduledTask>();
   for (const task of tasks) {
     const holder = taken.get(task.id) ?? taken.get(task.name);
     if (holder !== undefined) {
       return {
         ok: false,
-        problem: `${path} 里有重复的 id / name：任务 ${task.id}（name ${task.name}）与任务 ${holder} 撞了 —— ` +
-          "id 是 update / remove 的寻址键、name 是 findScheduledTask 的键，两者共用一个命名空间，重复会让两者都不确定。" +
-          "请人工修复这一行（读侧从不改写文件，不会替你猜哪一条是对的）",
+        problem: `${path} 里有重复的 id / name：任务 ${task.id}（name ${task.name}）与任务 ${holder.id}（name ${holder.name}）` +
+          " 共用了同一个键 —— id 与 name 共用一个命名空间（id 是 update / remove 的寻址键、name 是 findScheduledTask 的键），" +
+          "重复会让两者都不确定。请人工修复这一行（读侧从不改写文件，不会替你猜哪一条是对的）",
       };
     }
-    taken.set(task.id, task.id);
-    taken.set(task.name, task.id);
+    taken.set(task.id, task);
+    taken.set(task.name, task);
   }
   return {
     ok: true,
@@ -382,8 +382,11 @@ const has = (patch: ScheduleEditPatch, key: keyof ScheduleEditPatch): boolean =>
  * `findScheduledTask(idOrName)` answers to either, so a name colliding with
  * another task's id is exactly as ambiguous as a duplicated id — which is why
  * the write-side uniqueness check and the id generator must avoid the SAME set.
- * It is one function because the three copies it replaces drifted once already
+ * It is one function because the two copies it replaces drifted once already
  * (round-8 P1: the read side refused a table the write side had just written).
+ * The read-side loop does NOT use it, on purpose: that one checks both keys
+ * before recording either, which is what lets a task carry its own id as its
+ * name.
  *
  * `exceptId` drops one task — the one being edited, which may legitimately
  * carry its own id as its name (the read side tolerates that too, see
