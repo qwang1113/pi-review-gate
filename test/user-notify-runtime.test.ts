@@ -44,8 +44,8 @@ function harness(over: {
   frontBundleId?: string | undefined | (() => string | undefined);
   /** Make every tmux call throw — the other half of the same fail-open rule. */
   tmuxThrows?: boolean;
-  /** Is the daemon online (⇒ the menu bar app is the sender, not this side)? */
-  daemonOnline?: boolean | (() => boolean);
+  /** Is the menu bar app the sender (running + daemon answering), i.e. NOT this side? */
+  menuBarSending?: boolean | (() => boolean);
 } = {}): Harness {
   const state = emptyState("sess-1", 10);
   if (over.taskMode) state.taskMode = over.taskMode;
@@ -97,9 +97,9 @@ function harness(over: {
       spawnBlocking: (argv) => { blocking.push([...argv]); },
       resolveNotifier: () => ("notifier" in over ? over.notifier : "/opt/homebrew/bin/terminal-notifier"),
       // THE OTHER SENDER: injected, so no test probes a real daemon. Default
-      // false = "cannot confirm online" = this side sends, which is the
+      // false = "cannot confirm a menu bar app" = this side sends, which is the
       // behaviour every other test in this file is about.
-      daemonOnline: () => (typeof over.daemonOnline === "function" ? over.daemonOnline() : (over.daemonOnline ?? false)),
+      menuBarSending: () => (typeof over.menuBarSending === "function" ? over.menuBarSending() : (over.menuBarSending ?? false)),
     });
     runtime.armExitHandler();
   } finally {
@@ -165,12 +165,12 @@ test("nothing is spawned when the session may not send, and tmux is not even ask
   assert.equal(h.state.notify, undefined);
 });
 
-test("an online daemon means the menu bar sends: nothing is spawned and no throttle slot is spent", () => {
-  const h = harness({ taskMode: "loop", daemonOnline: true });
+test("a running menu bar app means it sends: nothing is spawned and no throttle slot is spent", () => {
+  const h = harness({ taskMode: "loop", menuBarSending: true });
   const outcome = h.notify({ kind: "needs-user", detail: "选哪个方案？" });
   assert.equal(outcome.status, "skipped");
-  if (outcome.status === "skipped") assert.match(outcome.note, /daemon 在线/);
-  assert.deepEqual(h.sent, [], "the menu bar is the sender while the daemon answers");
+  if (outcome.status === "skipped") assert.match(outcome.note, /菜单栏 app 在跑/);
+  assert.deepEqual(h.sent, [], "the menu bar is the sender while it runs");
   assert.deepEqual(h.tmuxCalls, [], "suppression costs no tmux round trip");
   assert.equal(h.state.notify, undefined, "nothing was sent, so nothing is recorded");
   assert.equal(h.persists, 0, "…and the sidecar is not rewritten either");
@@ -181,7 +181,7 @@ test("an online daemon means the menu bar sends: nothing is spawned and no throt
 });
 
 test("a probe that throws is 'cannot confirm' — the banner still goes out (fail open)", () => {
-  const h = harness({ taskMode: "loop", daemonOnline: () => { throw new Error("probe exploded"); } });
+  const h = harness({ taskMode: "loop", menuBarSending: () => { throw new Error("probe exploded"); } });
   assert.equal(h.notify({ kind: "finished", detail: "x" }).status, "sent");
   assert.equal(h.sent.length, 1);
 });

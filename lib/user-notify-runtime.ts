@@ -24,7 +24,7 @@
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 
-import { daemonOnlineSync } from "./daemon-presence.ts";
+import { bannerSenderOnline } from "./daemon-presence.ts";
 import type { GateState } from "./gate-state.ts";
 import { STATE_VARIANT_ENV } from "./gate-state-io.ts";
 // The pane-id shape has ONE implementation (quality round P2, 2026-09-18):
@@ -77,15 +77,18 @@ export interface UserNotifyRuntimeDeps {
   runTmux: TmuxRunner;
   now?(): number;
   /**
-   * Is the daemon online ({@link daemonOnlineSync}) — i.e. is the menu bar app
-   * the sender?
+   * Is the menu bar app the sender ({@link bannerSenderOnline}) — running, with
+   * the daemon answering behind it?
    *
    * Injected so a test never probes a real daemon; the DEFAULT is the real sync
    * probe (`lib/daemon-presence.ts`), because the terminal side has to know
    * this without the extension having to wire anything: every gate dialog's
-   * banner and the exit handler ask it.
+   * banner and the exit handler ask it. Either half missing answers `false` —
+   * the terminal sends, which is the direction that ends with somebody being
+   * told (quality round P1, 2026-10-01: "the daemon is online" alone was not
+   * the same fact as "somebody else is going to raise this banner").
    */
-  daemonOnline?(): boolean;
+  menuBarSending?(): boolean;
   /** Injected so a test can count spawns instead of making them. */
   spawnDetached?(argv: readonly string[]): void;
   /** Injected so a test can count the blocking one. */
@@ -333,14 +336,15 @@ export function createUserNotifyRuntime(deps: UserNotifyRuntimeDeps): UserNotify
         // a client sweep plus two `lsappinfo` calls, and a session that can
         // never send (a child, a judge pane) must not pay for it either.
         watching: () => userIsWatching(ownAddress()?.paneId, sessionBundle),
-        // ONE SENDER AT A TIME: while the daemon answers, the menu bar app
-        // raises the banner and this side stays silent (user decision; see
-        // lib/user-notify.ts `planUserNotify`). A probe that cannot confirm it
-        // says "offline" and the banner goes out here — the direction that
-        // ends with somebody being told.
-        daemonOnline: () => {
+        // ONE SENDER AT A TIME: while the menu bar app is running, IT raises
+        // the banner and this side stays silent (user decision; see
+        // lib/user-notify.ts `planUserNotify`). Both halves are required — the
+        // app's own heartbeat AND the daemon answering — and a probe that
+        // cannot confirm says "not sending" so the banner goes out here: the
+        // direction that ends with somebody being told.
+        menuBarSending: () => {
           try {
-            return deps.daemonOnline ? deps.daemonOnline() : daemonOnlineSync();
+            return deps.menuBarSending ? deps.menuBarSending() : bannerSenderOnline();
           } catch {
             // A probe that THROWS is "cannot confirm", never "online": the
             // other reading would let an error in the evidence-gathering

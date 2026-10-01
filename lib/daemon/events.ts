@@ -611,6 +611,14 @@ export function createSessionWatcher(opts: SessionWatcherOptions): SessionWatche
     for (const [sessionId, previous] of seen) {
       if (present.has(sessionId)) continue;
       seen.delete(sessionId);
+      // THE BOOKMARK GOES WITH THE SESSION (quality round P2, 2026-10-01): the
+      // tailer's `offsets` is keyed by transcript path and this process is
+      // RESIDENT, so a bookmark per session it has ever seen is growth with no
+      // upper bound. Being unlisted is what makes forgetting safe — the listing
+      // needs a pane, a registry entry or a transcript touched inside the
+      // window, so a session that dropped out can no longer be appended to.
+      const transcript = opts.observer.transcriptFor(sessionId);
+      if (transcript !== undefined) tailer.forget(transcript);
       opts.hub.emit({ event: "session", data: { kind: "removed", sessionId } }, sessionId);
       if (previous.alive && !previous.finished && notifiableFor(previous)) {
         notify(

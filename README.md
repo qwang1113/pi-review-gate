@@ -1021,13 +1021,17 @@ same spawn (one implementation), so there is never a second daemon:
 | manual | `pi-gate daemon start` / `stop` / `status` | one-off control. `start` probes first (already online ⇒ print it, exit 0), `stop` refuses to signal a pid the token-bearing health check does not confirm as the daemon |
 | from a session | nothing — it happens by itself | the gate starts it in the background from `session_start` when it cannot be confirmed online. A failure logs one line and **cannot affect the session** |
 
-**One sender at a time (user decision).** While the daemon can be confirmed online, **the menu bar
-app is the only sender** of system notifications and the terminal's `terminal-notifier` suppresses
-itself; the moment it cannot be confirmed, the terminal sends exactly as before. The rule itself
+**One sender at a time (user decision).** While **the menu bar app is running** *and* the daemon can
+be confirmed online, the app is the only sender of system notifications and the terminal's
+`terminal-notifier` suppresses itself; in every other case (app not running, daemon unreachable,
+either fact unreadable) the terminal sends exactly as before. The daemon rule
 (`state file parses + pid alive + token-bearing /api/health answers 200 within 1s`, `docs/daemon/api.md`
 §3) has ONE implementation — `lib/daemon-presence.ts` — asked asynchronously by the CLI and
 **synchronously** (system curl, token never in argv) by the notification path, which runs inside a
-dialog and inside an `exit` handler and cannot await anything.
+dialog and inside an `exit` handler and cannot await anything. "The app is running" is the app's own
+heartbeat (`~/.pi/agent/rg-daemon/menubar.json`, rewritten every 5s, 20s of freshness) and is part of
+the same module: the daemon is auto-started by every session while the app is not, so the online
+fact alone used to suppress banners nobody else was going to raise.
 
 **The menu bar app** (`menubar/Sources/*.swift`, built by `bash menubar/build.sh` with the machine's
 own `swiftc` into `menubar/build/PiGate.app`): `MenuBarExtra`, no Xcode project, no Electron, no
@@ -1036,9 +1040,10 @@ Rust/Tauri, ad-hoc signed for local use. It shows the daemon's state and port, t
 `http://127.0.0.1:<port>/sessions/<id>` in the panel), the pending questions, and start/stop/quit.
 It reads **only** the daemon's HTTP API (plus the discovery record for the port and the token) and
 never parses a transcript or tmux; when the daemon is unreachable it says 「未运行」with the reason
-instead of showing a stale list. Notifications are claimed from the daemon's ledger before they are
-posted, so the same fact is never announced twice; a denied notification permission degrades
-silently.
+instead of showing a stale list. It writes one small file of its own — the heartbeat above, which is
+what tells the terminal side that somebody else is there to raise the banner. Notifications are
+claimed from the daemon's ledger before they are posted, so the same fact is never announced twice;
+a denied notification permission degrades silently.
 
 ## Usage
 

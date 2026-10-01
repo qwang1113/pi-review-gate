@@ -99,14 +99,16 @@ open menubar/build/PiGate.app
 
 规则只有一条（用户决定，`docs/daemon/api.md` §8.1）：
 
-| daemon 状态 | 谁发通知 |
+| 情况 | 谁发通知 |
 | --- | --- |
-| **在线**（探测成功） | **菜单栏 app** 独家发；终端侧 `terminal-notifier` 自己抑制 |
-| **不在线 / 探测不成功** | 终端侧照旧发（和没有 daemon 时完全一样） |
+| **菜单栏 app 在跑、且 daemon 在线** | **菜单栏 app** 独家发；终端侧 `terminal-notifier` 自己抑制 |
+| 其余任何情况（app 没跑 / daemon 不在线 / 读不出来） | 终端侧照旧发（和没有 daemon 时完全一样） |
 
-「在线」的定义是冻结的（`docs/daemon/api.md` §3）：state 文件可解析 + pid 活着 +
-带 token 的 `/api/health` 1 秒内 200。**探测失败一律按不在线处理** —— 因为「没发出来」
-比「多发一条」贵得多。所以把 daemon 停掉，终端通知立刻就恢复了。
+两条判定：**daemon 在线**是冻结的那一条（`docs/daemon/api.md` §3：state 文件可解析 + pid 活着 +
+带 token 的 `/api/health` 1 秒内 200）；**app 在跑**是 app 自己写的心跳
+（`~/.pi/agent/rg-daemon/menubar.json`，每 5 s 一次，20 s 内算新鲜）。**任一条读不出来一律按「不是它发」处理**
+—— 因为「没发出来」比「多发一条」贵得多。所以把 daemon 停掉、或者把菜单栏 app 关掉，
+终端通知立刻就恢复了。
 
 事件与去重：
 
@@ -118,9 +120,8 @@ open menubar/build/PiGate.app
   台账是共享的，所以两个发送方不会各发一条同样的消息。
 - 点击通知跳到该会话的面板页（`/sessions/<id>`）。
 - **通知权限被拒绝时静默降级**：菜单栏与其他功能照常，只是没有横幅。
-- **一个诚实的限制**：daemon 在线时若菜单栏 app 没在运行，就没人发横幅（launchd 只管 daemon，
-  不会替你启动 app）；而事件是事件，补不回来。要么让 app 常驻，要么接受这一段里没有横幅
-  —— 这正是「在线就是菜单栏独家发」这条规则的含义。
+- **app 关掉也还有横幅**：app 每次刷新（5 秒）会写一个心跳，终端侧只在「心跳新鲜 + daemon 在线」时才抑制；
+  把 app 退出后，最多 20 秒终端通知就接管了 —— 两边的判定都不存在「谁都发不出来」的窗口。
 
 ---
 
@@ -132,6 +133,7 @@ open menubar/build/PiGate.app
 | `~/.pi/agent/rg-daemon.token` | token（0600，32 字节 base64url） |
 | `~/.pi/agent/rg-daemon/daemon.log` | 后台进程的 stdout+stderr |
 | `~/.pi/agent/rg-daemon/questions/…` | 待答问题协议（生产者是门禁，见 api.md §7） |
+| `~/.pi/agent/rg-daemon/menubar.json` | 菜单栏 app 的心跳（`{schema,pid,at}`，每 5 秒重写；终端侧靠它决定要不要抑制，api.md §8.1） |
 | `~/.pi/agent/rg-daemon/notifications/` | 通知台账（每 key 一个 claim + 追加式 history） |
 | `~/Library/LaunchAgents/com.pi.review-gate.daemon.plist` | launchd 登录项（`install` 写、`uninstall` 删） |
 | `menubar/build/PiGate.app` | 菜单栏 app 的构建产物（`menubar/build.sh`） |

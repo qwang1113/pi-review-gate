@@ -19,10 +19,10 @@
  * file probes anything.
  */
 
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { dirname } from "node:path";
 
+import { writeFileAtomic } from "../atomic-write.ts";
 import { pidAlive } from "../session-registry.ts";
 import {
   DAEMON_HOST,
@@ -52,22 +52,18 @@ export interface DaemonState {
    */
   workspaceRoots?: string[];
 }
-
 /**
  * Write a file only its owner can read, atomically.
  *
- * The plain `writeFileAtomic` leaves the temporary sibling at the process
- * umask (0644), so a reader tailing the directory could open the token between
- * the write and the rename. The mode is set on the temp file and the rename
- * carries the inode, so no window ever exposes it.
+ * The plain `writeFileAtomic` carries the TARGET's permissions across the swap,
+ * which is not enough for a file that must never be readable by another user:
+ * the target may not exist yet (created at the process umask, 0644), and a
+ * reader tailing the directory could open the token between the write and the
+ * rename. Enforcing the mode is exactly what `writeFileAtomic`'s `opts.mode`
+ * does — this is a name for that fact, not a second implementation of it
+ * (quality round P2, 2026-10-01).
  */
-export function writePrivateFile(path: string, text: string): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, text, { mode: 0o600 });
-  renameSync(tmp, path);
-  try { chmodSync(path, 0o600); } catch { /* the rename already carried 0600 */ }
-}
+const writePrivate = (path: string, text: string): void => writeFileAtomic(path, text, { mode: 0o600 });
 
 const parseState = (raw: unknown): DaemonState | undefined => {
   if (!raw || typeof raw !== "object") return undefined;
@@ -140,7 +136,7 @@ export function buildDaemonState(init: DaemonStateInit): DaemonState {
 }
 
 export function writeDaemonState(state: DaemonState, home?: string): void {
-  writePrivateFile(daemonStatePath(home), `${JSON.stringify(state, null, 2)}\n`);
+  writePrivate(daemonStatePath(home), `${JSON.stringify(state, null, 2)}\n`);
 }
 
 /**
@@ -184,7 +180,7 @@ export function ensureDaemonToken(home?: string): { token: string; created: bool
   const existing = readDaemonToken(home);
   if (existing !== undefined) return { token: existing, created: false };
   const token = randomBytes(32).toString("base64url");
-  writePrivateFile(daemonTokenPath(home), `${token}\n`);
+  writePrivate(daemonTokenPath(home), `${token}\n`);
   return { token, created: true };
 }
 
@@ -206,7 +202,7 @@ export function ensureDaemonIdentity(home?: string): string {
     if (/^daemon-[a-z0-9]{6,32}$/.test(raw)) return raw;
   } catch { /* mint one below */ }
   const id = `daemon-${randomBytes(5).toString("hex")}`;
-  writePrivateFile(path, `${id}\n`);
+  writePrivate(path, `${id}\n`);
   return id;
 }
 

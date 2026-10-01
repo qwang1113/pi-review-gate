@@ -34,16 +34,27 @@ export function tempPathFor(path: string, pid: number = process.pid): string {
  * exactly the file that must not silently lose its mode. The mode is applied at
  * creation (umask can only CLEAR bits) and re-asserted after the rename, which
  * is what keeps a restrictive file restrictive through the swap.
+ *
+ * `opts.mode` IS THE OTHER HALF OF THAT (quality round P2, 2026-10-01): when
+ * the caller knows what the file must be (the daemon's 0600 state / token /
+ * identity), "keep whatever is there" is not enough — the target may not exist
+ * yet, or may exist at a looser mode. Passing a mode ENFORCES it: created with
+ * it, and re-asserted after the rename. `lib/daemon/state.ts` used to hand-roll
+ * the same temp+rename+chmod for exactly this reason; the parameter is what
+ * removed the second implementation.
+ *
+ * Passing neither leaves the target's own bits alone, which is what every
+ * other caller wants.
  */
-export function writeFileAtomic(path: string, content: string): void {
+export function writeFileAtomic(path: string, content: string, opts: { mode?: number } = {}): void {
   mkdirSync(dirname(path), { recursive: true });
-  const existing = existingMode(path);
+  const mode = opts.mode ?? existingMode(path);
   const tmp = tempPathFor(path);
-  writeFileSync(tmp, content, existing === undefined ? undefined : { mode: existing });
+  writeFileSync(tmp, content, mode === undefined ? undefined : { mode });
   renameSync(tmp, path);
-  if (existing !== undefined) {
+  if (mode !== undefined) {
     try {
-      chmodSync(path, existing);
+      chmodSync(path, mode);
     } catch {
       /* the creation mode already carried it; a failed chmod is not a data loss */
     }

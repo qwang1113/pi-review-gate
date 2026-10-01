@@ -90,12 +90,11 @@ SSE 的 `session` 事件里 `removed` **只带 `sessionId`**（没有 `session` 
 
 ## 联调状态（2026-10-01）
 
-- **门禁侧的 answer channel 不在本分支**：生产者与消费者（`lib/external-answer.ts` 等）是
-  `feat/pi-gate-daemon` 分支上的提交（`3f3ee155` / `4191e92a`），**不是本轮工作分支的祖先**。
-  面板按 `docs/daemon/api.md` §7 的契约实现；闭环是在那个环境里验证的 ——
-  真实会话在门禁里等回答 → `~/.pi/agent/rg-daemon/questions/<sessionId>/<requestId>.json` 出现 →
-  **从面板**提交答案 → `.answer.json` 落盘 → 门禁消费后两个文件都消失、会话继续（门禁模式被改掉、名字被登记）。
-  在本分支单独跑面板时，「待处理」没有生产者喂它 —— 答题链路要等 answer-channel 合入后才完整。
+- **门禁侧的 answer channel 已在本分支**（2026-10-01 收尾轮合入：`lib/external-answer.ts` 与
+  `lib/gate-dialogs.ts` 的接线，`3f3ee155` / `4191e92a` 现在是 HEAD 的祖先）。所以「待处理」有真的生产者喂它：
+  门禁弹框前把问题写进 `~/.pi/agent/rg-daemon/questions/<sessionId>/<requestId>.json`，面板提交答案后门禁消费、
+  两个文件都消失、会话继续。收尾轮**实测闭环过一次**（真起一个会话 ⇒ 它弹降级确认框 ⇒ `GET /api/questions` 列出 ⇒
+  `POST /api/questions/:id/answer` ⇒ pane 里的框撤下、会话继续）；协议细节以 `docs/daemon/api.md` §7 为准。
 - **答题的两种形状**：选了选项 ⇒ `answer` 是选项原文（多选是 `answers` 数组：逐个元素读、不按分隔符重切）；没选选项只写了理由 ⇒ 走门禁模板的退路行，
   提交的是 `✎ 不选，我说明原因：<理由>` 这一整行 —— `resolveAnswer` 只认以退路行开头的自由文本，其他任何
   非选项文本都会被拒（`lib/orchestrator-answer-rules.ts`）。所以**问题选项里没有退路行时，面板不把「写理由」

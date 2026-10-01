@@ -428,11 +428,17 @@ daemon 据此不再列出它。
 
 ### 8.1 谁发通知（唯一规则）
 
-- **daemon 在线**（§3）时：**由菜单栏 app 独家发出**，终端侧 `terminal-notifier` **抑制**。
-- **daemon 不在线**时：终端侧照旧发（现状不变）。
+- **菜单栏 app 在跑、而且 daemon 在线**时：**由 app 独家发出**，终端侧 `terminal-notifier` **抑制**。
+- 其余任何情况（app 没在跑 / daemon 不在线 / 两条里有任一条读不出来）：终端侧照旧发（现状不变）。
 
-「在线」的判定只有 §3 那一条；探测失败一律按不在线处理，因此**抑制必须由「探测成功」触发**，
-不能由「探测没报错」触发。
+两条判定的出处：**daemon 在线**只有 §3 那一条；**app 在跑**是 app 自己写的**心跳** ——
+`~/.pi/agent/rg-daemon/menubar.json`（0600，`{schema:1, pid, at}`，app 活着时每 5 s 重写一次，
+`lib/daemon-presence.ts` 的 `bannerSenderPresence` 读它，新鲜窗口 **20 s**，pid 还要活着）。
+
+**为什么需要第二个条件**（质量轮 P1，2026-10-01）：daemon 会被每个交互会话自动拉起，app 不会 ——
+只看「daemon 在线」时，重启后的默认状态是「daemon 起来了、app 没跑」，于是终端侧抑制、app 又不存在，
+**两边都不发**。抑制必须由「发送者在场」赚到，和在线判定必须由探测成功赚到是同一条道理；
+两条中任一条读不出来 ⇒ 终端侧照常发（fail-open：最坏是多一条横幅，绝不是没人收到）。
 
 ### 8.2 事件面（SSE）
 
@@ -557,11 +563,11 @@ data: <JSON>
 
 ## 10. 静态托管（web 面板）
 
-- 目录：`<包根>/web/dist`（web 工作区的构建输出；`npm run build:web` 生成）。
-- **构建脚本由 web-panel 任务落地**：本任务只提供接口（`build:web`）与占位 `web/package.json`。
-  在它实现之前 `npm run build:web` **会正常退出并说明没有产出**，于是本目录不存在——那正是下面的说明页要讲的事（不是故障）。
-- 发布包里也带上它（`package.json` 的 `files` 含 `web/dist/`），否则装出来的包永远只有说明页。
-  构建产物由 web-panel 任务产生：**发布前必须先 `npm run build:web`**。
+- 目录：`<包根>/web/dist` —— 由 `web/` 工作区构建（`npm run build:web`，2026-10-01 起真可用：产出
+  `dist/index.html` + `dist/assets/*`）。这个目录**不进 git**（`web/.gitignore`），所以刚 clone 的仓库里
+  它不存在 —— 那正是下面的说明页要讲的事（不是故障）。
+- 发布包里也带上它（`package.json` 的 `files` 含 `web/dist/`），否则装出来的包永远只有说明页：
+  **发布前必须先 `npm run build:web`**。
 - `GET /` 与任何**非 `/api/*`** 路径都从这里取文件（按扩展名给 `Content-Type`）。
 - **SPA fallback**：路径在磁盘上不存在时回 `index.html`（前端路由刷新不 404）。
 - 路径穿越（`../`、绝对路径、NUL）一律解析不出去，落回 fallback。
@@ -580,6 +586,7 @@ data: <JSON>
 | `~/.pi/agent/rg-daemon/daemon.log` | 0600 | 后台进程的 stdout/stderr |
 | `~/.pi/agent/rg-daemon/identity` | 0600 | daemon 自己的持久 id（专属 tmux session 名用它派生） |
 | `~/.pi/agent/rg-daemon/scope.json` / `scope-repo` | 0600 | 专属 tmux session 的记录与锚点 repo |
+| `~/.pi/agent/rg-daemon/menubar.json` | 0644 | 菜单栏 app 的心跳（§8.1）：`{schema, pid, at}`，app 每 5 s 重写 |
 | `~/.pi/agent/rg-daemon/questions/…` | — | 待答问题协议（§7） |
 | `~/.pi/agent/rg-daemon/notifications/claims/<hash>.json` | 0600 | 每个通知 key 的 claim 记录（§8.3） |
 | `~/.pi/agent/rg-daemon/notifications/history.jsonl` | 0600 | 速率限制用的追加式历史（§8.3） |

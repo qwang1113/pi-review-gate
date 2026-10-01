@@ -16,18 +16,22 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  daemonOnlineSync,
+  bannerSenderOnline,
+  bannerSenderPresence,
   judgeDaemonPresence,
+  MENUBAR_HEARTBEAT_FRESH_MS,
   probeDaemon,
   probeDaemonSync,
   type HealthReading,
+  type HealthRunner,
 } from "../lib/daemon-presence.ts";
 import { buildDaemonState, ensureDaemonToken, writeDaemonState } from "../lib/daemon/state.ts";
-import { daemonStatePath } from "../lib/daemon/paths.ts";
+import { daemonStatePath, menubarPresencePath } from "../lib/daemon/paths.ts";
 import { runDaemonCli } from "../lib/daemon/cli.ts";
 import { freePort, scratchHome } from "./daemon-helpers.ts";
 
@@ -114,7 +118,6 @@ test("offline is the answer for every unreadable fact, and the probe never throw
 
   // No state file at all.
   assert.equal(probeDaemonSync({ home, health }).online, false);
-  assert.equal(daemonOnlineSync({ home, health }), false);
 
   // A garbage state file.
   writeFileSync(daemonStatePath(home), "{ this is not json", "utf8");
@@ -156,7 +159,7 @@ test("the async probe and the sync probe answer the same thing about the same da
     assert.equal(syncProbe.online, true, syncProbe.reason);
     assert.equal(asyncProbe.state?.port, port);
     assert.equal(syncProbe.state?.port, port);
-    assert.equal(daemonOnlineSync({ home }), true, "this is the exact call the notification path makes");
+    assert.equal(probeDaemonSync({ home }).online, true, "the sync probe the notification path is built on");
   } finally {
     await runDaemonCli(["daemon", "stop"], { ...silentIo, home });
   }
@@ -166,5 +169,56 @@ test("the async probe and the sync probe answer the same thing about the same da
   const afterSync = probeDaemonSync({ home, timeoutMs: 200 });
   assert.equal(afterAsync.online, false);
   assert.equal(afterSync.online, false);
-  assert.equal(daemonOnlineSync({ home }), false);
+  assert.equal(bannerSenderOnline({ home }), false, "and nobody claims the banner either");
+});
+
+// ---------------------------------------------------------------------------
+// WHO RAISES THE BANNER — the online rule alone was never enough
+// ---------------------------------------------------------------------------
+
+/** One heartbeat, exactly as the menu bar app writes it (pid + ISO time). */
+function heartbeat(home: string, at: number, pid: number = process.pid): void {
+  mkdirSync(join(home, ".pi", "agent", "rg-daemon"), { recursive: true });
+  writeFileSync(menubarPresencePath(home), JSON.stringify({ schema: 1, pid, at: new Date(at).toISOString() }), "utf8");
+}
+
+test("the banner sender is the app's own heartbeat — and every doubt means it is NOT there", () => {
+  const home = scratchHome();
+  const now = Date.parse("2026-10-01T06:00:00.000Z");
+  assert.equal(bannerSenderPresence({ home, now }).present, false, "no file ⇒ nobody to send it");
+  assert.match(bannerSenderPresence({ home, now }).reason, /不存在或读不出来/);
+
+  heartbeat(home, now - 4_000);
+  assert.equal(bannerSenderPresence({ home, now }).present, true, "a fresh beat from a live pid is the one positive fact");
+
+  heartbeat(home, now - MENUBAR_HEARTBEAT_FRESH_MS - 1);
+  assert.equal(bannerSenderPresence({ home, now }).present, false, "an app that stopped writing is not a sender");
+  assert.match(bannerSenderPresence({ home, now }).reason, /已过期/);
+
+  heartbeat(home, now - 1_000, 999_999_999);
+  assert.equal(bannerSenderPresence({ home, now }).present, false, "a crash leaves a fresh file behind a dead pid");
+  assert.match(bannerSenderPresence({ home, now }).reason, /pid 999999999 已不在/);
+
+  writeFileSync(menubarPresencePath(home), "not json", "utf8");
+  assert.equal(bannerSenderPresence({ home, now }).present, false, "garbage is not a licence to stay silent");
+});
+
+test("suppression needs BOTH halves: the app running AND the daemon answering", () => {
+  // THE P1 THIS PINS (quality round, 2026-10-01): the daemon is auto-started by
+  // every interactive session and the app is not, so "the daemon answers"
+  // alone suppressed banners nobody was left to raise — silence from both
+  // sides after a reboot.
+  const home = scratchHome();
+  const now = Date.parse("2026-10-01T06:00:00.000Z");
+  const health: HealthRunner = () => ({ ok: true });
+  heartbeat(home, now - 1_000);
+
+  assert.equal(bannerSenderOnline({ home, now, health }), false, "the app is up but there is no daemon behind it");
+
+  writeDaemonState({ ...buildDaemonState({ port: 4597 }), pid: process.pid }, home);
+  ensureDaemonToken(home);
+  assert.equal(bannerSenderOnline({ home, now, health }), true, "both halves ⇒ the app owns the banner");
+
+  heartbeat(home, now - MENUBAR_HEARTBEAT_FRESH_MS - 5_000);
+  assert.equal(bannerSenderOnline({ home, now, health }), false, "the app quit ⇒ the terminal sends again");
 });

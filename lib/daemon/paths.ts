@@ -100,6 +100,20 @@ export function questionsRoot(home: string = homedir()): string {
   return join(daemonHome(home), "questions");
 }
 
+/**
+ * The menu bar app's heartbeat (`~/.pi/agent/rg-daemon/menubar.json`).
+ *
+ * It answers the one question the terminal notifier cannot answer any other
+ * way: is the app that owns every banner actually RUNNING? The app writes it
+ * every few seconds while it lives; `lib/daemon-presence.ts` reads it before
+ * the terminal side agrees to stay silent (see `docs/daemon/api.md` §8.1).
+ *
+ * Not a secret and not a state record: nothing but "the app is alive as of".
+ */
+export function menubarPresencePath(home: string = homedir()): string {
+  return join(daemonHome(home), "menubar.json");
+}
+
 export function sessionQuestionsDir(home: string, sessionId: string): string {
   return join(questionsRoot(home), sessionId);
 }

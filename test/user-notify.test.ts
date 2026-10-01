@@ -311,35 +311,35 @@ test("the watching check is asked LAZILY, and only on the path that would send",
 // ONE SENDER AT A TIME (2026-10-01)
 // ---------------------------------------------------------------------------
 
-test("while the daemon is online the menu bar sends and this side stays silent", () => {
+test("while the menu bar app is running it sends and this side stays silent", () => {
   const control = plan();
-  assert.equal(control.status, "send", "without a daemon this side is the sender");
+  assert.equal(control.status, "send", "without a menu bar app this side is the sender");
 
-  const suppressed = plan({ daemonOnline: () => true });
+  const suppressed = plan({ menuBarSending: () => true });
   assert.equal(suppressed.status, "skipped");
-  if (suppressed.status === "skipped") assert.match(suppressed.reason, /daemon 在线/);
+  if (suppressed.status === "skipped") assert.match(suppressed.reason, /菜单栏 app 在跑/);
 
   // EVERY kind, not just the question: one fact, one sender.
   for (const kind of ["finished", "failed", "needs-user"] as const) {
-    assert.equal(plan({ kind, daemonOnline: () => true }).status, "skipped");
+    assert.equal(plan({ kind, menuBarSending: () => true }).status, "skipped");
   }
-  // …and an offline daemon changes nothing about the old behaviour.
-  assert.equal(plan({ daemonOnline: () => false }).status, "send");
+  // …and an app that is not there changes nothing about the old behaviour.
+  assert.equal(plan({ menuBarSending: () => false }).status, "send");
 });
 
-test("the daemon probe is asked LAZILY, and a suppressed banner spends no throttle slot", () => {
+test("the menu bar probe is asked LAZILY, and a suppressed banner spends no throttle slot", () => {
   let asked = 0;
-  const daemonOnline = () => { asked += 1; return true; };
-  assert.equal(plan({ daemonOnline, stateVariant: "t1-x" }).status, "skipped");
-  assert.equal(plan({ daemonOnline, interactive: false }).status, "skipped");
-  assert.equal(plan({ daemonOnline, notifierPath: undefined }).status, "missing");
+  const menuBarSending = () => { asked += 1; return true; };
+  assert.equal(plan({ menuBarSending, stateVariant: "t1-x" }).status, "skipped");
+  assert.equal(plan({ menuBarSending, interactive: false }).status, "skipped");
+  assert.equal(plan({ menuBarSending, notifierPath: undefined }).status, "missing");
   assert.equal(asked, 0, "none of those three reaches a probe at all");
 
   const history = recordNotify(emptyNotifyHistory(), notifyKey("任务完成 · pi-review-gate", "本轮完成"), T0);
-  assert.equal(plan({ daemonOnline, history, now: T0 + 1 }).status, "throttled");
+  assert.equal(plan({ menuBarSending, history, now: T0 + 1 }).status, "throttled");
   assert.equal(asked, 0, "a throttled banner asks nothing");
 
-  assert.equal(plan({ daemonOnline }).status, "skipped");
+  assert.equal(plan({ menuBarSending }).status, "skipped");
   assert.equal(asked, 1, "the banner that would have gone out asks exactly once");
 });
 

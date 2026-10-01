@@ -100,6 +100,13 @@ final class GateModel: ObservableObject {
     // MARK: Polling
 
     func refresh() async {
+        // THE HEARTBEAT GOES OUT FIRST, and unconditionally: it says "this app
+        // is running", which is the fact the terminal's `terminal-notifier`
+        // checks before suppressing itself (`lib/daemon-presence.ts`). It does
+        // NOT depend on the daemon answering — an app that is up while the
+        // daemon is down must still be able to claim the banners it will raise
+        // once the daemon is back.
+        touchPresence()
         guard let address = DaemonDiscovery.load() else {
             online = false
             detail = "找不到 \(DaemonPaths.stateFile) —— daemon 没在跑"
@@ -127,6 +134,21 @@ final class GateModel: ObservableObject {
             sessions = []
             questions = []
         }
+    }
+
+    /// One small file, rewritten in place: pid + when. Failures are silent on
+    /// purpose — a heartbeat that cannot be written costs a duplicate banner
+    /// (the terminal falls back to sending), never a lost one.
+    private func touchPresence() {
+        let payload: [String: Any] = [
+            "schema": 1,
+            "pid": Int(ProcessInfo.processInfo.processIdentifier),
+            "at": ISO8601DateFormatter().string(from: Date()),
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        let directory = (DaemonPaths.presenceFile as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        try? data.write(to: URL(fileURLWithPath: DaemonPaths.presenceFile), options: .atomic)
     }
 
     // MARK: Notifications (the one long-lived subscription)

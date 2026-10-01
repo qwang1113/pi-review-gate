@@ -1,5 +1,8 @@
 /**
- * IS THE DAEMON ONLINE? — THE ONE IMPLEMENTATION OF THE ONE RULE.
+ * IS THE DAEMON ONLINE, AND IS ANYBODY HOME TO RAISE THE BANNER? — the two
+ * questions the notification decision needs, each answered once.
+ *
+ * ── QUESTION ONE: THE ONLINE RULE ──
  *
  * `docs/daemon/api.md` §3 freezes what "online" means, and every consumer
  * depends on the SAME answer, because the answer is what decides whether a
@@ -15,6 +18,16 @@
  * probe that answers "offline" must stay the conservative reading, because the
  * other direction (suppressing a banner for a daemon that is not actually
  * there) is a notification nobody ever receives.
+ *
+ * ── QUESTION TWO: IS THE SENDER RUNNING ──
+ *
+ * The online rule alone was NOT enough to justify staying silent (quality
+ * round P1, 2026-10-01): the banner is raised by the menu bar APP, the daemon
+ * is auto-started by every interactive session and the app is not, so after a
+ * reboot the default state was "daemon up, app down" — silence from both
+ * sides. {@link bannerSenderPresence} reads the app's heartbeat and
+ * {@link bannerSenderOnline} is the composed question the terminal notifier
+ * asks; anything it cannot confirm answers "send", the recoverable end.
  *
  * ── WHY IT IS HERE AND NOT IN lib/daemon/state.ts ──
  *
@@ -39,9 +52,10 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 import { pidAlive } from "./session-registry.ts";
-import { DAEMON_PROBE_TIMEOUT_MS, daemonBaseUrl, daemonUserHome } from "./daemon/paths.ts";
+import { DAEMON_PROBE_TIMEOUT_MS, daemonBaseUrl, daemonUserHome, menubarPresencePath } from "./daemon/paths.ts";
 import { readDaemonState, readDaemonToken, type DaemonState } from "./daemon/state.ts";
 
 export interface DaemonProbe {
@@ -225,7 +239,70 @@ export function probeDaemonSync(opts: {
   return judgeDaemonPresence({ state: gathered.state, alive: true, token: gathered.token, health: reading });
 }
 
-/** The boolean the notification path asks for, computed by the rule above. */
-export function daemonOnlineSync(opts: { home?: string; timeoutMs?: number; health?: HealthRunner } = {}): boolean {
-  return probeDaemonSync(opts).online;
+/**
+ * How long the menu bar app's heartbeat counts.
+ *
+ * The app writes one every 5 s (its own refresh timer). Four missed beats is
+ * long enough that a busy machine does not drop a banner over a scheduling
+ * hiccup, and short enough that a quit app stops suppressing almost at once.
+ */
+export const MENUBAR_HEARTBEAT_FRESH_MS = 20_000;
+
+export interface BannerSenderPresence {
+  present: boolean;
+  /** Always filled: the fact behind the answer (logs, and a human debugging a missing banner). */
+  reason: string;
+}
+
+/**
+ * Is the app that owns the banners RUNNING? Answered from its own heartbeat.
+ *
+ * WHY THIS EXISTS (quality round P1, 2026-10-01): the rule is "one sender at a
+ * time", and the terminal side used to suppress on "the daemon is online"
+ * alone. Those are different facts — the daemon is auto-started by every
+ * interactive session, the menu bar app is not — so after a reboot the DEFAULT
+ * state was "daemon up, app down": the terminal kept silent and the app was
+ * not there, which is a notification nobody ever receives. Suppression now has
+ * to be EARNED by the sender being present, exactly as the online probe has to
+ * earn its answer.
+ *
+ * EVERY DOUBT IS `false` (missing file, unreadable JSON, a stale heartbeat, a
+ * dead pid, a clock that cannot be read): the terminal then sends, which is the
+ * recoverable end — a duplicate banner instead of silence.
+ */
+export function bannerSenderPresence(opts: { home?: string; now?: number } = {}): BannerSenderPresence {
+  const path = menubarPresencePath(opts.home ?? daemonUserHome());
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return { present: false, reason: "菜单栏 app 的心跳文件不存在或读不出来（app 没在跑）" };
+  }
+  if (!raw || typeof raw !== "object") return { present: false, reason: "菜单栏 app 的心跳不是 JSON 对象" };
+  const record = raw as Record<string, unknown>;
+  if (record.schema !== 1) return { present: false, reason: `菜单栏 app 的心跳 schema 不认识（${JSON.stringify(record.schema)}）` };
+  const pid = typeof record.pid === "number" && Number.isInteger(record.pid) ? record.pid : undefined;
+  if (pid === undefined) return { present: false, reason: "菜单栏 app 的心跳没有 pid" };
+  const at = typeof record.at === "string" ? Date.parse(record.at) : Number.NaN;
+  if (!Number.isFinite(at)) return { present: false, reason: "菜单栏 app 的心跳没有可读的时间戳" };
+  const now = opts.now ?? Date.now();
+  if (now - at > MENUBAR_HEARTBEAT_FRESH_MS) {
+    return { present: false, reason: `菜单栏 app 的心跳已过期 ${Math.round((now - at) / 1000)}s（app 大概没在跑）` };
+  }
+  if (!pidAlive(pid)) return { present: false, reason: `菜单栏 app 的 pid ${pid} 已不在` };
+  return { present: true, reason: `菜单栏 app 在跑（pid ${pid}，心跳 ${Math.round((now - at) / 1000)}s 前）` };
+}
+
+/**
+ * THE QUESTION THE TERMINAL NOTIFIER ACTUALLY ASKS: is somebody else going to
+ * raise this banner?
+ *
+ * Both halves are required and they are different facts: the daemon has to be
+ * answering (otherwise it cannot have an app attached to it at all), and the
+ * app has to be alive (otherwise nobody raises anything). Anything either side
+ * cannot confirm answers `false` — the terminal sends.
+ */
+export function bannerSenderOnline(opts: { home?: string; timeoutMs?: number; health?: HealthRunner; now?: number } = {}): boolean {
+  if (!probeDaemonSync(opts).online) return false;
+  return bannerSenderPresence(opts).present;
 }

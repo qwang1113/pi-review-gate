@@ -76,6 +76,23 @@ test("the replacement keeps the target's permissions (a 0600 file stays 0600)", 
   assert.equal(statSync(loose).mode & 0o777, 0o644);
 });
 
+test("an explicit mode is ENFORCED — on a new file and on a looser one", () => {
+  // The daemon's state / token / identity files must be 0600 even when they do
+  // not exist yet ("keep the target's mode" has nothing to keep) and even when
+  // an older build left them at the umask. This is the whole reason the second
+  // hand-rolled writer could be deleted (quality round P2, 2026-10-01).
+  const dir = scratch();
+  const fresh = join(dir, "token");
+  writeFileAtomic(fresh, "secret\n", { mode: 0o600 });
+  assert.equal(statSync(fresh).mode & 0o777, 0o600, "a new file gets the enforced mode");
+
+  const loose = join(dir, "state.json");
+  writeFileSync(loose, "old", { mode: 0o644 });
+  chmodSync(loose, 0o644);
+  writeFileAtomic(loose, "new", { mode: 0o600 });
+  assert.equal(statSync(loose).mode & 0o777, 0o600, "an explicit mode tightens, it does not preserve");
+});
+
 test("a crashed run's stale temp file is consumed, not left behind (THE atomicity pin)", () => {
   // This is the falsifiable one: reverting writeFileAtomic to an in-place
   // `writeFileSync(path, content)` leaves the pre-seeded temp file untouched,

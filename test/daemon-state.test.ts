@@ -16,10 +16,9 @@ import {
   readDaemonToken,
   tokenMatches,
   writeDaemonState,
-  writePrivateFile,
 } from "../lib/daemon/state.ts";
 import { probeDaemon } from "../lib/daemon-presence.ts";
-import { daemonStatePath, daemonTokenPath } from "../lib/daemon/paths.ts";
+import { daemonIdentityPath, daemonStatePath, daemonTokenPath } from "../lib/daemon/paths.ts";
 import { createRuntime } from "../lib/daemon/server.ts";
 import { paneRunner, scratchHome } from "./daemon-helpers.ts";
 const mode = (path: string): number => statSync(path).mode & 0o777;
@@ -76,13 +75,13 @@ test("clearDaemonState removes only the record that still describes its own pid"
   assert.equal(readDaemonState(home), undefined);
 });
 
-test("writePrivateFile creates missing parents and never leaves the temp sibling", () => {
+test("the identity file is private too, and the write leaves no temp sibling", () => {
   const home = scratchHome();
-  const path = `${home}/deep/nested/token`;
-  writePrivateFile(path, "secret\n");
-  assert.equal(readFileSync(path, "utf8"), "secret\n");
-  assert.equal(mode(path), 0o600);
-  assert.deepEqual(readdirSync(dirname(path)), ["token"], "no temp sibling survives");
+  const id = ensureDaemonIdentity(home);
+  const path = daemonIdentityPath(home);
+  assert.equal(readFileSync(path, "utf8").trim(), id);
+  assert.equal(mode(path), 0o600, "the third private file obeys the same rule");
+  assert.deepEqual(readdirSync(dirname(path)), ["identity"], "no temp sibling survives");
 });
 
 test("the state's tokenFile points into the home the daemon actually uses", () => {

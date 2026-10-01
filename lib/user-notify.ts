@@ -488,16 +488,21 @@ export function describeNotifyOutcome(outcome: UserNotifyOutcome): string {
  * is reported, not swallowed, because "I told you" and "I could not tell you"
  * are different outcomes and the second one is the user's to fix.
  *
- * ── THE DAEMON OWNS THE BANNERS WHILE IT IS ONLINE (2026-10-01) ──
+ * ── THE MENU BAR OWNS THE BANNERS WHILE IT IS RUNNING (2026-10-01) ──
  *
  * One fact, one sender (user decision, `docs/daemon/api.md` §8.1): while the
- * daemon can be confirmed online, the MENU BAR app raises the banner and this
- * side stays silent; the moment it cannot, the terminal notifier is the sender
- * again exactly as it was before the daemon existed. `daemonOnline` is a THUNK
- * for the same reason the two below are — it costs a subprocess (a curl against
- * loopback, `lib/daemon-presence.ts`), and a banner the throttle or the mode
- * gate would refuse anyway must not pay for it. It is asked BEFORE
- * `watching` because it is the cheaper of the two suppressors.
+ * menu bar app is RUNNING AND the daemon answers, it raises the banner and this
+ * side stays silent; the moment either half cannot be confirmed the terminal
+ * notifier is the sender again exactly as it was before the daemon existed.
+ * `menuBarSending` is a THUNK for the same reason the two below are — it costs
+ * a subprocess (a curl against loopback, `lib/daemon-presence.ts`), and a
+ * banner the throttle or the mode gate would refuse anyway must not pay for it.
+ * It is asked BEFORE `watching` because it is the cheaper of the two
+ * suppressors.
+ *
+ * IT IS NOT "THE DAEMON IS ONLINE" (quality round P1, 2026-10-01): the daemon
+ * is auto-started by every interactive session while the app is not, so the
+ * online fact alone suppressed a banner nobody else was going to raise.
  *
  * SUPPRESSION FAILS OPEN, ALWAYS: a probe that cannot confirm the daemon
  * (no state file, a dead pid, a timeout, no token, no curl) answers "offline",
@@ -532,11 +537,12 @@ export function planUserNotify(opts: {
    */
   watching?: (() => boolean) | undefined;
   /**
-   * Is the daemon online (`lib/daemon-presence.ts`)? Then the menu bar app is
-   * the sender and this side suppresses — including the throttle slot, which a
-   * suppressed banner does not spend (nothing was sent).
+   * Is the menu bar app going to raise this banner — i.e. is it RUNNING and is
+   * the daemon answering (`lib/daemon-presence.ts` `bannerSenderOnline`)? Then
+   * this side suppresses — including the throttle slot, which a suppressed
+   * banner does not spend (nothing was sent).
    */
-  daemonOnline?: (() => boolean) | undefined;
+  menuBarSending?: (() => boolean) | undefined;
   /**
    * The notification-centre group (the session id): the notifier removes an
    * older banner with the same id, so one session never stacks up banners.
@@ -577,11 +583,11 @@ export function planUserNotify(opts: {
   const key = notifyKey(title, body);
   const decision = decideNotify({ history: opts.history, key, now: opts.now });
   if (!decision.send) return { status: "throttled", reason: decision.reason };
-  // THE OTHER SENDER, ASKED BEFORE THE ONE THAT COSTS MORE: while the daemon
-  // is online the menu bar owns every banner, and asking it is one curl
-  // against loopback.
-  if (opts.daemonOnline?.() === true) {
-    return { status: "skipped", reason: "daemon 在线：系统通知由菜单栏 app 发（终端侧抑制）" };
+  // THE OTHER SENDER, ASKED BEFORE THE ONE THAT COSTS MORE: while the menu bar
+  // app is running it owns every banner, and asking is one curl against
+  // loopback plus one small file read.
+  if (opts.menuBarSending?.() === true) {
+    return { status: "skipped", reason: "菜单栏 app 在跑：系统通知由它发（终端侧抑制）" };
   }
   // ORDER — AFTER THE THROTTLE (quality round P2, 2026-09-18): answering
   // "is the user looking" costs three to five synchronous subprocesses, and a

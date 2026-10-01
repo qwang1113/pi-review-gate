@@ -31,6 +31,10 @@ enum DaemonPaths {
     }
     static var stateFile: String { home + "/.pi/agent/rg-daemon.json" }
     static var tokenFile: String { home + "/.pi/agent/rg-daemon.token" }
+    /// The heartbeat the terminal side reads before it agrees to stay silent
+    /// (`lib/daemon-presence.ts` `bannerSenderPresence`). Written every refresh:
+    /// "the app that owns the banners is alive as of", and nothing else.
+    static var presenceFile: String { home + "/.pi/agent/rg-daemon/menubar.json" }
 }
 
 enum DaemonDiscovery {
