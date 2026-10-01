@@ -7,7 +7,8 @@
  * 「待处理」里批准 —— 列表里出现一条任务的唯一原因，是用户批准过这份契约。
  *
  * 数据没有 SSE 帧（§13 只给了 REST），所以这一页不开第二套订阅：它依赖
- * `daemon-context` 既有的 `generation`（`refresh()` 的信号）重读。
+ * `daemon-context` 既有两个刷新时机重读 —— `generation`（`refresh()` 的信号）与
+ * `connected`（流断线重连：断线期间的事件已经丢了）。
  */
 
 import { PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
