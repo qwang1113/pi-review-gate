@@ -116,6 +116,10 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       source.onopen = () => {
         if (disposed) return;
         setConnected(true);
+        // The connection is back, so the failures on screen belong to the
+        // outage that just ended: leaving them up reports a state that is no
+        // longer true (reviewer P2, 2026-10-01).
+        setErrors([]);
         // Events that fired while the socket was down are gone: re-read the
         // snapshot instead of trusting a map that missed them.
         void loadSnapshot();

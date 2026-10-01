@@ -264,4 +264,15 @@ test("a decline row is one answer on both paths, and never travels with a picked
   writeQuestion(home, "session-1", "q-decline-mixed", at("q-decline-mixed"));
   const mixed = submitAnswer(home, { sessionId: "session-1", requestId: "q-decline-mixed", answers: ["甲", line] });
   assert.equal(mixed.ok, false, "退路行不能和别的选项一起提交");
+
+  // A blank slot is not company: the contract says empty elements are skipped,
+  // and the decline row must still count as standing alone.
+  writeQuestion(home, "session-1", "q-decline-padded", at("q-decline-padded"));
+  const padded = submitAnswer(home, {
+    sessionId: "session-1",
+    requestId: "q-decline-padded",
+    answers: [line, ""],
+  });
+  assert.equal(padded.ok, true, padded.problem ?? "空槽不应把退路行变成“和别人一起提交”");
+  assert.equal(padded.answer, line);
 });

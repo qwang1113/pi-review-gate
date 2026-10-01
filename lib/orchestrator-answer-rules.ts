@@ -191,17 +191,18 @@ export function resolveAnswerList(
   // path must not refuse the same intent — and it must not silently drop the
   // rows next to it either, hence the refusal when it arrives in company.
   const decline = request.options.find(looksLikeDeclineRow);
+  // Whitespace is not part of a row, and an empty element is no row at all:
+  // the text path trims before reading, so this path must too — and `readRow`
+  // would otherwise match an empty token against EVERY option
+  // (`option.includes("")`), turning a blank into "the only choice" on a
+  // one-option question (reviewer P2, 2026-10-01). Blank slots are dropped
+  // BEFORE the "a decline row stands alone" test, or `[decline, ""]` would be
+  // refused for company it does not have.
+  const lines = answers.map((item) => item.trim()).filter((text) => text !== "");
   const rows: string[] = [];
-  for (const item of answers) {
-    // Whitespace is not part of a row, and an empty element is no row at all:
-    // the text path trims before reading, so this path must too — and
-    // `readRow` would otherwise match an empty token against EVERY option
-    // (`option.includes("")`), turning a blank into "the only choice" on a
-    // one-option question (reviewer P2, 2026-10-01).
-    const text = item.trim();
-    if (text === "") continue;
+  for (const text of lines) {
     if (decline !== undefined && text.startsWith(decline)) {
-      if (answers.length > 1) return { ok: false, reason: "退路行不能和别的选项一起提交" };
+      if (lines.length > 1) return { ok: false, reason: "退路行不能和别的选项一起提交" };
       return { ok: true, answer: text };
     }
     const read = readRow(text, request.options);
