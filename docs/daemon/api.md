@@ -695,10 +695,11 @@ pi-gate daemon uninstall
   （判定是 store 的 `applyScheduleEdit({from:"panel"})`，server 不复写这条规则）。
 - 其它字段（含 `lastFiredAt`）⇒ `400`，文案列出面板能改的三个字段。
 - 未知 `id` ⇒ `404`；值不合法（cron 解析失败、name 形状或重名）⇒ `400`。
+- **`version` 冲突 ⇒ `400`**（「version 不匹配……有人同时改过，请重读」）：这次写入带走 handler 刚读到的 `version`（乐观锁）—— 期间调度器 stamp 过 `lastFiredAt`、或另一个面板写过，store 就拒绝而不是把更早的 `lastFiredAt` 写回去（那会让同一个时间点重复触发）。重读后再提交即可。
 
 ### 13.5 `DELETE /api/schedules/:id`
 
-成功 `200`：`{ ok: true, task, version }`（`task` 是被删的那一条）。未知 `id` ⇒ `404`。
+成功 `200`：`{ ok: true, task, version }`（`task` 是被删的那一条）。未知 `id` ⇒ `404`；`version` 与刚读到的不符 ⇒ `400`（同 §13.4 的乐观锁）。
 删除**不动台账**：它名下未结算的运行仍会按 §13.7 结算（否则那个 repo 会被永远占着）。
 
 ### 13.6 `GET /api/schedules/:id/runs?limit=`
