@@ -227,6 +227,23 @@ test("a structured answers list is read row by row — option text may hold the 
   const letters = submitAnswer(home, { sessionId: "session-1", requestId: "q-letters", answers: ["A", "B"] });
   assert.equal(letters.ok, true, letters.problem ?? "字母也应当被认出来");
   assert.equal(letters.answer, [options[0], options[1]].join(MULTI_ANSWER_SEPARATOR));
+
+  // Whitspace around an element is not part of the row, and an empty element is
+  // no row at all — the text path trims, so this one must too.
+  writeQuestion(home, "session-1", "q-spaced", at("q-spaced"));
+  const spaced = submitAnswer(home, {
+    sessionId: "session-1",
+    requestId: "q-spaced",
+    answers: [`  ${options[0]}  `, ""],
+  });
+  assert.equal(spaced.ok, true, spaced.problem ?? "首尾空白应当被忽略");
+  assert.equal(spaced.answer, options[0]);
+
+  // An empty element must not become “the only choice” on a one-option question
+  // (`readRow` would match it against every option, and there is just one).
+  writeQuestion(home, "session-1", "q-blank", question({ requestId: "q-blank", options: ["唯一"], recommended: "唯一" }));
+  const blank = submitAnswer(home, { sessionId: "session-1", requestId: "q-blank", answers: [""] });
+  assert.equal(blank.ok, false, "空元素不是一行");
 });
 
 test("a decline row is one answer on both paths, and never travels with a picked row", () => {

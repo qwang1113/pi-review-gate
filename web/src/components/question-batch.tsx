@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
-import { QuestionCard, acceptsDecline, draftToAnswer, type QuestionDraft } from "@/components/question-card";
+import { QuestionCard, acceptsDecline, chosenRows, draftToAnswer, type QuestionDraft } from "@/components/question-card";
 import { describeError } from "@/lib/api";
 import { useDaemon } from "@/lib/daemon-context";
 import type { DaemonQuestion } from "@/lib/types";
@@ -59,7 +59,7 @@ export function QuestionBatch({
         // The text a free-text question carries is `chosen[0]`, so clearing the
         // box leaves `[""]` behind — a length nobody should read as "answered"
         // (the daemon would refuse the empty answer).
-        if (draft.chosen.some((item) => item.trim() !== "")) return false;
+        if (chosenRows(draft).length > 0) return false;
         // Nothing picked is only an answer when the question carries the gate's
         // decline row — without it, free text is refused by the daemon and the
         // user would get a rejection instead of a submitted answer.

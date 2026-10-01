@@ -193,12 +193,18 @@ export function resolveAnswerList(
   const decline = request.options.find(looksLikeDeclineRow);
   const rows: string[] = [];
   for (const item of answers) {
+    // Whitespace is not part of a row, and an empty element is no row at all:
+    // the text path trims before reading, so this path must too — and
+    // `readRow` would otherwise match an empty token against EVERY option
+    // (`option.includes("")`), turning a blank into "the only choice" on a
+    // one-option question (reviewer P2, 2026-10-01).
     const text = item.trim();
+    if (text === "") continue;
     if (decline !== undefined && text.startsWith(decline)) {
       if (answers.length > 1) return { ok: false, reason: "退路行不能和别的选项一起提交" };
       return { ok: true, answer: text };
     }
-    const read = readRow(item, request.options);
+    const read = readRow(text, request.options);
     if ("reason" in read) return { ok: false, reason: `多选答案里有一段读不出来：${read.reason}` };
     if (!rows.includes(read.row)) rows.push(read.row);
   }

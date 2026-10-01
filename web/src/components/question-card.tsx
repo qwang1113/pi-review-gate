@@ -50,6 +50,17 @@ export interface QuestionDraft {
   reason: string;
 }
 
+/**
+ * THE ROWS THIS DRAFT ACTUALLY CHOSE. One definition, because "is this question
+ * answered?" (question-batch) and "what do I submit?" (draftToAnswer) must
+ * never disagree — a blank row is not a choice, and a free-text box somebody
+ * cleared arrives as `[""]`. They disagreed once already: the panel accepted
+ * the draft as answered and then submitted an empty answer.
+ */
+export function chosenRows(draft: QuestionDraft): string[] {
+  return draft.chosen.filter((item) => item.trim() !== "");
+}
+
 export function QuestionCard({
   question,
   draft,
@@ -212,8 +223,7 @@ export function draftToAnswer(
   draft: QuestionDraft,
 ): { value: string | string[]; reason?: string } {
   const reason = draft.reason.trim() === "" ? undefined : draft.reason.trim();
-  // A blank row is not a choice: a cleared free-text box arrives as `[""]`.
-  const chosen = draft.chosen.filter((item) => item.trim() !== "");
+  const chosen = chosenRows(draft);
   if (chosen.length === 0) {
     const row = declineRowOf(question) ?? ESCAPE_HATCH_LABEL;
     return { value: `${row}：${reason ?? ""}`, reason };
