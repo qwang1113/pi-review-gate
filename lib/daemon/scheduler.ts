@@ -47,7 +47,11 @@
  * is what lets a permanently broken home recover rather than grow forever.
  * The window this leaves is the one between the stamp landing and the append:
  * a process killed there leaves a RUNNING session with no `run-started` line,
- * so a restart neither settles it nor counts it as holding its repo. The other
+ * so a restart neither settles it nor finds it in the ledger. THAT SESSION
+ * STILL HOLDS ITS REPO, though — in the way the ledger cannot see: it writes
+ * the checkout's presence heartbeat, which is what `liveSessionHolder` refuses
+ * later runs on (and what makes the user's own new session in that repo be
+ * refused too, until the process is gone). The other
  * order is the fail-spin the quality round measured — one real session per
  * tick, forever — which is strictly worse.
  *
