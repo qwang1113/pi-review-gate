@@ -4,8 +4,8 @@
 // WHAT IT IS: a resident menu bar icon that shows what the daemon knows —
 // online/offline, the summary line, one row per active session, the pending
 // questions — opens the web panel on a session's page, raises the system
-// banners (that is the only sender while the daemon runs, see
-// Notifications.swift), and can start/stop the daemon.
+// banners (the only sender while it runs, can post, and the daemon answers —
+// see Notifications.swift), and can start/stop the daemon.
 //
 // WHAT IT IS NOT: a second source of truth. Every row is a value out of the
 // daemon's HTTP API; when the daemon cannot be reached the menu says 「未运行」
@@ -21,6 +21,7 @@
 
 import AppKit
 import SwiftUI
+import UserNotifications
 
 @main
 struct PiGateApp: App {
@@ -141,24 +142,32 @@ final class GateModel: ObservableObject {
     /// cannot be written costs a duplicate banner (the terminal falls back to
     /// sending), never a lost one.
     ///
-    /// `canPost` IS IN THE FILE, NOT ASSUMED BY ITS EXISTENCE (reviewer P1,
-    /// 2026-10-01): a running app whose notification permission was denied
-    /// (or whose posts fail) raises no banner, and a reader that took "the app
-    /// is running" for "the app is sending" would suppress the terminal too.
-    /// The file therefore states the fact, and `lib/daemon-presence.ts`
-    /// requires it — which also means a heartbeat written by an app built
-    /// before this field existed FAILS OPEN and the terminal keeps sending.
+    /// `canPost` COMES FROM THE SYSTEM, ASKED EVERY TICK (reviewer Nit,
+    /// 2026-10-01): `getNotificationSettings` is the authoritative answer to
+    /// "may this app post", and asking it here is also what notices a
+    /// permission granted or revoked in System Settings without a relaunch.
+    /// Inferring it from an `add` result would rest on an unpinned assumption
+    /// (that `add` reports an error while unauthorized) and could flip the
+    /// claim back on for an app that delivers nothing — which is the exact
+    /// silence the terminal's suppression must never cause (reviewer P1).
     private func touchPresence() {
-        let payload: [String: Any] = [
-            "schema": 1,
-            "pid": Int(ProcessInfo.processInfo.processIdentifier),
-            "at": ISO8601DateFormatter().string(from: Date()),
-            "canPost": UserNotifier.shared.canPost,
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
-        let directory = (DaemonPaths.presenceFile as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-        try? data.write(to: URL(fileURLWithPath: DaemonPaths.presenceFile), options: .atomic)
+        let pid = Int(ProcessInfo.processInfo.processIdentifier)
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let payload: [String: Any] = [
+                "schema": 1,
+                "pid": pid,
+                "at": ISO8601DateFormatter().string(from: Date()),
+                // `.authorized` is the only status under which a banner reaches
+                // the screen; `.provisional` never applies (it is requested
+                // nowhere in this app) and everything else means "do not claim
+                // it" — the terminal then sends.
+                "canPost": settings.authorizationStatus == .authorized,
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+            let directory = (DaemonPaths.presenceFile as NSString).deletingLastPathComponent
+            try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+            try? data.write(to: URL(fileURLWithPath: DaemonPaths.presenceFile), options: .atomic)
+        }
     }
 
     // MARK: Notifications (the one long-lived subscription)

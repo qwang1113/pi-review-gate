@@ -1,6 +1,7 @@
 // THE BANNER, AND THE CLICK THAT COMES BACK TO THE PANEL.
 //
-// The app is the ONLY sender while the daemon is online (user decision,
+// The app is the ONLY sender while it is running, able to post (its own
+// notification permission), AND the daemon is online (user decision,
 // `docs/daemon/api.md` §8.1): the terminal's `terminal-notifier` suppresses
 // itself in exactly that window (`lib/daemon-presence.ts`). Two consequences
 // follow from that, and both are this file's job:
@@ -27,29 +28,20 @@ import UserNotifications
 final class UserNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = UserNotifier()
 
-    /// CAN THIS APP ACTUALLY RAISE A BANNER? — the last thing it learned, and
-    /// the fact the terminal side needs (`PiGateApp.touchPresence` writes the
-    /// heartbeat only while this is true, and `lib/daemon-presence.ts` reads
-    /// that heartbeat before it agrees to stay silent).
+    /// Ask once, at launch — this is the call that raises the permission
+    /// dialog.
     ///
-    /// It is not just "the permission dialog was accepted": an `add` that FAILS
-    /// (permission revoked in System Settings, Notification Centre refusing
-    /// us) means no banner either, and an app that keeps claiming the banners
-    /// while posting nothing would silence both senders at once. `false` is the
-    /// fail-open end here too — the terminal takes over.
-    private(set) var canPost = false
-
+    /// THE ANSWER IS NOT RECORDED HERE (reviewer Nit, 2026-10-01): the app's
+    /// ability to deliver is read from the system on every heartbeat instead
+    /// (`PiGateApp.touchPresence` asks `getNotificationSettings`), so a
+    /// permission granted — or revoked — later is picked up without a relaunch,
+    /// and nothing has to be inferred from an `add` result.
     func setUp() {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-            DispatchQueue.main.async { self.canPost = granted }
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in
+            // The status, not this callback, is what the heartbeat reads.
         }
-    }
-
-    /// Record what one post attempt learned about our ability to send.
-    private func notePost(_ error: Error?) {
-        DispatchQueue.main.async { self.canPost = (error == nil) }
     }
 
     /// Post one banner. Called only after the daemon CLAIMED the key.
@@ -64,11 +56,14 @@ final class UserNotifier: NSObject, UNUserNotificationCenterDelegate {
             content: content,
             trigger: nil
         )
-        UNUserNotificationCenter.current().add(request) { [weak self] error in
+        UNUserNotificationCenter.current().add(request) { _ in
             // Silent by design: a denied permission, a full Notification Center
             // or a missing bundle id are all "no banner", never "no app".
-            // Silent, but not unobserved — see `notePost`.
-            self?.notePost(error)
+            // Whether this app MAY post is not decided from here — the
+            // heartbeat asks the system for the permission status instead
+            // (reviewer Nit, 2026-10-01): an `add` that quietly succeeded while
+            // permission was denied would otherwise claim a sender that cannot
+            // deliver.
         }
     }
 

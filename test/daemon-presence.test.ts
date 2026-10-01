@@ -227,6 +227,14 @@ test("the banner sender is the app's own heartbeat — and every doubt means it 
   );
   assert.equal(bannerSenderPresence({ home, now }).present, false, "no canPost field ⇒ cannot be trusted");
 
+  // THE REASON MUST MATCH THE FACTS (reviewer Nit, 2026-10-01): "the app quit
+  // while it could not post" is the ordinary post-mortem state, and answering it
+  // with "the app is running but cannot post" would contradict what was just
+  // measured — the reason is this module's debugging surface.
+  heartbeat(home, now - MENUBAR_HEARTBEAT_FRESH_MS - 5_000, { canPost: false });
+  assert.match(bannerSenderPresence({ home, now }).reason, /已过期/, "staleness is reported before the claim is judged");
+  assert.doesNotMatch(bannerSenderPresence({ home, now }).reason, /发不出横幅/);
+
   writeFileSync(menubarPresencePath(home), "not json", "utf8");
   assert.equal(bannerSenderPresence({ home, now }).present, false, "garbage is not a licence to stay silent");
 });

@@ -435,7 +435,7 @@ daemon 据此不再列出它。
 `~/.pi/agent/rg-daemon/menubar.json`（`{schema:1, pid, at, canPost}`，不含任何秘密），
 app 活着时每 5 s 重写一次。`lib/daemon-presence.ts` 的 `bannerSenderPresence` 读它，
 四条全过才算发送者在场：新鲜窗口 **20 s**、pid **是正整数且活着**、
-**`canPost === true`**（app 自报的投递能力：通知权限被拒、或 `add` 失败 ⇒ `false`）。
+**`canPost === true`**（app 每次刷新都问系统要的授权状态：`getNotificationSettings` 不是 `.authorized` ⇒ `false`）。
 `canPost` 这个字段是 reviewer P1（2026-10-01）加的：**app 在跑 ≠ app 发得出来**，
 只看见进程活着就抑制，会得到同一个「两边都不发」的后果；字段缺席（旧版 app 写的心跳）也按 `false` 算，
 方向永远是「终端补上」。

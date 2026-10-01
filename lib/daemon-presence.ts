@@ -290,20 +290,25 @@ export function bannerSenderPresence(opts: { home?: string; now?: number } = {})
   if (pid === undefined) return { present: false, reason: "菜单栏 app 的心跳没有可用的 pid（必须是正整数）" };
   const at = typeof record.at === "string" ? Date.parse(record.at) : Number.NaN;
   if (!Number.isFinite(at)) return { present: false, reason: "菜单栏 app 的心跳没有可读的时间戳" };
-  // A RUNNING APP IS NOT A SENDING APP (reviewer P1, 2026-10-01): the banner is
-  // raised through UNUserNotificationCenter, so an app whose permission was
-  // denied — or whose `add` failed — raises nothing while sitting there looking
-  // healthy. The app states that fact itself and this is where it is required;
-  // a heartbeat written before the field existed is also refused, which is the
-  // fail-open direction for a mixed-version pair.
-  if (record.canPost !== true) {
-    return { present: false, reason: "菜单栏 app 在跑，但它报告自己发不出横幅（通知权限被拒或投递失败）" };
-  }
   const now = opts.now ?? Date.now();
   if (now - at > MENUBAR_HEARTBEAT_FRESH_MS) {
     return { present: false, reason: `菜单栏 app 的心跳已过期 ${Math.round((now - at) / 1000)}s（app 大概没在跑）` };
   }
   if (!pidAlive(pid)) return { present: false, reason: `菜单栏 app 的 pid ${pid} 已不在` };
+  // A RUNNING APP IS NOT A SENDING APP (reviewer P1, 2026-10-01): the banner is
+  // raised through UNUserNotificationCenter, so an app whose permission was
+  // denied raises nothing while sitting there looking healthy. The app states
+  // that fact itself and this is where it is required; a heartbeat written
+  // before the field existed is also refused, which is the fail-open direction
+  // for a mixed-version pair.
+  //
+  // LAST, AFTER the two liveness checks (reviewer Nit, 2026-10-01): a heartbeat
+  // that is stale or dead is the ordinary POST-MORTEM state, and answering it
+  // with "the app is running but cannot post" would be a reason that contradicts
+  // the facts — this module's `reason` is its debugging surface.
+  if (record.canPost !== true) {
+    return { present: false, reason: "菜单栏 app 在跑，但它报告自己发不出横幅（通知权限被拒或投递失败）" };
+  }
   return { present: true, reason: `菜单栏 app 在跑（pid ${pid}，心跳 ${Math.round((now - at) / 1000)}s 前）` };
 }
 

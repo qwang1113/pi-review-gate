@@ -71,12 +71,14 @@
  * ── AND ONE SENDER AT A TIME (2026-10-01) ──
  *
  * The daemon grew a resident menu bar app, and two senders raising the same
- * banner is one too many. So while the daemon can be confirmed ONLINE
- * (`lib/daemon-presence.ts`, the one rule in `docs/daemon/api.md` §3) the menu
- * bar is the only sender and this module suppresses; the moment the probe
- * cannot confirm it, this path is exactly what it was before the daemon
- * existed. The check lives in {@link planUserNotify} (a thunk, after the
- * throttle) and NOT in the wording layer, so every caller inherits it.
+ * banner is one too many. So while the menu bar app is RUNNING AND ABLE TO
+ * POST and the daemon can be confirmed ONLINE
+ * (`lib/daemon-presence.ts` `bannerSenderOnline`, the one rule in
+ * `docs/daemon/api.md` §8.1) the menu bar is the only sender and this module
+ * suppresses; the moment either half cannot be confirmed, this path is exactly
+ * what it was before the daemon existed. The check lives in
+ * {@link planUserNotify} (a thunk, after the throttle) and NOT in the wording
+ * layer, so every caller inherits it.
  */
 
 import type { TaskMode } from "./task-mode.ts";

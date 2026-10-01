@@ -101,14 +101,15 @@ open menubar/build/PiGate.app
 
 | 情况 | 谁发通知 |
 | --- | --- |
-| **菜单栏 app 在跑、且 daemon 在线** | **菜单栏 app** 独家发；终端侧 `terminal-notifier` 自己抑制 |
-| 其余任何情况（app 没跑 / daemon 不在线 / 读不出来） | 终端侧照旧发（和没有 daemon 时完全一样） |
+| **菜单栏 app 在跑、它自己发得出来（`canPost`）、且 daemon 在线** | **菜单栏 app** 独家发；终端侧 `terminal-notifier` 自己抑制 |
+| 其余任何情况（app 没跑 / app 发不出来 / daemon 不在线 / 读不出来） | 终端侧照旧发（和没有 daemon 时完全一样） |
 
-两条判定：**daemon 在线**是冻结的那一条（`docs/daemon/api.md` §3：state 文件可解析 + pid 活着 +
-带 token 的 `/api/health` 1 秒内 200）；**app 在跑**是 app 自己写的心跳
-（`~/.pi/agent/rg-daemon/menubar.json`，每 5 s 一次，20 s 内算新鲜）。**任一条读不出来一律按「不是它发」处理**
-—— 因为「没发出来」比「多发一条」贵得多。所以把 daemon 停掉、或者把菜单栏 app 关掉，
-终端通知立刻就恢复了。
+三条判定：**daemon 在线**是冻结的那一条（`docs/daemon/api.md` §3：state 文件可解析 + pid 活着 +
+带 token 的 `/api/health` 1 秒内 200）；**app 在跑而且发得出来**是 app 自己写的心跳
+（`~/.pi/agent/rg-daemon/menubar.json`，每 5 s 一次，20 s 内算新鲜；pid 要是正整数且活着，`canPost` 要为真）。
+**任一条读不出来一律按「不是它发」处理**
+—— 因为「没发出来」比「多发一条」贵得多。所以把 daemon 停掉、把菜单栏 app 关掉、
+或者在系统设置里撤掉它的通知权限，终端通知立刻就恢复了。
 
 事件与去重：
 
@@ -120,7 +121,7 @@ open menubar/build/PiGate.app
   台账是共享的，所以两个发送方不会各发一条同样的消息。
 - 点击通知跳到该会话的面板页（`/sessions/<id>`）。
 - **通知权限被拒绝时静默降级**：菜单栏与其他功能照常，只是没有横幅 —— 而且**终端侧会接管**：
-  app 把自己的投递能力写进心跳（`canPost`，权限被拒 / `add` 失败就是 `false`），
+  app 把系统的授权状态写进心跳（`canPost`，每次都重新问 `getNotificationSettings`），
   终端侧只在这一项为真时才抑制，所以「权限关掉的 app」不会把终端也一起锁死。
 - **app 关掉也还有横幅**：app 每次刷新（5 秒）写一个心跳，终端侧只在「心跳新鲜 + pid 活着 + `canPost` 为真 + daemon 在线」
   时才抑制；把 app 退出（或撤掉它的通知权限）后，最多 20 秒终端通知就接管了 —— 两边都不会出现「谁都发不出来」的窗口。

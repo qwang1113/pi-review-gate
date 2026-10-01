@@ -77,8 +77,8 @@ export interface UserNotifyRuntimeDeps {
   runTmux: TmuxRunner;
   now?(): number;
   /**
-   * Is the menu bar app the sender ({@link bannerSenderOnline}) — running, with
-   * the daemon answering behind it?
+   * Is the menu bar app the sender ({@link bannerSenderOnline}) — running AND
+   * able to post, with the daemon answering behind it?
    *
    * Injected so a test never probes a real daemon; the DEFAULT is the real sync
    * probe (`lib/daemon-presence.ts`), because the terminal side has to know

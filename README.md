@@ -1021,10 +1021,11 @@ same spawn (one implementation), so there is never a second daemon:
 | manual | `pi-gate daemon start` / `stop` / `status` | one-off control. `start` probes first (already online ⇒ print it, exit 0), `stop` refuses to signal a pid the token-bearing health check does not confirm as the daemon |
 | from a session | nothing — it happens by itself | the gate starts it in the background from `session_start` when it cannot be confirmed online. A failure logs one line and **cannot affect the session** |
 
-**One sender at a time (user decision).** While **the menu bar app is running** *and* the daemon can
-be confirmed online, the app is the only sender of system notifications and the terminal's
-`terminal-notifier` suppresses itself; in every other case (app not running, daemon unreachable,
-either fact unreadable) the terminal sends exactly as before. The daemon rule
+**One sender at a time (user decision).** While **the menu bar app is running and able to post** (its
+own notification permission — stated in its heartbeat) *and* the daemon can be confirmed online, the
+app is the only sender of system notifications and the terminal's `terminal-notifier` suppresses
+itself; in every other case (app not running, app unable to post, daemon unreachable, any fact
+unreadable) the terminal sends exactly as before. The daemon rule
 (`state file parses + pid alive + token-bearing /api/health answers 200 within 1s`, `docs/daemon/api.md`
 §3) has ONE implementation — `lib/daemon-presence.ts` — asked asynchronously by the CLI and
 **synchronously** (system curl, token never in argv) by the notification path, which runs inside a
