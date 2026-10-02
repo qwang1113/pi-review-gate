@@ -171,10 +171,45 @@ export interface ScheduleRunStarted {
   worktree?: string;
   branch?: string;
   base?: string;
-  /** The daemon's own tmux session the window was opened in. */
+  /**
+   * The daemon's own tmux session the window was opened in.
+   *
+   * SUPERSEDED BY {@link ScheduleRunWindow} (2026-10-03), and kept because
+   * records that already carry them are still out there: since the `run-started`
+   * line must exist BEFORE the session starts (contract adoption reads it), the
+   * coordinates — which only exist once the launch has returned — no longer fit
+   * in the same line. New runs write a `run-window` record instead.
+   */
   scopeSession?: string;
   /** The tmux window id (`@N`) `launchTask` created for this run. */
   windowId?: string;
+}
+
+/**
+ * WHERE THE RUN'S WINDOW IS — the line that cannot be written until a moment
+ * AFTER `run-started` (2026-10-03).
+ *
+ * The daemon starts these sessions, so the daemon is what must close their
+ * windows: an ordinary session holds its checkout until its PROCESS exits, and
+ * a settled run whose window stays open keeps a live process in that checkout
+ * (`lib/daemon/control.ts` `closeRunWindowAt`). The pane usually answers where
+ * the window is — but a session whose pane lost `@rg_sid` has no coordinates to
+ * read anywhere else, which is why they are recorded at all (t7, 2026-10-02).
+ *
+ * ONE LINE PER RUN, written best-effort: a launch that reported no coordinates
+ * writes none, and a run with neither this record nor a pane is closed the only
+ * remaining way — tmux reclaims the window when its process exits.
+ */
+export interface ScheduleRunWindow {
+  kind: "run-window";
+  runId: string;
+  taskId: string;
+  sessionId: string;
+  at: string;
+  /** The daemon's own tmux session the window was opened in. */
+  scopeSession: string;
+  /** The tmux window id (`@N`) `launchTask` created for this run. */
+  windowId: string;
 }
 export interface ScheduleRunSettled {
   kind: "run-settled"; runId: string; taskId: string; at: string;
@@ -191,9 +226,9 @@ export interface ScheduleRunSettled {
 }
 export interface ScheduleRunSkipped { kind: "run-skipped"; taskId: string; at: string; reason: string }
 
-export type ScheduleRunRecord = ScheduleRunStarted | ScheduleRunSettled | ScheduleRunSkipped;
+export type ScheduleRunRecord = ScheduleRunStarted | ScheduleRunSettled | ScheduleRunSkipped | ScheduleRunWindow;
 
-const RUN_KINDS: readonly string[] = Object.freeze(["run-started", "run-settled", "run-skipped"]);
+const RUN_KINDS: readonly string[] = Object.freeze(["run-started", "run-settled", "run-skipped", "run-window"]);
 
 // ---------------------------------------------------------------------------
 // reading and writing the table
@@ -708,27 +743,38 @@ export function readScheduleRuns(home: string, options: ReadScheduleRunsOptions 
 }
 
 /**
- * ONE PAGE OF A TASK'S HISTORY, COUNTED FROM THE NEWEST RECORD BACKWARDS.
+ * ONE PAGE OF A TASK'S HISTORY, WALKED FROM THE NEWEST RECORD BACKWARDS.
  *
- * `offset` skips that many of the NEWEST records, which is what makes the
- * panel's "load older" walk the whole ledger without a cursor in the client: a
- * ledger is append-only and ordered, so the count from either end is stable
- * while the panel reads (a new run may append at the FRONT, and it can shift
- * what the next page contains — but it can never make the walk skip a record
- * that was already behind the page the reader is holding).
+ * WHY THE CURSOR IS AN INDEX FROM THE FRONT, NOT A DISTANCE FROM THE END
+ * (2026-10-03, reviewer P1): the ledger grows WHILE a reader pages through it —
+ * a run starts, a run settles — and "the 25 newest records after skipping 25"
+ * means something different after each append, so the reader sees records twice
+ * and (once a limit is in play) can miss some entirely. An index counted from
+ * the FIRST record of the task is stable under appends, which is the one thing
+ * the ledger guarantees: it is append-only and nothing is ever removed from it.
  *
- * `total` comes back with the page so the caller can say how much history there
- * is and whether anything older remains — the fact `limit` alone cannot carry.
+ * `nextOffset` comes back with every page — callers do not compute it, and a
+ * reader that stops when it reaches 0 has seen every record exactly once. A
+ * first page (no `offset`) starts at the newest record and names the cursor for
+ * everything older; `total` rides along so a caller can say how much history
+ * there is.
  */
 export function readScheduleRunPage(
   home: string,
-  options: { taskId: string; limit: number; offset: number },
-): { runs: ScheduleRunRecord[]; total: number } {
+  options: { taskId: string; limit: number; offset?: number },
+): { runs: ScheduleRunRecord[]; total: number; nextOffset: number } {
   const all = readScheduleRuns(home, { taskId: options.taskId });
   const total = all.length;
-  const offset = Math.max(0, Math.floor(options.offset));
   const limit = Math.max(0, Math.floor(options.limit));
-  const end = Math.max(0, total - offset);
+  // A CURSOR PAST THE END IS AN EMPTY PAGE, not a repeat of the newest records:
+  // it can only be stale (the ledger was trimmed by hand, a caller kept one from
+  // another task), and answering it with records the reader already saw is
+  // exactly the failure this cursor exists to prevent.
+  const requested = options.offset === undefined ? undefined : Math.max(0, Math.floor(options.offset));
+  if (requested !== undefined && requested > total) {
+    return { runs: [], total, nextOffset: 0 };
+  }
+  const end = requested ?? total;
   const start = Math.max(0, end - limit);
-  return { runs: all.slice(start, end), total };
+  return { runs: all.slice(start, end), total, nextOffset: start };
 }

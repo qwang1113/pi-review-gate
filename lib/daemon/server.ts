@@ -331,10 +331,11 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
           // `run-settled`) rather than by a second next-run field.
           nextRunAt: dueDecision({ task, now: at, openRun: false }).scheduledAt?.toISOString() ?? null,
           describe: describeCron(task.cron),
-          // `run-started` is not a RESULT: the panel shows what happened, not
-          // that something is (or was) happening.
+          // `run-started` is not a RESULT, and `run-window` is only a
+          // coordinate: the panel shows what happened, not that something is
+          // (or was) happening.
           lastRuns: (byTask.get(task.id) ?? [])
-            .filter((record) => record.kind !== "run-started")
+            .filter((record) => record.kind === "run-settled" || record.kind === "run-skipped")
             .slice(-LAST_RUNS_SHOWN),
         }));
         return ok({ schema: DAEMON_SCHEMA, now: at.toISOString(), tasks });
@@ -429,16 +430,22 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
         const found = taskById(opts.home, ctx.params.id!);
         if ("reply" in found) return found.reply;
         const limit = Math.min(Math.max(numberParam(ctx.query.get("limit")) ?? DEFAULT_RUNS_LIMIT, 1), MAX_RUNS_LIMIT);
-        // `offset` SKIPS THAT MANY OF THE NEWEST RECORDS (2026-10-03): with it
-        // the panel can walk the whole history instead of a window of 500 — and
-        // `total` is what tells it whether anything older remains.
-        const offset = Math.max(numberParam(ctx.query.get("offset")) ?? 0, 0);
-        const page = readScheduleRunPage(opts.home, { taskId: found.task.id, limit, offset });
+        // `offset` IS A STABLE CURSOR (2026-10-03): the index of the next record
+        // to read, counted from the task's FIRST one — not a distance from the
+        // newest, which moves every time a run appends (reviewer P1). Omitted ⇒
+        // the newest page; the reply always carries `nextOffset` for the older
+        // one, and 0 means the walk is complete.
+        const requested = numberParam(ctx.query.get("offset"));
+        const page = readScheduleRunPage(opts.home, {
+          taskId: found.task.id,
+          limit,
+          ...(requested === undefined ? {} : { offset: Math.max(requested, 0) }),
+        });
         return ok({
           schema: DAEMON_SCHEMA,
           taskId: found.task.id,
           total: page.total,
-          offset,
+          nextOffset: page.nextOffset,
           runs: page.runs,
         });
       },

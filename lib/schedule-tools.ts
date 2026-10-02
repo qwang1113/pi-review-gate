@@ -185,7 +185,9 @@ function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], n
   // `dueDecision` refuses to start one while `openRun` is true — so "the newest
   // line is a `run-started`" and "this task has an unsettled run" cannot
   // diverge. `run-skipped` lines carry no run, so they are not part of the answer.
-  const lastRun = runs.filter((r) => r.kind !== "run-skipped").at(-1);
+  // `run-window` is a SUPPLEMENT to a run, not a run: only these two kinds are
+  // one, and only a `run-started` can be "the newest thing that happened".
+  const lastRun = runs.filter((r) => r.kind === "run-started" || r.kind === "run-settled").at(-1);
   const openRun = lastRun?.kind === "run-started";
   const decision = dueDecision({ task, now, openRun });
   const slot = decision.scheduledAt;

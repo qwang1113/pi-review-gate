@@ -186,6 +186,17 @@ export interface LaunchTaskInput {
    */
   workdir?: string;
   /**
+   * THE SESSION ID, WHEN THE CALLER HAS ALREADY DECIDED IT (2026-10-03).
+   *
+   * The scheduler writes the run's `run-started` line BEFORE it launches, so
+   * the session can adopt its contract the moment it starts — adoption asks the
+   * ledger whether this session IS this run, and writing that line afterwards
+   * left a real window (pi's cold start is seconds, the write is a line) in
+   * which a run could start with no contract at all. Omitted ⇒ a fresh uuid,
+   * which is what every other caller wants.
+   */
+  sessionId?: string;
+  /**
    * Extra environment for the new session.
    *
    * The scheduler's run identity (`RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`) rides
@@ -323,7 +334,7 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
   // WHERE THE SESSION WORKS — the run's own checkout when it was given one.
   const workdir = (input.workdir ?? repo).trim() === "" ? repo : (input.workdir ?? repo).trim();
   const scope = daemonTmuxScope({ home: deps.home, identity: daemonId, runTmux: deps.runTmux, anchorRepo: repo });
-  const sessionId = randomUUID();
+  const sessionId = (input.sessionId ?? "").trim() === "" ? randomUUID() : (input.sessionId ?? "").trim();
   const opening = [taskText];
   if (name !== "") {
     opening.push("", `本会话的名字定为 \`${name}\`：请先调用 name_session({name:"${name}"}) 把它登记上，再开始干活。`);

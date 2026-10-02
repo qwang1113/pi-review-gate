@@ -678,7 +678,7 @@ pi-gate daemon uninstall
 | `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、因永久障碍跳过、起不来都算）—— 下一个时间点从这里数。**暂时起不来的那一次不写它**：那一槽留着，下次 tick 再试（§13.7） |
 | `nextRunAt` | string \| null | **派生**：这个任务**按时间表下一个要处理的** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**它可能落在过去**（2026-10-03 起）：到点了但还没跑成（daemon 当时不在跑，或本任务自己还有一次运行没结算）时，这里就是**那一槽**，daemon 的下一次 tick 会跑它 —— 「迟到」不再是跳过的理由，也不再有 10 分钟的宽限窗口。**这是按时间表算的，不看「这个任务是不是还有一次运行没结算」**（§13.6）：那种情况下这个槽会被推迟，原因写在 `GET /api/schedules/:id/runs` 里 —— 最后一条 `run-started` 没有对应的 `run-settled`。`enabled:false`、cron 非法、或 `createdAt` 读不出时间时是 `null` |
 | `describe` | string | **派生**：`describeCron` 的一行人话，如 `每天 09:00` |
-| `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-started` 不是结果，不列） |
+| `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-started` 与 `run-window` 都不是结果，不列） |
 
 ### 13.2 `GET /api/schedules`
 
@@ -723,13 +723,17 @@ pi-gate daemon uninstall
 
 ### 13.6 `GET /api/schedules/:id/runs?limit=`
 
-`200`：`{ schema: 1, taskId, total, offset, runs: [ … ] }` —— 该任务的台账，旧→新；
-`limit` 默认 **50**、下限 1、上限 **500**；`offset` 从**最新一条往回数**、跳过这么多条（面板的「加载更早」用它走完整个历史，
-不受 500 的上限限制），`total` 是这个任务台账里的总条数。未知 `id` ⇒ `404`。
+`200`：`{ schema: 1, taskId, total, nextOffset, runs: [ … ] }` —— 该任务的台账，旧→新；
+`limit` 默认 **50**、下限 1、上限 **500**；`total` 是这个任务台账里的总条数。
+分页用的是一个**对追加稳定的游标**（2026-10-03，reviewer P1）：不带 `offset` 拿最新一页，响应里的 `nextOffset`
+就是「更早那一页」要原样带回来的 `offset`（它是从**最早一条**数的索引 —— 台账只追加、不删，所以翻页期间新起的运行
+不会让遍历重复或漏掉）；`nextOffset` 为 `0` 表示已经到最早一条。`offset` 超过总数（陈旧游标）⇒ 一个空页，不是错误。
+未知 `id` ⇒ `404`。
 
 | `kind` | 字段 |
 | --- | --- |
-| `run-started` | `runId`, `taskId`, `sessionId`, `at`，以及 `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 路径、它所在的分支、切出来的 commit）与 `scopeSession` / `windowId`（发起回执里的窗口坐标，可选；见下） |
+| `run-started` | `runId`, `taskId`, `sessionId`, `at`，以及 `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 路径、它所在的分支、切出来的 commit）。**这条记录在会话起来之前就写**（会话在 `session_start` 靠它继承契约），所以它不带窗口坐标；更旧的记录可能自带 `scopeSession` / `windowId` |
+| `run-window` | `runId`, `taskId`, `sessionId`, `at`, `scopeSession`, `windowId` —— 这次运行的窗口坐标，在 `run-started` **之后**补的一条（坐标那时才存在） |
 | `run-settled` | `runId`, `taskId`, `at`, `outcome`, `verdict`, `unmet`，以及 `branch` / `landing`（产出留在哪条分支上、结算把它怎么处理了；没有产出 / 已合并回收时没有这两个字段） |
 | `run-skipped` | `taskId`, `at`, `reason` |
 
@@ -738,9 +742,9 @@ pi-gate daemon uninstall
 不是 `state.rounds` 那段历史：`declare_done` 会清空 `rounds` 而清不掉 `review`，所以正常结束
 （READY → `declare_done`）的运行记 `passed`，被撤回的判决（`PENDING`）不给 `passed`。`unmet` 原样带上。
 
-`run-started` 里的 `scopeSession` / `windowId` 是 `launchTask` 的回执，**记下来是因为事后读不回来**：
+`run-window` 里的 `scopeSession` / `windowId` 是 `launchTask` 的回执，**记下来是因为事后读不回来**：
 会话的窗口平时是从它的 pane 上读的，而 pane 丢了 `@rg_sid` 就什么都没有了 —— 结算时正是靠这两个坐标
-把那次运行的窗口关掉（§13.7）。旧记录没有这两个字段，那种运行只能靠 pane 坐标或等进程退出。
+把那次运行的窗口关掉（§13.7）。既没有这条记录、pane 又丢了坐标的运行，只能等它的进程退出（tmux 自己会回收窗口）。
 
 ### 13.7 调度器的行为（不在 HTTP 面上，但同属契约）
 
@@ -763,7 +767,7 @@ pi-gate daemon uninstall
   旧记录（没有 `worktree` 字段）仍按老规矩结算：没什么可收的。
 - **结算按结论落地，站点只决定落地方式**（2026-10-03，用户决定）：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒
   写 `run-settled`、关掉这次运行的窗口（`closeRunWindowAt`，只关 daemon 自己那个 scope session 里的窗口，坐标优先取 pane、
-  pane 丢了 `@rg_sid` 就取 `run-started` 里记下的发起回执），**并结算它的 checkout**：
+  pane 丢了 `@rg_sid` 就取台账 `run-window` 里记下的发起回执），**并结算它的 checkout**：
   ① 没有改动 ⇒ 目录与分支一并回收，主 repo 的 `git status --porcelain` 逐字节不变；
   ② 有改动**且 `outcome === "passed"`（记录过 READY）** —— 站点 `precommit`/`commit` ⇒ 把分支 `merge` 回主 repo
   （staged、**不提交**：用户自己提交）；站点 `pr` ⇒ 留在隔离分支上（那次运行自己 push / 开 PR），**不 merge**；
@@ -782,7 +786,7 @@ pi-gate daemon uninstall
 - **结算**：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒ 写 `run-settled`，**并把这次运行的窗口关掉**（`lib/daemon/control.ts` 的 `closeRunWindowAt`，只关 daemon 自己那个 scope session 里的窗口）：
   普通会话要等**进程退出**才释放 worktree 占用（`declare_done` 不释放），留着的窗口会让这个 repo 永远“被占”，以后每次运行都被跳过。
   **每一个 `outcome` 都会走这一步**，用两个地址里能用的那一个：会话还在列表里、pane 坐标读得到就用它；
-  pane 丢了 `@rg_sid`（观测不到那个窗口）而 checkout 心跳还新鲜（进程确实还在）就用 `run-started` 里记下的发起回执坐标（§13.6）。
+  pane 丢了 `@rg_sid`（观测不到那个窗口）而 checkout 心跳还新鲜（进程确实还在）就用 `run-window` 里记下的发起回执坐标（§13.6）。
   两个地址都没有的结算（进程已经退了）本来就没什么可关的，tmux 自己会收回那个窗口。
 - **「观测不到」不是「已经结束」**：列表里没有这个会话时，先问它自己的记录 —— **它自己那个 checkout 里**
   `<worktree>/.pi/session-presence.json` 的心跳还新鲜且 `sessionId` 就是它（旧记录没有 checkout，就回退到主 repo）、

@@ -44,9 +44,9 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 
-import { gitFailureText, gitOrNull, gitText } from "./git-exec.ts";
+import { gitFailureText, gitOrNull, gitRawOrNull, gitText } from "./git-exec.ts";
 import { ensureGateWorktreeRoot, gateWorktreeRoot } from "./worktree-root.ts";
 import { seedWorktree } from "./worktree-seed.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
@@ -222,18 +222,48 @@ export interface ScheduleSettlement {
 }
 
 /**
- * WHAT THE SETTLEMENT LOOKS AT — everything except the gate's OWN artifacts.
+ * THE RUN'S WORK, NOT THE GATE'S BOOKKEEPING (2026-10-03, reviewer P1).
  *
  * A run's session writes `.pi/loop-goal.md` and its sidecar state into its
- * checkout: that is how the gate records the contract it adopted. Whether that
- * shows up as "dirty" depends on the TARGET repo's `.gitignore`, which the gate
- * does not get to assume — a repo that does not ignore `.pi/` would make every
- * run look like it produced something, keep a branch for each one, and (at
- * `precommit`/`commit` with a READY) stage the gate's own bookkeeping into the
- * user's repository. Excluding it here is what makes "produced nothing" mean
- * the run's work rather than the gate's (quality round P2, 2026-10-03).
+ * checkout: that is how the gate records the contract it adopted. Whether those
+ * show up in `git status` depends on the TARGET repo's `.gitignore`, which the
+ * gate does not get to assume — but `.pi/` may not be excluded WHOLESALE either:
+ * a repository that TRACKS files there would have the run's edits to them read
+ * as "nothing" and recycled with the checkout.
+ *
+ * So the line is drawn by git itself. Files under `.pi/` that are UNTRACKED are
+ * the gate's (it just wrote them); a MODIFIED tracked file is the repository's,
+ * wherever it lives. {@link stageRunOutput} stages along the same line.
  */
-const SETTLEMENT_PATHS: readonly string[] = [".", ":(exclude).pi"];
+function settlementStatus(path: string): string | undefined {
+  const raw = gitRawOrNull(path, ["status", "--porcelain"]);
+  if (raw === null) return undefined;
+  return raw
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .filter((line) => !(line.startsWith("??") && line.slice(3).trimStart().startsWith(".pi/")))
+    .join("\n");
+}
+
+/**
+ * Stage the run's output, along the line {@link settlementStatus} draws:
+ * TRACKED changes of every path (a `.pi/` file the repository tracks is the
+ * repository's, wherever it lives), then the run's NEW files minus the gate's
+ * own bookkeeping under `.pi/`.
+ *
+ * WHY NOT A PATHSPEC: `git add -A -- . ':(exclude).pi'` is the obvious spelling
+ * and it fails outright when `.pi/` is ignored (a global `core.excludesFile` is
+ * enough) — git treats the exclude as an explicit request for an ignored path
+ * and refuses the whole call (measured 2026-10-03). `-u` plus a filtered
+ * `ls-files` asks the same question without that trap.
+ */
+function stageRunOutput(path: string): void {
+  gitText(path, ["add", "-u"]);
+  const untracked = (gitRawOrNull(path, ["ls-files", "-z", "--others", "--exclude-standard"]) ?? "")
+    .split("\0")
+    .filter((entry) => entry !== "" && !entry.startsWith(".pi/"));
+  if (untracked.length > 0) gitText(path, ["add", "--", ...untracked]);
+}
 
 /**
  * Does this checkout hold anything? The base is the commit it was cut from.
@@ -243,8 +273,8 @@ const SETTLEMENT_PATHS: readonly string[] = [".", ":(exclude).pi"];
  * answer must never be read as emptiness.
  */
 function hasChanges(path: string, base: string): boolean | undefined {
-  const dirty = gitOrNull(path, ["status", "--porcelain", "--", ...SETTLEMENT_PATHS]);
-  if (dirty === null) return undefined;
+  const dirty = settlementStatus(path);
+  if (dirty === undefined) return undefined;
   if (dirty.trim() !== "") return true;
   const ahead = gitOrNull(path, ["rev-list", "--count", `${base}..HEAD`]);
   if (ahead === null) return undefined;
@@ -260,11 +290,16 @@ function hasChanges(path: string, base: string): boolean | undefined {
  * the run's branch is what makes the work survive the cleanup.
  */
 function commitLeftovers(path: string, runId: string): string | undefined {
-  const dirty = gitOrNull(path, ["status", "--porcelain", "--", ...SETTLEMENT_PATHS]);
-  if (dirty === null || dirty.trim() === "") return undefined;
+  const dirty = settlementStatus(path);
+  if (dirty === undefined || dirty.trim() === "") return undefined;
   try {
-    gitText(path, ["add", "-A", "--", ...SETTLEMENT_PATHS]);
-    gitText(path, ["commit", "-m", `chore(schedule): keep the output of ${runId}`, "--no-verify"]);
+    stageRunOutput(path);
+    // NO `--no-verify` (2026-10-03, reviewer P1): the project's own hooks are
+    // the judgement about whether this content may be committed at all, and the
+    // gate does not get to route around its own gate. A refusal is not a
+    // failure — it is the answer that says "keep the checkout for a human",
+    // which is exactly what the caller does with a non-empty return.
+    gitText(path, ["commit", "-m", `chore(schedule): keep the output of ${runId}`]);
     return undefined;
   } catch (error) {
     return gitFailureText(error);

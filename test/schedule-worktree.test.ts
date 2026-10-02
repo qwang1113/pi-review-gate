@@ -33,12 +33,19 @@ import {
 import { gateWorktreeRoot } from "../lib/worktree-root.ts";
 import { git } from "./helpers/git.ts";
 
-/** A real repository with one commit, on `main`. */
+/** A real repository with one commit, on `main`, and NO host hooks of its own. */
 function gitRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "rg-sched-wt-repo-"));
   git(dir, ["init", "-q", "-b", "main"]);
   git(dir, ["config", "user.email", "gate-test@example.invalid"]);
   git(dir, ["config", "user.name", "gate test"]);
+  // THE HOST'S HOOKS DO NOT BELONG IN A FIXTURE: this machine installs a global
+  // pre-commit hook (the gate's own), and a fixture that inherits it would be
+  // testing that hook instead of this module. The one test that WANTS a hook
+  // installs its own (see "a hook that REFUSES…").
+  const hooks = mkdtempSync(join(tmpdir(), "rg-sched-wt-hooks-"));
+  made.push(hooks);
+  git(dir, ["config", "core.hooksPath", hooks]);
   writeFileSync(join(dir, "README.md"), "hello\n");
   git(dir, ["add", "-A"]);
   git(dir, ["commit", "-q", "-m", "init"]);
@@ -268,6 +275,42 @@ test("the gate's own `.pi/` artifacts are not the run's output (quality round P2
   assert.equal(settlement.action, "reclaimed", "只有门禁产物 ⇒ 没有产出");
   assert.equal(git(repo, ["status", "--porcelain"]), "", "主 repo 里不会出现 .pi/loop-goal.md");
   assert.equal(git(repo, ["branch", "--list", worktree.branch]), "", "也不留分支");
+});
+
+test("a TRACKED `.pi/` file the run edited is the run's output (2026-10-03, reviewer P1)", () => {
+  const repo = track(gitRepo());
+  // THE TARGET REPO TRACKS ITS OWN `.pi/` FILES: excluding the directory
+  // wholesale would read the run's edit as "nothing" and recycle it with the
+  // checkout. The line is drawn per FILE (tracked vs. untracked), not per
+  // directory.
+  mkdirSync(join(repo, ".pi"), { recursive: true });
+  writeFileSync(join(repo, ".pi", "settings.json"), "{}\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-q", "-m", "chore: track a .pi file"]);
+  const worktree = cut(repo, "run-aaaa0012");
+  writeFileSync(join(worktree.path, ".pi", "settings.json"), "{\"edited\":true}\n");
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "precommit" });
+  assert.equal(settlement.action, "merged", settlement.note);
+  assert.equal(readFileSync(join(repo, ".pi", "settings.json"), "utf8"), "{\"edited\":true}\n");
+});
+
+test("a hook that REFUSES the leftover commit keeps the checkout for a human (2026-10-03, reviewer P1)", () => {
+  const repo = track(gitRepo());
+  // A hook that says no — the shape the gate's own pre-commit hook has. The
+  // settlement does NOT route around it (`git commit --no-verify` would): the
+  // project's hooks are the judgement about whether this content may be
+  // committed at all, and a refusal means a human looks.
+  const hooks = mkdtempSync(join(tmpdir(), "rg-sched-wt-refuse-"));
+  made.push(hooks);
+  writeFileSync(join(hooks, "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  git(repo, ["config", "core.hooksPath", hooks]);
+  const worktree = cut(repo, "run-aaaa0013");
+  writeFileSync(join(worktree.path, "unreviewed.txt"), "not reviewed\n");
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "precommit" });
+  assert.equal(settlement.action, "branch-kept");
+  assert.match(settlement.note, /提交遗留改动失败/);
+  assert.equal(existsSync(worktree.path), true, "目录留着 —— 工作区是唯一副本");
+  assert.equal(git(repo, ["status", "--porcelain"]), "", "主 repo 一点没动");
 });
 
 test("a second run of the same id replaces a leftover checkout instead of failing", () => {

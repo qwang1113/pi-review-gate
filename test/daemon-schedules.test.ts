@@ -319,12 +319,12 @@ test("GET /api/schedules/:id/runs answers one task's ledger, newest `limit` entr
     }
     appendScheduleRun(h.home, { kind: "run-skipped", taskId: other.id, at: "2026-10-01T00:00:00.000Z", reason: "busy" });
 
-    const all = await h.json<{ taskId: string; runs: Array<{ runId: string }>; total: number; offset: number }>(
+    const all = await h.json<{ taskId: string; runs: Array<{ runId: string }>; total: number; nextOffset: number }>(
       `/api/schedules/${task.id}/runs`,
     );
     assert.equal(all.taskId, task.id);
     assert.equal(all.total, 4, "total 是这个任务自己的台账总数");
-    assert.equal(all.offset, 0);
+    assert.equal(all.nextOffset, 0, "一页就装下了 ⇒ 没有更早的了");
     assert.deepEqual(all.runs.map((record) => record.runId), ["run-1", "run-2", "run-3", "run-4"], "another task's ledger stays out");
     const limited = await h.json<{ runs: Array<{ runId: string }> }>(`/api/schedules/${task.id}/runs?limit=2`);
     assert.deepEqual(limited.runs.map((record) => record.runId), ["run-3", "run-4"], "the NEWEST entries survive the limit");
@@ -335,13 +335,13 @@ test("GET /api/schedules/:id/runs answers one task's ledger, newest `limit` entr
   }
 });
 
-test("`offset` walks the WHOLE ledger, one page at a time, without gaps or repeats (2026-10-03)", async () => {
+test("the `nextOffset` cursor walks the WHOLE ledger, one page at a time (2026-10-03)", async () => {
   const h = await harness();
   try {
     const task = addTask(h.home, h.repo);
     // MORE THAN ONE PAGE, and deliberately more than the panel asks for at
-    // once: the point of `offset` is that the 500-record ceiling stops being the
-    // end of the history.
+    // once: the point of the cursor is that the 500-record ceiling stops being
+    // the end of the history.
     for (let index = 0; index < 12; index += 1) {
       appendScheduleRun(h.home, {
         kind: "run-settled",
@@ -354,20 +354,67 @@ test("`offset` walks the WHOLE ledger, one page at a time, without gaps or repea
       });
     }
     const seen: string[] = [];
-    let offset = 0;
+    let cursor: number | undefined;
     for (;;) {
-      const page = await h.json<{ runs: Array<{ runId: string }>; total: number }>(
-        `/api/schedules/${task.id}/runs?limit=5&offset=${offset}`,
+      const query = cursor === undefined ? "limit=5" : `limit=5&offset=${cursor}`;
+      const page = await h.json<{ runs: Array<{ runId: string }>; total: number; nextOffset: number }>(
+        `/api/schedules/${task.id}/runs?${query}`,
       );
       assert.equal(page.total, 12);
-      if (page.runs.length === 0) break;
       seen.push(...page.runs.map((record) => record.runId));
-      offset += page.runs.length;
+      if (page.nextOffset === 0) break;
+      cursor = page.nextOffset;
     }
     assert.equal(seen.length, 12, "每一页都不重不漏");
     assert.deepEqual([...seen].sort(), Array.from({ length: 12 }, (_, index) => `run-${String(index).padStart(2, "0")}`).sort());
+    // A cursor past the end is an empty page, not an error: the reader has
+    // simply reached the beginning.
     const beyond = await h.json<{ runs: unknown[] }>(`/api/schedules/${task.id}/runs?limit=5&offset=99`);
-    assert.deepEqual(beyond.runs, [], "越过最早一条只有一个空页，不是错误");
+    assert.deepEqual(beyond.runs, []);
+  } finally {
+    await h.runtime.stop();
+  }
+});
+
+test("a page walk stays correct while the ledger GROWS (2026-10-03, reviewer P1)", async () => {
+  const h = await harness();
+  try {
+    const task = addTask(h.home, h.repo);
+    const append = (index: number): void => {
+      appendScheduleRun(h.home, {
+        kind: "run-settled",
+        runId: `run-${String(index).padStart(2, "0")}`,
+        taskId: task.id,
+        at: `2026-10-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+        outcome: "passed",
+        verdict: "READY",
+        unmet: [],
+      });
+    };
+    for (let index = 0; index < 10; index += 1) append(index);
+
+    const first = await h.json<{ runs: Array<{ runId: string }>; nextOffset: number }>(
+      `/api/schedules/${task.id}/runs?limit=4`,
+    );
+    assert.deepEqual(first.runs.map((record) => record.runId), ["run-06", "run-07", "run-08", "run-09"]);
+
+    // THREE RUNS START WHILE THE READER IS HOLDING THAT PAGE: with a cursor
+    // counted from the newest record (the old `offset`), the next page would
+    // re-read run-06… or skip past them.
+    for (let index = 10; index < 13; index += 1) append(index);
+
+    const older: string[] = [];
+    let cursor = first.nextOffset;
+    for (;;) {
+      const page = await h.json<{ runs: Array<{ runId: string }>; nextOffset: number }>(
+        `/api/schedules/${task.id}/runs?limit=4&offset=${cursor}`,
+      );
+      older.push(...page.runs.map((record) => record.runId));
+      if (page.nextOffset === 0) break;
+      cursor = page.nextOffset;
+    }
+    const seen = [...first.runs.map((record) => record.runId), ...older];
+    assert.deepEqual(seen, ["run-06", "run-07", "run-08", "run-09", "run-02", "run-03", "run-04", "run-05", "run-00", "run-01"], "不重不漏，且翻页期间新增的不混进来");
   } finally {
     await h.runtime.stop();
   }

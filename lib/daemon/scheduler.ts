@@ -84,7 +84,7 @@
  * still enforced where it matters — inside the run's own checkout.
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -551,6 +551,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
 
   function fire(task: ScheduledTask, at: Date, slot: string): ScheduleRunStarted | undefined {
     const runId = `run-${randomBytes(4).toString("hex")}`;
+    // THE SESSION ID IS DECIDED HERE, not inside `launchTask` (2026-10-03): the
+    // run's ledger line must exist BEFORE the process starts (see below).
+    const sessionId = randomUUID();
     // THE CHECKOUT FIRST (2026-10-03): the run works in its own copy of the
     // repo, so cutting that copy is part of STARTING it. A checkout that cannot
     // be cut is a TEMPORARY obstacle (a full disk, a repo mid-rebuild): nothing
@@ -568,11 +571,40 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
       return undefined;
     }
+    // THE LEDGER LINE COMES FIRST (2026-10-03, reviewer P1): the session adopts
+    // its contract at `session_start`, and adoption asks the ledger whether this
+    // session IS this run — so the line has to be there before the process can
+    // possibly ask. Writing it after the launch left a real window in which a
+    // scheduled run started with no contract at all (pi's cold start is seconds;
+    // the write is one line).
+    const run: ScheduleRunStarted = {
+      kind: "run-started",
+      runId,
+      taskId: task.id,
+      sessionId,
+      at: at.toISOString(),
+      // THE RUN'S OWN CHECKOUT, IN THE LEDGER (lib/schedule-worktree.ts settles
+      // it by exactly these four facts, and the contract adoption reads the
+      // owner record they point at).
+      worktree: cut.worktree.path,
+      branch: cut.worktree.branch,
+      base: cut.worktree.base,
+    };
+    try {
+      appendScheduleRun(deps.home, run);
+    } catch (error) {
+      // The disk is broken: the session is about to be real, so it is
+      // remembered in memory instead — it still holds its checkout and it still
+      // settles.
+      unrecordedRuns.set(runId, run);
+      log(`运行 ${runId} 写不进台账（会话即将在跑，先记在内存里）：${error instanceof Error ? error.message : String(error)}`);
+    }
     const started = launchTask({ home: deps.home, runTmux: deps.runTmux, now: deps.now }, {
       repo: task.repo,
       // THE RUN'S OWN CHECKOUT, NEVER THE MAIN REPO — this is what makes the
       // user's own session there stop blocking the task.
       workdir: cut.worktree.path,
+      sessionId,
       task: runTaskText(task, at, runId),
       mode: "loop",
       // THE CONTRACT'S STATION IS THE CEILING the run may deliver at: the user
@@ -582,8 +614,25 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     });
     if (!started.ok || started.sessionId === undefined) {
       const problem = started.problem ?? "launchTask 没给出 sessionId";
-      // THE CHECKOUT GOES BACK with a launch that never happened — it holds
-      // nothing and no session was ever started in it.
+      // A RUN THAT NEVER HAPPENED MUST NOT STAY OPEN: the line above is settled
+      // right here, so nothing waits on a session that does not exist.
+      try {
+        appendScheduleRun(deps.home, {
+          kind: "run-settled",
+          runId,
+          taskId: task.id,
+          at: at.toISOString(),
+          outcome: "gone",
+          verdict: null,
+          unmet: [],
+          landing: `会话没能起来（${problem}）`,
+        });
+      } catch (error) {
+        log(`运行 ${runId} 的失败没能记进台账：${error instanceof Error ? error.message : String(error)}`);
+      }
+      unrecordedRuns.delete(runId);
+      // THE CHECKOUT GOES BACK — it holds nothing and no session was ever
+      // started in it.
       try {
         worktrees.settle({ worktree: cut.worktree, outcome: "failed", station: task.contract.restatement.station });
       } catch (error) {
@@ -599,32 +648,27 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
       return undefined;
     }
-    const run: ScheduleRunStarted = {
-      kind: "run-started",
-      runId,
-      taskId: task.id,
-      sessionId: started.sessionId,
-      at: at.toISOString(),
-      // THE RUN'S OWN CHECKOUT, IN THE LEDGER (lib/schedule-worktree.ts settles
-      // it by exactly these four facts, and the contract adoption reads the
-      // owner record they point at).
-      worktree: cut.worktree.path,
-      branch: cut.worktree.branch,
-      base: cut.worktree.base,
-      // THE LAUNCH RECEIPT, KEPT WITH THE RUN (see `ScheduleRunStarted`): the
-      // window cannot be read back off the pane once the pane has lost
-      // `@rg_sid`, and the settlement needs to close it.
-      ...(started.scopeSession === undefined ? {} : { scopeSession: started.scopeSession }),
-      ...(started.windowId === undefined ? {} : { windowId: started.windowId }),
-    };
     // A SESSION IS ALREADY RUNNING: from here on the slot counts as dealt with
     // and this run holds its checkout, whatever the disk does next.
     dealt(task, at, slot);
-    try {
-      appendScheduleRun(deps.home, run);
-    } catch (error) {
-      unrecordedRuns.set(runId, run);
-      log(`运行 ${runId} 写不进台账（会话已在跑，先记在内存里）：${error instanceof Error ? error.message : String(error)}`);
+    // …AND WHERE ITS WINDOW IS, in a SECOND line (2026-10-03): the coordinates
+    // did not exist when the `run-started` line had to be written. Best-effort —
+    // a run with no coordinates is closed the only remaining way, when its
+    // process exits and tmux reclaims the window.
+    if (started.scopeSession !== undefined && started.windowId !== undefined) {
+      try {
+        appendScheduleRun(deps.home, {
+          kind: "run-window",
+          runId,
+          taskId: task.id,
+          sessionId,
+          at: at.toISOString(),
+          scopeSession: started.scopeSession,
+          windowId: started.windowId,
+        });
+      } catch (error) {
+        log(`运行 ${runId} 的窗口坐标没能记进台账：${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     log(`调度任务 ${task.name} 已发起运行 ${runId}（会话 ${started.sessionId}）`);
     return run;
@@ -700,6 +744,16 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       // started is the only thing left that can name the checkout.
       collection?.sessions.find((candidate) => candidate.sessionId === run.sessionId)?.repo;
     const settled = new Set<string>();
+    // WHERE EACH OPEN RUN'S WINDOW IS, by run id: `run-started` cannot carry it
+    // any more (that line must exist before the session starts), so the
+    // `run-window` line written a moment later is what a settlement closes a
+    // pane-less window by (2026-10-03).
+    const windows = new Map<string, { scopeSession: string; windowId: string }>();
+    for (const record of records) {
+      if (record.kind === "run-window") {
+        windows.set(record.runId, { scopeSession: record.scopeSession, windowId: record.windowId });
+      }
+    }
     for (const run of open) {
       // ONE RUN'S FAILURE MUST NOT TAKE THE TICK WITH IT: a home that went
       // read-only, a full disk, a store that refuses a write — the daemon is
@@ -740,7 +794,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // The daemon opened this window; the daemon closes it — on EVERY
         // settlement, whatever the outcome (the outcome only decides what the
         // ledger says). WHICH window is `closeTargetFor`'s question.
-        const target = closeTargetFor(run, session, evidence, repo);
+        // WHICH WINDOW TO CLOSE: the pane's coordinates when the observer has
+        // them, else the ones recorded with the run (an older record may carry
+        // them on `run-started` itself; a new one has a `run-window` line).
+        const recorded = windows.get(run.runId);
+        const withWindow: ScheduleRunStarted = run.scopeSession !== undefined || recorded === undefined
+          ? run
+          : { ...run, ...recorded };
+        const target = closeTargetFor(withWindow, session, evidence, repo);
         if (target !== undefined && !closeRunWindowAt(deps, target)) {
           log(`运行 ${run.runId} 的窗口没能关掉（它会继续占着 ${target.repo}）`);
         }

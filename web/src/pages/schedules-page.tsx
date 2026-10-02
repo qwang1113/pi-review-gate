@@ -66,6 +66,10 @@ function RunSummary({ run }: { run: ScheduledTaskRun | undefined }) {
       </span>
     );
   }
+  if (run.kind === "run-window") {
+    // A coordinate, not a result — `lastRuns` never sends one either.
+    return <span className="text-[11px] text-muted-foreground">窗口坐标记录</span>;
+  }
   const variant =
     run.outcome === "passed"
       ? "success"
@@ -115,6 +119,8 @@ function groupHistory(runs: readonly ScheduledTaskRun[]): HistoryEntry[] {
   const byRun = new Map<string, HistoryEntry>();
   const entries: HistoryEntry[] = [];
   for (const run of runs) {
+    // A `run-window` is a coordinate, not an entry of its own.
+    if (run.kind === "run-window") continue;
     if (run.kind === "run-skipped") {
       entries.push({ key: `skip-${run.at}-${entries.length}`, at: run.at, skipped: run });
       continue;
@@ -140,26 +146,34 @@ function groupHistory(runs: readonly ScheduledTaskRun[]): HistoryEntry[] {
  *
  * The API has offered `GET /api/schedules/:id/runs` all along; the panel never
  * called it, so the only history on screen was the single "最近一次" line. This
- * walks the ledger newest-first and — with `offset` — keeps going past the
- * 500-record ceiling the endpoint alone would impose.
+ * walks the ledger newest-first and — with the stable cursor the API hands back
+ * as `nextOffset` — keeps going past the 500-record ceiling the endpoint alone
+ * would impose.
  */
 function ScheduleHistory({ taskId }: { taskId: string }) {
   const PAGE = 25;
   const [runs, setRuns] = useState<ScheduledTaskRun[]>([]);
   const [total, setTotal] = useState<number | null>(null);
+  const [cursor, setCursor] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // THE CURSOR COMES FROM THE DAEMON, never from `runs.length` (2026-10-03):
+  // counting from the newest record would move every time a run appends, and a
+  // reader paging through the history would see records twice. `nextOffset` is
+  // an index from the FIRST record, so it is stable while the panel reads.
   const load = useCallback(
-    async (offset: number) => {
+    async (offset: number | undefined, append: boolean) => {
       setLoading(true);
       setError(null);
       try {
+        const query = offset === undefined ? `limit=${PAGE}` : `limit=${PAGE}&offset=${offset}`;
         const page = await api<ScheduleRunsResponse>(
-          `/api/schedules/${encodeURIComponent(taskId)}/runs?limit=${PAGE}&offset=${offset}`,
+          `/api/schedules/${encodeURIComponent(taskId)}/runs?${query}`,
         );
         setTotal(page.total);
-        setRuns((previous) => (offset === 0 ? page.runs : [...page.runs, ...previous]));
+        setCursor(page.nextOffset);
+        setRuns((previous) => (append ? [...page.runs, ...previous] : page.runs));
       } catch (failure) {
         setError(describeError(failure));
       } finally {
@@ -170,13 +184,13 @@ function ScheduleHistory({ taskId }: { taskId: string }) {
   );
 
   useEffect(() => {
-    void load(0);
+    void load(undefined, false);
   }, [load]);
 
   // Newest first: the page a human wants is the top one, and "加载更早" appends
   // below it exactly where the older records belong.
   const entries = groupHistory(runs).reverse();
-  const hasMore = total !== null && runs.length < total;
+  const hasMore = cursor !== null && cursor > 0;
 
   if (error !== null) {
     return (
@@ -198,7 +212,7 @@ function ScheduleHistory({ taskId }: { taskId: string }) {
       ))}
       <div className="flex items-center gap-2 px-4 py-2">
         {hasMore ? (
-          <Button size="sm" variant="ghost" disabled={loading} onClick={() => void load(runs.length)}>
+          <Button size="sm" variant="ghost" disabled={loading} onClick={() => void load(cursor ?? undefined, true)}>
             {loading ? "读取中…" : "加载更早"}
           </Button>
         ) : (

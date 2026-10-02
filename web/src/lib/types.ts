@@ -235,15 +235,29 @@ export type ScheduledTaskRun =
       /** 结算把产出怎么处理了，一行话。 */
       landing?: string;
     }
-  | { kind: "run-skipped"; taskId: string; at: string; reason: string };
+  | { kind: "run-skipped"; taskId: string; at: string; reason: string }
+  /** 这次运行的 tmux 窗口坐标（§13.6）—— 是补充信息，不是一次运行。 */
+  | {
+      kind: "run-window";
+      runId: string;
+      taskId: string;
+      sessionId: string;
+      at: string;
+      scopeSession: string;
+      windowId: string;
+    };
 
-/** `GET /api/schedules/:id/runs` 的一页（§13.6）：`offset` 从最新一条往回数。 */
+/** `GET /api/schedules/:id/runs` 的一页（§13.6）。 */
 export interface ScheduleRunsResponse {
   schema: number;
   taskId: string;
-  /** 这个任务的台账总条数 —— 还有没有更早的，看它。 */
+  /** 这个任务的台账总条数。 */
   total: number;
-  offset: number;
+  /**
+   * 下一页要带的 `offset`（游标），**0 表示已经到最早一条**。它是对追加稳定的
+   * 索引（从最早一条数），所以翻页期间台账新增记录不会让遍历重复或漏掉。
+   */
+  nextOffset: number;
   runs: ScheduledTaskRun[];
 }
 

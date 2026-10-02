@@ -494,10 +494,15 @@ test("a tick fires a due task once, and a restart does not fire it again", () =>
   first.tick();
   const started = readScheduleRuns(home).filter((record) => record.kind === "run-started");
   assert.equal(started.length, 1);
-  // AND THE LAUNCH RECEIPT RIDES THE SAME LINE (t7): the window the settlement
-  // must close later, recorded where a restart can still find it.
-  assert.equal(started[0]!.windowId, "@3");
-  assert.ok((started[0]!.scopeSession ?? "").startsWith("rg-"));
+  // AND THE LAUNCH RECEIPT RIDES ITS OWN LINE (2026-10-03): the window the
+  // settlement must close later, recorded where a restart can still find it —
+  // the `run-started` line itself has to exist before the launch, so it cannot
+  // carry coordinates that only exist afterwards.
+  const window = readScheduleRuns(home).find((record) => record.kind === "run-window");
+  assert.ok(window !== undefined && window.kind === "run-window", JSON.stringify(readScheduleRuns(home)));
+  assert.equal(window.windowId, "@3");
+  assert.ok(window.scopeSession.startsWith("rg-"));
+  assert.equal(window.runId, started[0]!.runId);
 
   // Same slot, another tick — and then a whole new scheduler over the same
   // home, which is what a daemon restart is: one process becomes another.
@@ -823,6 +828,137 @@ test("a settled run's window is closed — the checkout it held is reclaimed (qu
     readScheduleRuns(home).filter((record) => record.kind === "run-settled" && record.runId === "run-bbbb2222").length,
     1,
     "同一个运行不会结算两次",
+  );
+});
+
+test("a crash between the ledger line and the stamp still does not fire the slot twice (2026-10-03)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  const task = dueTask(home, repo, { name: "crash-window" });
+  // THE STATE A CRASH LEAVES BEHIND: the `run-started` line is on disk (it is
+  // written BEFORE the launch), the table's `lastFiredAt` is still the old
+  // stamp, and the session went down with the daemon. A restart must not start
+  // that slot a second time — the open run is what blocks it.
+  appendScheduleRun(home, {
+    kind: "run-started",
+    runId: "run-cccc9999",
+    taskId: task.id,
+    sessionId: "sess-cccc9999",
+    at: new Date().toISOString(),
+  });
+  const tmux = fakeTmux();
+  const scheduler = createScheduler({ home, runTmux: tmux, observer: fakeObserver([]) });
+  scheduler.tick();
+  assert.equal(
+    readScheduleRuns(home).filter((record) => record.kind === "run-started").length,
+    1,
+    "未结算的那次运行挡住这一槽",
+  );
+  assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0, "重启不会把它再发一次");
+});
+
+test("the run's ledger line is written BEFORE the session starts (2026-10-03, reviewer P1)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  dueTask(home, repo, { name: "ledger-first" });
+  let atLaunch: ReturnType<typeof readScheduleRuns> = [];
+  const tmux = fakeRunner((argv) => {
+    if (argv[0] === "list-sessions") return { ok: true, stdout: "", stderr: "" };
+    if (argv[0] === "new-session") atLaunch = readScheduleRuns(home);
+    return { ok: true, stdout: "@3 %9\n", stderr: "" };
+  });
+  createScheduler({ home, runTmux: tmux, observer: fakeObserver([]) }).tick();
+
+  // THE SESSION ADOPTS ITS CONTRACT AT `session_start`, and adoption asks the
+  // ledger whether this session IS this run. Writing that line after the launch
+  // left a real window (pi's cold start is seconds; the write is one line) in
+  // which a scheduled run started with no contract at all.
+  const started = atLaunch.filter((record) => record.kind === "run-started");
+  assert.equal(started.length, 1, "起会话那一刻，台账里已经有这条运行");
+  assert.equal(atLaunch.filter((record) => record.kind === "run-window").length, 0, "坐标那时还不存在");
+  // …and it lands a moment later, in its own line — which is what a settlement
+  // closes a pane-less window by.
+  const windows = readScheduleRuns(home).filter((record) => record.kind === "run-window");
+  assert.equal(windows.length, 1);
+  assert.equal(
+    windows[0]!.kind === "run-window" && windows[0]!.runId,
+    started[0]!.kind === "run-started" && started[0]!.runId,
+  );
+});
+
+test("a launch that never happened leaves no OPEN run behind (2026-10-03)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  dueTask(home, repo, { name: "launch-fails" });
+  const failing = fakeRunner((argv) => {
+    if (argv[0] === "list-sessions") return { ok: true, stdout: "", stderr: "" };
+    if (argv[0] === "new-session") return { ok: false, stdout: "", stderr: "tmux refused" };
+    return { ok: true, stdout: "@3 %9\n", stderr: "" };
+  });
+  createScheduler({ home, runTmux: failing, observer: fakeObserver([]) }).tick();
+  const records = readScheduleRuns(home);
+  assert.equal(records.filter((record) => record.kind === "run-started").length, 1, "台账先行：那条记录已经写了");
+  const settled = records.filter((record) => record.kind === "run-settled");
+  assert.equal(settled.length, 1, "会话没起来 ⇒ 就地结算，不留一个等不到的 open run");
+  assert.equal(settled[0]!.kind === "run-settled" && settled[0]!.outcome, "gone");
+  assert.equal(records.filter((record) => record.kind === "run-skipped").length, 0, "暂时性失败：槽留着");
+
+  // THE SLOT IS STILL OWED: the next tick tries again, with a new run.
+  createScheduler({ home, runTmux: fakeTmux(), observer: fakeObserver([]) }).tick();
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-started").length, 2);
+});
+
+test("coordinates recorded in a LATER line still close a pane-less window (2026-10-03)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  const tmux = fakeTmux();
+  const scopeName = ownSessionName(daemonTmuxScope({
+    home,
+    identity: ensureDaemonIdentity(home),
+    runTmux: tmux,
+    anchorRepo: repo,
+  }));
+  assert.ok(scopeName !== undefined);
+  const id = addScheduledTask(home, scheduleTaskInput(repo, { name: "window-later", enabled: false }));
+  if (!id.ok) assert.fail(id.problem);
+  appendScheduleRun(home, {
+    kind: "run-started",
+    runId: "run-ffff8888",
+    taskId: id.value.id,
+    sessionId: "sess-ffff8888",
+    at: new Date(Date.now() - 60_000).toISOString(),
+  });
+  appendScheduleRun(home, {
+    kind: "run-window",
+    runId: "run-ffff8888",
+    taskId: id.value.id,
+    sessionId: "sess-ffff8888",
+    at: new Date(Date.now() - 59_000).toISOString(),
+    scopeSession: scopeName!,
+    windowId: "@12",
+  });
+  mkdirSync(join(repo, ".pi"), { recursive: true });
+  writeFileSync(
+    join(repo, ".pi", "session-presence.json"),
+    JSON.stringify({ sessionId: "sess-ffff8888", pid: 4242, host: "host", at: new Date().toISOString() }),
+    { mode: 0o600 },
+  );
+  createScheduler({
+    home,
+    runTmux: tmux,
+    observer: fakeObserver([
+      sessionFor("sess-ffff8888", {
+        repo,
+        tmux: null,
+        state: "working",
+        completedAt: new Date().toISOString(),
+        rounds: { sent: 1, recorded: 0, lastVerdict: "READY" },
+      }),
+    ]),
+  }).tick();
+  assert.ok(
+    tmux.calls.some((argv) => argv[0] === "kill-window" && argv.includes(`${scopeName}:@12`)),
+    `expected the RECORDED window to be closed, got: ${JSON.stringify(tmux.calls)}`,
   );
 });
 
