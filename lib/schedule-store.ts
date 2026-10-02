@@ -172,6 +172,12 @@ export interface ScheduleRunStarted {
   branch?: string;
   base?: string;
   /**
+   * The task's repository — the anchor its settlement needs, kept HERE because
+   * the table may no longer have the task (deleted while the run was in flight)
+   * and the observer may not have the session (reviewer P1, 2026-10-03).
+   */
+  repo?: string;
+  /**
    * The daemon's own tmux session the window was opened in.
    *
    * SUPERSEDED BY {@link ScheduleRunWindow} (2026-10-03), and kept because
@@ -256,6 +262,13 @@ export interface ScheduleRunArmed {
   worktree?: string;
   branch?: string;
   base?: string;
+  /**
+   * The task's repository — the anchor a settlement needs. Without it a task
+   * deleted while its run was in flight would leave the checkout stranded, since
+   * the table (the other source of that fact) no longer has the task at all
+   * (reviewer P1, 2026-10-03).
+   */
+  repo?: string;
 }
 
 export interface ScheduleRunSkipped { kind: "run-skipped"; taskId: string; at: string; reason: string }

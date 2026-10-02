@@ -703,7 +703,17 @@ export function openScopeWindow(
   }
   const coords = parseSpawnedWindow(result.stdout);
   if (!coords) {
-    return { ok: false, error: "tmux 没有返回新 window/pane id" };
+    // THE COMMAND DID RUN — a window (or a whole session) exists, we just cannot
+    // address it. Leaving it behind is worse than the failure: the caller reads
+    // this as "nothing started" and deletes the checkout that process is running
+    // in (reviewer P1, 2026-10-03). A session THIS CALL created is reclaimed
+    // whole; a window added to an existing session cannot be addressed without
+    // the id we failed to parse, so that case is reported instead.
+    if (!exists) {
+      try { run(buildKillSessionArgv(name)); } catch { /* best effort */ }
+      return { ok: false, error: "tmux 没有返回新 session 的坐标 —— 已就地回收" };
+    }
+    return { ok: false, error: "tmux 没有返回新 window 的坐标（那个 window 无法寻址）" };
   }
   if (!exists) {
     // THE MARKER IS WRITTEN BEFORE THE RECORD, and a failure to write it UNDOES

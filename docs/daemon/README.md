@@ -130,7 +130,7 @@ daemon 起一个 authoring 会话跟你谈；
 | 症状 | 看哪里 |
 | --- | --- |
 | 到点没动静 | `GET /api/schedules` 的 `nextRunAt`：它**可能就在过去** —— 那就是「已到点、还没跑成」的那一槽（daemon 当时不在跑，或本任务自己还有一次运行没结算），daemon 的下一次 tick 会处理它。面板上点任务的「历史」能看每一槽的结果：`:id/runs` 里最后一条 `run-started` 没有对应的 `run-settled` ⇒ 它还在等那次运行结束；有一条 `run-skipped` ⇒ 那一次撞上了永久障碍（`reason` 写明是哪一类）；`enabled:false` 则根本没有下一次 |
-| 没跑起来 | `GET /api/schedules/:id/runs`：`run-skipped` 的 `reason` 说清为什么 —— repo 上还有**未结算的运行**（点名 `runId`）、repo 上还有**别的活会话**（点名 `sessionId` 与最后心跳；哪怕它已经 `declare_done`，只要进程还在就算）、或起会话失败 |
+| 没跑起来 | `GET /api/schedules/:id/runs`：`run-skipped` 的 `reason` 说清为什么 —— **只有永久障碍写它**（任务停用、cron 非法、repo 不存在或不是 git 仓库、tmux 可执行文件找不到）；暂时性的（割不出隔离 checkout、会话起不来、tmux server 没起来）**不写**，那一槽留着、下一次 tick 再试。「repo 上还有别的会话 / 还有未结算的运行」在 2026-10-03 之后**不再是跳过的理由**（每次运行在自己的 checkout 里），如果你在排查那种老症状，看的是 `nextRunAt`（已到点但没跑）而不是 `run-skipped` |
 | 会话起来了但不干活 | 面板打开那个会话（`GET /api/sessions` 里找 `RG_SCHEDULE_RUN` 对应的那条）—— 它就是一个普通会话，等回答 / 卡住都照旧显示 |
 | outcome 看不懂 | `passed` 只来自 READY；`gone` = 读不到门禁 state 或会话异常消失；`failed` = 结束了但结论不是 READY/BLOCKED |
 | 表坏了 | daemon **不会**把损坏的表当成空表：`GET /api/schedules` 报 500、`daemon.log` 里有原因；修好之前调度停摆（这是故意的） |

@@ -83,7 +83,7 @@
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { nextRunAfter } from "../cron-schedule.ts";
@@ -552,7 +552,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * "run it unless it genuinely cannot be run" forbids. A rollback that itself
    * fails costs that one slot, and says so.
    */
-  function rollbackStamp(task: ScheduledTask, slot: string): void {
+  function rollbackStamp(task: ScheduledTask, slot: string): boolean {
     try {
       // WITH THE VERSION IT JUST READ, like every other write in this file: a
       // rollback is still a write, and it must not clobber a panel edit that
@@ -565,9 +565,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       // THE REFUSAL IS A VALUE, NOT A THROW: a version conflict comes back as
       // `{ok:false}`, and a slot silently lost to one would be exactly the
       // silent consumption this function exists to undo.
-      if (!back.ok) log(`调度任务 ${task.id} 的槽戳没能回滚（这一槽被消费）：${back.problem}`);
+      if (!back.ok) {
+        log(`调度任务 ${task.id} 的槽戳没能回滚（这一槽被消费）：${back.problem}`);
+        return false;
+      }
+      return true;
     } catch (error) {
       log(`调度任务 ${task.id} 的槽戳没能回滚（这一槽被消费）：${error instanceof Error ? error.message : String(error)}`);
+      return false;
     }
   }
 
@@ -580,7 +585,11 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     try {
       appendScheduleRun(deps.home, { kind: "run-skipped", taskId: task.id, at: at.toISOString(), reason });
     } catch (error) {
-      log(`调度任务 ${task.name} 的跳过记录没写进台账：${error instanceof Error ? error.message : String(error)}`);
+      // A CONSUMED SLOT WITH NO LINE LOSES ITS REASON FOREVER (reviewer P1,
+      // 2026-10-03): the stamp goes back, and the decision is made again on the
+      // next tick — which is what makes the reason durable instead of a log line.
+      rollbackStamp(task, slot);
+      log(`调度任务 ${task.name} 的跳过记录没写进台账（槽戳已回滚，下一次 tick 重判）：${error instanceof Error ? error.message : String(error)}`);
     }
     log(`调度任务 ${task.name} 跳过：${reason}`);
   }
@@ -607,36 +616,19 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
       return undefined;
     }
-    // THE SLOT IS CONSUMED BEFORE THE SESSION EXISTS (2026-10-03, reviewer P1):
-    // a launch that succeeds cannot be un-launched, so its slot must already be
-    // dealt with on disk — otherwise a crash right after would leave a real
-    // session holding a slot the table still calls owed. Both this write and the
-    // arming below are mandatory; either failing means NO launch.
-    if (!dealt(task, at, slot)) {
-      releaseCheckout(cut.worktree, task, runId);
-      deferred(task, at, slot, "这一槽的处理戳写不进去");
-      return undefined;
-    }
-    // ARM FIRST, LAUNCH SECOND (2026-10-03, reviewer P1): the session adopts its
-    // contract at `session_start`, and adoption asks the LEDGER FILE whether this
-    // session IS this run — it runs in another process and can see nothing else.
-    // Writing that line after the launch left a real window in which a run
-    // started with no contract at all (pi's cold start is seconds; the write is
-    // one line).
-    //
-    // ARMING IS NOT A RUN, and that distinction is the point: a launch that never
-    // happens must leave NOTHING that looks like a run behind (the slot stays
-    // owed, the ledger stays honest), while the arming line has to exist before
-    // the launch can.
+    // THE ARMING COMES FIRST (2026-10-03, reviewer P1): a checkout must never
+    // exist without a ledger line that names it, or a daemon killed right after
+    // cutting one leaves a directory nothing can find again — the slot stamp
+    // alone does not say WHAT was created. The arming is inert on its own
+    // (`openRuns` ignores it), so a launch that never happens still leaves no run
+    // behind.
     const armed: ScheduleRunArmed = {
       kind: "run-armed",
       runId,
       taskId: task.id,
       sessionId,
       at: at.toISOString(),
-      // THE CHECKOUT RIDES THE ARMING TOO: if the daemon dies before the
-      // `run-started` write, this is the only line that names what the session
-      // holds — and scheduler's orphan pass settles it from here.
+      repo: task.repo,
       worktree: cut.worktree.path,
       branch: cut.worktree.branch,
       base: cut.worktree.base,
@@ -645,11 +637,19 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       appendScheduleRun(deps.home, armed);
     } catch (error) {
       // A SESSION CANNOT INHERIT A CONTRACT IT CANNOT READ: with the ledger
-      // unwritable, nothing is launched. Both the checkout and the slot go back
-      // — a broken disk is a TEMPORARY obstacle, not a reason to spend the slot.
-      rollbackStamp(task, slot);
+      // unwritable, nothing is launched and the checkout goes back. The slot is
+      // still owed — a broken disk is a TEMPORARY obstacle.
       releaseCheckout(cut.worktree, task, runId);
       deferred(task, at, slot, `台账写不进去（${error instanceof Error ? error.message : String(error)}）`);
+      return undefined;
+    }
+    // THEN THE SLOT IS CONSUMED, still before the session exists: a launch that
+    // succeeds cannot be un-launched, so its slot must already be dealt with on
+    // disk — otherwise a crash right after would leave a real session holding a
+    // slot the table still calls owed.
+    if (!dealt(task, at, slot)) {
+      releaseCheckout(cut.worktree, task, runId);
+      deferred(task, at, slot, "这一槽的处理戳写不进去");
       return undefined;
     }
     const started = launchTask({ home: deps.home, runTmux: deps.runTmux, now: deps.now }, {
@@ -669,8 +669,20 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       const problem = started.problem ?? "launchTask 没给出 sessionId";
       // THE SLOT GOES BACK (2026-10-03, reviewer P1): the stamp above consumed
       // it for a run that never happened, and a temporary obstacle must leave the
-      // slot owed.
-      rollbackStamp(task, slot);
+      // slot owed. A rollback that FAILS says so in the ledger — that one slot is
+      // genuinely spent, and "which slot was lost and why" must survive the tick.
+      if (!rollbackStamp(task, slot)) {
+        try {
+          appendScheduleRun(deps.home, {
+            kind: "run-skipped",
+            taskId: task.id,
+            at: at.toISOString(),
+            reason: `起会话失败（${problem}），且槽戳回滚失败 —— 这一槽被消费`,
+          });
+        } catch (error) {
+          log(`调度任务 ${task.id} 的这一槽丢失记录没写进台账：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       // NOTHING IS WRITTEN FOR A LAUNCH THAT NEVER HAPPENED (reviewer P1): the
       // arming line is inert on its own (`openRuns` ignores it), so the ledger
       // keeps NO run this session never was — no `run-settled`, no ghost in the
@@ -694,7 +706,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       at: at.toISOString(),
       // THE RUN'S OWN CHECKOUT, IN THE LEDGER (lib/schedule-worktree.ts settles
       // it by exactly these four facts, and the contract adoption reads the
-      // owner record they point at).
+      // owner record they point at) — plus the repo itself, which is the anchor
+      // a settlement needs once the task is gone from the table.
+      repo: task.repo,
       worktree: cut.worktree.path,
       branch: cut.worktree.branch,
       base: cut.worktree.base,
@@ -844,6 +858,37 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         ...(armed.base === undefined ? {} : { base: armed.base }),
       }));
     const all = [...new Map([...open, ...orphaned].map((run) => [run.runId, run])).values()];
+    // AN ARMING NOBODY CAME FOR IS CLEANED UP (2026-10-03, reviewer P1): a daemon
+    // killed between the arming and the launch — or between the launch and the
+    // `run-started` write, in which case the session is not visible either —
+    // leaves a checkout that no run and no session will ever reclaim. The arming
+    // line is the only thing that names it, and it is inert by design, so this is
+    // where its directory is closed out. The line itself STAYS (nothing is
+    // rewritten); only the checkout goes.
+    const cleanedArms = new Set<string>();
+    for (const record of records) {
+      if (record.kind !== "run-armed") continue;
+      if (everStarted.has(record.runId) || cleanedArms.has(record.runId)) continue;
+      if ((collection?.sessions ?? []).some((session) => session.sessionId === record.sessionId)) continue; // the orphan pass owns it
+      const armedAt = Date.parse(record.at);
+      if (!Number.isFinite(armedAt) || at.getTime() - armedAt < SETTLE_GRACE_MS) continue; // it may still be cold-starting
+      if (record.repo === undefined || record.worktree === undefined || record.branch === undefined || record.base === undefined) continue;
+      if (!existsSync(record.worktree)) {
+        cleanedArms.add(record.runId); // already recycled, or never created
+        continue;
+      }
+      cleanedArms.add(record.runId);
+      try {
+        worktrees.settle({
+          worktree: { repo: record.repo, runId: record.runId, branch: record.branch, base: record.base, path: record.worktree },
+          outcome: "failed",
+          station: stations.get(record.taskId),
+        });
+        log(`运行 ${record.runId} 的 arming 没有对应的会话（daemon 当时死了？）—— 它的隔离 checkout 已回收`);
+      } catch (error) {
+        log(`运行 ${record.runId} 的残留 checkout 没能回收：${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     const repoOfRun = (run: ScheduleRunStarted): string | undefined =>
       repos.get(run.taskId) ??
       // Its task is gone (deleted while the run was in flight): the session it
@@ -883,7 +928,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // `pr` station, kept as a branch otherwise. The note goes into the
         // ledger so the panel and `schedule_task({action:"list"})` can say which
         // branch holds it.
-        const settlement = settleRunWorktree(run, decision.outcome ?? "failed", stations.get(run.taskId), repo);
+        const settlement = settleRunWorktree(run, decision.outcome ?? "failed", stations.get(run.taskId), repo ?? run.repo);
         appendScheduleRun(deps.home, {
           kind: "run-settled",
           runId: run.runId,
@@ -922,6 +967,31 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
     }
     const stillOpen = all.filter((run) => !settled.has(run.runId));
+    // CLOSE WHAT A SETTLEMENT COULD NOT (2026-10-03, reviewer P1): closing a
+    // run's window is best-effort INSIDE the settlement (it must never depend on
+    // tmux), and `openRuns` stops returning a settled run — so a transient tmux
+    // failure there would leave the daemon's own window, with a live process in
+    // it, unaddressed forever. The `run-window` line is the durable address; this
+    // pass retries it for the runs that just settled.
+    const settledRecently = new Set(
+      records
+        .filter((record) => record.kind === "run-settled")
+        .filter((record) => {
+          const when = Date.parse(record.at);
+          return Number.isFinite(when) && at.getTime() - when < SETTLE_GRACE_MS * 15;
+        })
+        .map((record) => record.runId),
+    );
+    for (const [runId, coords] of windows) {
+      if (!settledRecently.has(runId)) continue;
+      const anchorRecord = records.find(
+        (record): record is ScheduleRunArmed | ScheduleRunStarted =>
+          (record.kind === "run-armed" || record.kind === "run-started") && record.runId === runId,
+      );
+      const anchor = anchorRecord?.repo ?? "";
+      if (anchor === "") continue;
+      closeRunWindowAt(deps, { repo: anchor, session: coords.scopeSession, window: coords.windowId });
+    }
     for (const task of table.file.tasks) {
       try {
         const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
