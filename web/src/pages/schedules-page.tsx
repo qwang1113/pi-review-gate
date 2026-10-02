@@ -66,9 +66,9 @@ function RunSummary({ run }: { run: ScheduledTaskRun | undefined }) {
       </span>
     );
   }
-  if (run.kind === "run-window") {
-    // A coordinate, not a result — `lastRuns` never sends one either.
-    return <span className="text-[11px] text-muted-foreground">窗口坐标记录</span>;
+  if (run.kind === "run-window" || run.kind === "run-armed") {
+    // Bookkeeping, not a result — `lastRuns` never sends one either.
+    return <span className="text-[11px] text-muted-foreground">台账记录</span>;
   }
   const variant =
     run.outcome === "passed"
@@ -119,8 +119,8 @@ function groupHistory(runs: readonly ScheduledTaskRun[]): HistoryEntry[] {
   const byRun = new Map<string, HistoryEntry>();
   const entries: HistoryEntry[] = [];
   for (const run of runs) {
-    // A `run-window` is a coordinate, not an entry of its own.
-    if (run.kind === "run-window") continue;
+    // `run-armed` and `run-window` are bookkeeping, not entries of their own.
+    if (run.kind === "run-window" || run.kind === "run-armed") continue;
     if (run.kind === "run-skipped") {
       entries.push({ key: `skip-${run.at}-${entries.length}`, at: run.at, skipped: run });
       continue;

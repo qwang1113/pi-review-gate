@@ -121,13 +121,16 @@ export function adoptScheduledRunContract(
     if (normalizeRepoPath(task.repo) !== normalizeRepoPath(repo) && !fromTaskRepo) {
       return skip(`任务 ${task.id} 的 repo 是 ${task.repo}，本会话在 ${repo}（也不是它的隔离 checkout）`);
     }
-    // THE LEDGER PROVES IT: only a `run-started` line naming THIS session for
-    // THIS run id makes this process the run it claims to be.
+    // THE LEDGER PROVES IT: only a line naming THIS session for THIS run id
+    // makes this process the run it claims to be. Two kinds count — `run-armed`
+    // (written BEFORE the launch, which is the one this session will normally
+    // find: adoption runs at `session_start`, and pi's cold start is seconds)
+    // and `run-started` (a run that really started).
     const started = readScheduleRuns(home).some(
-      (record) => record.kind === "run-started" && record.runId === runId &&
-        record.taskId === task.id && record.sessionId === sessionId,
+      (record) => (record.kind === "run-started" || record.kind === "run-armed") &&
+        record.runId === runId && record.taskId === task.id && record.sessionId === sessionId,
     );
-    if (!started) return skip(`台账里没有 ${runId} 属于本会话（${sessionId}）的 run-started 记录`);
+    if (!started) return skip(`台账里没有 ${runId} 属于本会话（${sessionId}）的 run-started / run-armed 记录`);
 
     const goalText = task.contract.goal.text;
     // THE FILE FIRST, THE RECORDS SECOND: a session whose goal file could not

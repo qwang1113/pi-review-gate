@@ -236,6 +236,8 @@ export type ScheduledTaskRun =
       landing?: string;
     }
   | { kind: "run-skipped"; taskId: string; at: string; reason: string }
+  /** 这次运行已登记（契约继承的凭证，§13.6）—— 是补充信息，不是一次运行。 */
+  | { kind: "run-armed"; runId: string; taskId: string; sessionId: string; at: string }
   /** 这次运行的 tmux 窗口坐标（§13.6）—— 是补充信息，不是一次运行。 */
   | {
       kind: "run-window";

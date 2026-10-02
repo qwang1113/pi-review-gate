@@ -678,7 +678,7 @@ pi-gate daemon uninstall
 | `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、因永久障碍跳过、起不来都算）—— 下一个时间点从这里数。**暂时起不来的那一次不写它**：那一槽留着，下次 tick 再试（§13.7） |
 | `nextRunAt` | string \| null | **派生**：这个任务**按时间表下一个要处理的** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**它可能落在过去**（2026-10-03 起）：到点了但还没跑成（daemon 当时不在跑，或本任务自己还有一次运行没结算）时，这里就是**那一槽**，daemon 的下一次 tick 会跑它 —— 「迟到」不再是跳过的理由，也不再有 10 分钟的宽限窗口。**这是按时间表算的，不看「这个任务是不是还有一次运行没结算」**（§13.6）：那种情况下这个槽会被推迟，原因写在 `GET /api/schedules/:id/runs` 里 —— 最后一条 `run-started` 没有对应的 `run-settled`。`enabled:false`、cron 非法、或 `createdAt` 读不出时间时是 `null` |
 | `describe` | string | **派生**：`describeCron` 的一行人话，如 `每天 09:00` |
-| `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-started` 与 `run-window` 都不是结果，不列） |
+| `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-armed` / `run-started` / `run-window` 都不是结果，不列） |
 
 ### 13.2 `GET /api/schedules`
 
@@ -732,7 +732,8 @@ pi-gate daemon uninstall
 
 | `kind` | 字段 |
 | --- | --- |
-| `run-started` | `runId`, `taskId`, `sessionId`, `at`，以及 `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 路径、它所在的分支、切出来的 commit）。**这条记录在会话起来之前就写**（会话在 `session_start` 靠它继承契约），所以它不带窗口坐标；更旧的记录可能自带 `scopeSession` / `windowId` |
+| `run-armed` | `runId`, `taskId`, `sessionId`, `at` —— **契约继承的凭证**：在 launch **之前**写（会话在 `session_start` 就要读它）。它**不是一次运行**：`openRuns`、面板历史、`lastRuns` 都不认它，所以一次没能起会话的尝试不会在台账里留下任何像运行的东西 |
+| `run-started` | `runId`, `taskId`, `sessionId`, `at`，以及 `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 路径、它所在的分支、切出来的 commit）。**会话真的起来了才有这条**；它不带窗口坐标（那是 `run-window`）；更旧的记录可能自带 `scopeSession` / `windowId` |
 | `run-window` | `runId`, `taskId`, `sessionId`, `at`, `scopeSession`, `windowId` —— 这次运行的窗口坐标，在 `run-started` **之后**补的一条（坐标那时才存在） |
 | `run-settled` | `runId`, `taskId`, `at`, `outcome`, `verdict`, `unmet`，以及 `branch` / `landing`（产出留在哪条分支上、结算把它怎么处理了；没有产出 / 已合并回收时没有这两个字段） |
 | `run-skipped` | `taskId`, `at`, `reason` |
@@ -779,7 +780,7 @@ pi-gate daemon uninstall
 - **运行就是普通 loop 会话**：`RG_GATE_MODE=loop`、`RG_STATION_CAP=<契约里的 station>`、
   `RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`（本次运行的标识），cwd 是这次运行自己的隔离 checkout；门禁在 `session_start` 按这两个变量
   把契约**从 `schedules.json` 读回来**（两个 hash 与文本相符 + 本会话的 repo 就是任务 repo **或从它切出来的隔离 checkout**
-  —— 归属记录 `lib/schedule-worktree.ts` 证明后者 + 台账里有本 runId 且 `sessionId` 就是本会话的 `run-started` 记录，四道闸全过才生效），再**写出**
+  —— 归属记录 `lib/schedule-worktree.ts` 证明后者 + 台账里有本 runId 且 `sessionId` 就是本会话的 `run-armed` / `run-started` 记录，四道闸全过才生效），再**写出**
   `.pi/loop-goal.md` 与 sidecar 的 `restatement` / `loopGoal`（`lib/schedule-run-contract.ts`）；
   任一道闸不过就什么都不写、只记一条日志（fail-closed）；那种情况下它没有契约可用（hash 不符、repo 不符、台账里没有本 runId 都会走到这里），
   它要么自己重新谈一份 goal，要么停在那里等人。

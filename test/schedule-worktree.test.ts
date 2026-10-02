@@ -290,8 +290,13 @@ test("a TRACKED `.pi/` file the run edited is the run's output (2026-10-03, revi
   const worktree = cut(repo, "run-aaaa0012");
   writeFileSync(join(worktree.path, ".pi", "settings.json"), "{\"edited\":true}\n");
   const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "precommit" });
-  assert.equal(settlement.action, "merged", settlement.note);
-  assert.equal(readFileSync(join(repo, ".pi", "settings.json"), "utf8"), "{\"edited\":true}\n");
+  // PRESERVED, NEVER MERGED: `.pi/` is excluded from the gate's fingerprint
+  // wholesale (lib/fingerprint.ts, a P0 self-deadlock fix), so a change there
+  // was never in front of a reviewer.
+  assert.equal(settlement.action, "branch-kept", settlement.note);
+  assert.match(settlement.note, /不在审查范围/);
+  assert.equal(readFileSync(join(repo, ".pi", "settings.json"), "utf8"), "{}\n", "主 repo 没被改");
+  assert.equal(git(repo, ["show", `${worktree.branch}:.pi/settings.json`]), "{\"edited\":true}", "改动完整地留在分支上");
 });
 
 test("a hook that REFUSES the leftover commit keeps the checkout for a human (2026-10-03, reviewer P1)", () => {

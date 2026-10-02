@@ -47,6 +47,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { basename, join } from "node:path";
 
 import { gitFailureText, gitOrNull, gitRawOrNull, gitText } from "./git-exec.ts";
+import { GATE_EXCLUDE_DIRS } from "./fingerprint.ts";
 import { ensureGateWorktreeRoot, gateWorktreeRoot } from "./worktree-root.ts";
 import { seedWorktree } from "./worktree-seed.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
@@ -246,6 +247,30 @@ function settlementStatus(path: string): string | undefined {
 }
 
 /**
+ * Does this checkout touch a directory the gate's fingerprint excludes wholesale
+ * (`GATE_EXCLUDE_DIRS`, lib/fingerprint.ts — a P0 self-deadlock fix, because the
+ * gate writes its own state there)?
+ *
+ * Such a change is the REPOSITORY's when the file is tracked (see
+ * {@link settlementStatus}), so it must be preserved — but it was INVISIBLE to
+ * the review, so it may not be merged either: the run keeps it on its branch and
+ * a human decides (2026-10-03, reviewer P1).
+ */
+function touchesGateExcludedDir(path: string): boolean {
+  const raw = gitRawOrNull(path, ["status", "--porcelain"]);
+  if (raw === null) return false; // an unreadable answer is the caller's tri-state
+  return raw
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .some((line) => {
+      const entry = line.slice(3).trim();
+      // `R  old -> new` names both sides; the one that matters is the new one.
+      const target = entry.includes(" -> ") ? entry.slice(entry.indexOf(" -> ") + 4) : entry;
+      return GATE_EXCLUDE_DIRS.some((dir) => target === dir || target.startsWith(`${dir}/`));
+    });
+}
+
+/**
  * Stage the run's output, along the line {@link settlementStatus} draws:
  * TRACKED changes of every path (a `.pi/` file the repository tracks is the
  * repository's, wherever it lives), then the run's NEW files minus the gate's
@@ -360,6 +385,9 @@ export function settleScheduleWorktree(input: {
       note: `读不出这次运行的 checkout（${path}）有没有改动 —— 目录与分支都留着，请人工确认`,
     };
   }
+  // ASKED BEFORE THE COMMIT: `commitLeftovers` clears the working-tree status
+  // this reads (2026-10-03).
+  const gateOwned = changes && touchesGateExcludedDir(path);
   if (changes) {
     const leftovers = commitLeftovers(path, runId);
     if (leftovers !== undefined) {
@@ -396,6 +424,15 @@ export function settleScheduleWorktree(input: {
       branch,
       changes: true,
       note: `本次运行结论是 ${input.outcome}（不是 READY）：改动留在分支 ${branch} 上，没有合并回主 repo`,
+    };
+  }
+  if (gateOwned) {
+    discardCheckout(repo, path, undefined);
+    return {
+      action: "branch-kept",
+      branch,
+      changes: true,
+      note: `改动涉及 ${GATE_EXCLUDE_DIRS.join(" / ")}（不在审查范围内，不会被合并）：留在分支 ${branch} 上`,
     };
   }
   // READY, and the station says the work lands in the main repo. Only a CLEAN

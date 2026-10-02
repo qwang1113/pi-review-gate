@@ -204,6 +204,24 @@ test("an unknown task id adopts nothing", () => {
   assert.deepEqual(f.written, []);
 });
 
+test("a run ARMED but not yet started still adopts its contract (2026-10-03, reviewer P1)", () => {
+  // The arming line is written BEFORE the launch — that is what closes the
+  // window in which a scheduled run started with no contract at all. Adoption
+  // runs at `session_start`, so this is the line it will normally find.
+  const f = fake();
+  const id = seed(f, { run: "none" });
+  appendScheduleRun(f.home, {
+    kind: "run-armed",
+    runId: "run-1",
+    taskId: id,
+    sessionId: SESSION,
+    at: "2026-10-02T00:00:00.000Z",
+  });
+  const out = adoptScheduledRunContract(deps(f), {}, env(id));
+  assert.equal(out.adopted, true, out.adopted ? "" : out.reason);
+  assert.deepEqual(f.persisted, [f.repo]);
+});
+
 test("a goal file that cannot be written leaves NO approval record behind", () => {
   const f = fake();
   f.failsWrite = true;

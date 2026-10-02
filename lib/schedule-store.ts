@@ -224,11 +224,46 @@ export interface ScheduleRunSettled {
   branch?: string;
   landing?: string;
 }
+/**
+ * THE RUN IS ARMED — the line that lets a session inherit its contract, written
+ * BEFORE anything is launched (2026-10-03, reviewer P1).
+ *
+ * WHY IT IS NOT A `run-started`: a launch that fails must leave NO trace of a
+ * run behind — the slot stays owed and the ledger stays honest — while the
+ * contract adoption needs a durable line to read, because it runs inside the
+ * session and can only see files (lib/schedule-run-contract.ts). Arming is
+ * exactly that line: it says "a run of this task, with this session id, was
+ * authorised to start here", and everything that counts RUNS ignores it —
+ * `openRuns`, the panel's history, the task list, `lastRuns`.
+ *
+ * A run that really starts writes its `run-started` a moment later, in
+ * addition; an arming whose launch never happened is inert forever, and costs
+ * nothing but a line.
+ */
+export interface ScheduleRunArmed {
+  kind: "run-armed";
+  runId: string;
+  taskId: string;
+  sessionId: string;
+  at: string;
+}
+
 export interface ScheduleRunSkipped { kind: "run-skipped"; taskId: string; at: string; reason: string }
 
-export type ScheduleRunRecord = ScheduleRunStarted | ScheduleRunSettled | ScheduleRunSkipped | ScheduleRunWindow;
+export type ScheduleRunRecord =
+  | ScheduleRunStarted
+  | ScheduleRunArmed
+  | ScheduleRunSettled
+  | ScheduleRunSkipped
+  | ScheduleRunWindow;
 
-const RUN_KINDS: readonly string[] = Object.freeze(["run-started", "run-settled", "run-skipped", "run-window"]);
+const RUN_KINDS: readonly string[] = Object.freeze([
+  "run-started",
+  "run-armed",
+  "run-settled",
+  "run-skipped",
+  "run-window",
+]);
 
 // ---------------------------------------------------------------------------
 // reading and writing the table

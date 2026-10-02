@@ -40,7 +40,7 @@ import type { DaemonSession, SessionObserver } from "../lib/daemon/sessions.ts";
 import { daemonTmuxScope } from "../lib/daemon/control.ts";
 import { ensureDaemonIdentity } from "../lib/daemon/state.ts";
 import { ownSessionName } from "../lib/session-tmux-scope.ts";
-import { scheduleRunsPath } from "../lib/daemon/paths.ts";
+import { schedulesPath, scheduleRunsPath } from "../lib/daemon/paths.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import { fakeRunner, scheduleContract, scheduleTaskInput, scratchHome, scratchRepo } from "./daemon-helpers.ts";
 
@@ -608,6 +608,30 @@ test("a checkout that cannot be cut KEEPS the slot — the next tick tries again
   assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-started").length, 1, "仍然只跑一次");
 });
 
+test("a task whose contract does NOT check out is never launched (2026-10-03, reviewer P1)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  const task = dueTask(home, repo, { name: "broken-contract" });
+  // A HAND-DAMAGED CONTRACT: the store's reader does not verify the hashes
+  // (adoption does), so a task like this reaches the scheduler looking runnable.
+  const read = readSchedules(home);
+  assert.ok(read.ok, read.ok ? "" : read.problem);
+  const damaged = {
+    ...read.file,
+    tasks: read.file.tasks.map((entry) => (entry.id === task.id
+      ? { ...entry, contract: { ...entry.contract, goal: { ...entry.contract.goal, hash: "deadbeef" } } }
+      : entry)),
+  };
+  writeFileSync(schedulesPath(home), JSON.stringify(damaged));
+
+  const tmux = fakeTmux();
+  createScheduler({ home, runTmux: tmux, observer: fakeObserver([]) }).tick();
+  assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0, "不发一辆注定继承不了契约的车");
+  const skips = readScheduleRuns(home).filter((record) => record.kind === "run-skipped");
+  assert.equal(skips.length, 1);
+  assert.match(skips[0]!.reason, /契约不成立/);
+});
+
 test("a checkout that can NEVER be cut consumes the slot and names the reason (2026-10-03)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
@@ -873,16 +897,21 @@ test("the run's ledger line is written BEFORE the session starts (2026-10-03, re
   // ledger whether this session IS this run. Writing that line after the launch
   // left a real window (pi's cold start is seconds; the write is one line) in
   // which a scheduled run started with no contract at all.
-  const started = atLaunch.filter((record) => record.kind === "run-started");
-  assert.equal(started.length, 1, "起会话那一刻，台账里已经有这条运行");
-  assert.equal(atLaunch.filter((record) => record.kind === "run-window").length, 0, "坐标那时还不存在");
-  // …and it lands a moment later, in its own line — which is what a settlement
-  // closes a pane-less window by.
-  const windows = readScheduleRuns(home).filter((record) => record.kind === "run-window");
+  //
+  // IT IS A `run-armed` LINE, not a `run-started`: a launch that never happens
+  // must leave nothing that counts as a run (reviewer P1).
+  const armed = atLaunch.filter((record) => record.kind === "run-armed");
+  assert.equal(armed.length, 1, "起会话那一刻，台账里已经有了这次运行的授权行");
+  assert.equal(atLaunch.filter((record) => record.kind === "run-started").length, 0, "会话还没起来，就还不是一次运行");
+  // …and the real run, plus its window coordinates, land a moment later.
+  const after = readScheduleRuns(home);
+  const runs = after.filter((record) => record.kind === "run-started");
+  assert.equal(runs.length, 1);
+  const windows = after.filter((record) => record.kind === "run-window");
   assert.equal(windows.length, 1);
   assert.equal(
     windows[0]!.kind === "run-window" && windows[0]!.runId,
-    started[0]!.kind === "run-started" && started[0]!.runId,
+    runs[0]!.kind === "run-started" && runs[0]!.runId,
   );
 });
 
@@ -897,15 +926,18 @@ test("a launch that never happened leaves no OPEN run behind (2026-10-03)", () =
   });
   createScheduler({ home, runTmux: failing, observer: fakeObserver([]) }).tick();
   const records = readScheduleRuns(home);
-  assert.equal(records.filter((record) => record.kind === "run-started").length, 1, "台账先行：那条记录已经写了");
-  const settled = records.filter((record) => record.kind === "run-settled");
-  assert.equal(settled.length, 1, "会话没起来 ⇒ 就地结算，不留一个等不到的 open run");
-  assert.equal(settled[0]!.kind === "run-settled" && settled[0]!.outcome, "gone");
+  assert.equal(records.filter((record) => record.kind === "run-started").length, 0, "起不来的会话不是一次运行");
+  assert.equal(
+    records.filter((record) => record.kind === "run-settled").length,
+    0,
+    "也不写它的结局：幽灵运行会出现在面板历史里（reviewer P1）",
+  );
+  assert.equal(records.filter((record) => record.kind === "run-armed").length, 1, "只留下契约继承用的那行登记");
   assert.equal(records.filter((record) => record.kind === "run-skipped").length, 0, "暂时性失败：槽留着");
 
   // THE SLOT IS STILL OWED: the next tick tries again, with a new run.
   createScheduler({ home, runTmux: fakeTmux(), observer: fakeObserver([]) }).tick();
-  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-started").length, 2);
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-started").length, 1);
 });
 
 test("coordinates recorded in a LATER line still close a pane-less window (2026-10-03)", () => {
@@ -1119,26 +1151,30 @@ test("the tick does nothing at all when the table cannot be read", () => {
   assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0);
 });
 
-test("a ledger that cannot be written starts ONE session for a slot, never one per tick", () => {
+test("a ledger that cannot be written starts NO session — the slot stays owed (2026-10-03)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
-  dueTask(home, repo, { name: "task-a" });
+  const task = dueTask(home, repo, { name: "task-a" });
   // The ledger path as a DIRECTORY: `appendScheduleRun` throws EISDIR on every
-  // tick, while the table still writes. The session that got started cannot be
-  // un-started, so the SLOT must count as dealt with regardless — otherwise
-  // every 20-second tick starts another real session, forever (quality round
-  // P1, 2026-10-02; `dealt` therefore runs BEFORE the append, and the slot is
-  // also remembered in memory in case the stamp itself fails).
+  // tick, while the table still writes.
   mkdirSync(scheduleRunsPath(home), { recursive: true });
   const tmux = fakeTmux();
   const scheduler = createScheduler({ home, runTmux: tmux, observer: fakeObserver([]) });
   scheduler.tick();
   scheduler.tick();
   scheduler.tick();
+  // A SESSION CANNOT INHERIT A CONTRACT IT CANNOT READ (reviewer P1): adoption
+  // reads the ledger file, and that file is unwritable — so nothing is launched
+  // at all, and the slot stays owed instead of being spent on a run that would
+  // start with no contract.
   const launches = tmux.calls.filter((argv) => argv[0] === "new-session" || argv[0] === "new-window").length;
-  assert.equal(launches, 1, "one slot, one session — a failed ledger write is not a reason to start another");
+  assert.equal(launches, 0, "台账写不进去就不发车");
   const table = readSchedules(home);
-  assert.equal(table.ok && table.file.tasks[0]!.lastFiredAt !== null, true, "the stamp landed, so the slot is dealt with on disk too");
+  assert.equal(
+    table.ok && table.file.tasks[0]!.lastFiredAt,
+    task.lastFiredAt,
+    "槽没被消费：磁盘好了它还会跑",
+  );
 });
 
 test("one task's failure does not take the tick with it, and neither does a broken clock", () => {

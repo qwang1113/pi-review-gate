@@ -105,8 +105,10 @@ import {
   readSchedules,
   SCHEDULE_ID_ENV,
   SCHEDULE_RUN_ENV,
+  scheduleContractProblem,
   updateScheduledTask,
   type ScheduledTask,
+  type ScheduleRunArmed,
   type ScheduleRunOutcome,
   type ScheduleRunRecord,
   type ScheduleRunStarted,
@@ -571,33 +573,33 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
       return undefined;
     }
-    // THE LEDGER LINE COMES FIRST (2026-10-03, reviewer P1): the session adopts
-    // its contract at `session_start`, and adoption asks the ledger whether this
-    // session IS this run — so the line has to be there before the process can
-    // possibly ask. Writing it after the launch left a real window in which a
-    // scheduled run started with no contract at all (pi's cold start is seconds;
-    // the write is one line).
-    const run: ScheduleRunStarted = {
-      kind: "run-started",
+    // ARM FIRST, LAUNCH SECOND (2026-10-03, reviewer P1): the session adopts its
+    // contract at `session_start`, and adoption asks the LEDGER FILE whether this
+    // session IS this run — it runs in another process and can see nothing else.
+    // Writing that line after the launch left a real window in which a run
+    // started with no contract at all (pi's cold start is seconds; the write is
+    // one line).
+    //
+    // ARMING IS NOT A RUN, and that distinction is the point: a launch that never
+    // happens must leave NOTHING that looks like a run behind (the slot stays
+    // owed, the ledger stays honest), while the arming line has to exist before
+    // the launch can.
+    const armed: ScheduleRunArmed = {
+      kind: "run-armed",
       runId,
       taskId: task.id,
       sessionId,
       at: at.toISOString(),
-      // THE RUN'S OWN CHECKOUT, IN THE LEDGER (lib/schedule-worktree.ts settles
-      // it by exactly these four facts, and the contract adoption reads the
-      // owner record they point at).
-      worktree: cut.worktree.path,
-      branch: cut.worktree.branch,
-      base: cut.worktree.base,
     };
     try {
-      appendScheduleRun(deps.home, run);
+      appendScheduleRun(deps.home, armed);
     } catch (error) {
-      // The disk is broken: the session is about to be real, so it is
-      // remembered in memory instead — it still holds its checkout and it still
-      // settles.
-      unrecordedRuns.set(runId, run);
-      log(`运行 ${runId} 写不进台账（会话即将在跑，先记在内存里）：${error instanceof Error ? error.message : String(error)}`);
+      // A SESSION CANNOT INHERIT A CONTRACT IT CANNOT READ: with the ledger
+      // unwritable, nothing is launched, the checkout goes back, and the slot
+      // stays owed (a broken disk is not a permanent obstacle).
+      releaseCheckout(cut.worktree, task, runId);
+      deferred(task, at, slot, `台账写不进去（${error instanceof Error ? error.message : String(error)}）`);
+      return undefined;
     }
     const started = launchTask({ home: deps.home, runTmux: deps.runTmux, now: deps.now }, {
       repo: task.repo,
@@ -614,30 +616,11 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     });
     if (!started.ok || started.sessionId === undefined) {
       const problem = started.problem ?? "launchTask 没给出 sessionId";
-      // A RUN THAT NEVER HAPPENED MUST NOT STAY OPEN: the line above is settled
-      // right here, so nothing waits on a session that does not exist.
-      try {
-        appendScheduleRun(deps.home, {
-          kind: "run-settled",
-          runId,
-          taskId: task.id,
-          at: at.toISOString(),
-          outcome: "gone",
-          verdict: null,
-          unmet: [],
-          landing: `会话没能起来（${problem}）`,
-        });
-      } catch (error) {
-        log(`运行 ${runId} 的失败没能记进台账：${error instanceof Error ? error.message : String(error)}`);
-      }
-      unrecordedRuns.delete(runId);
-      // THE CHECKOUT GOES BACK — it holds nothing and no session was ever
-      // started in it.
-      try {
-        worktrees.settle({ worktree: cut.worktree, outcome: "failed", station: task.contract.restatement.station });
-      } catch (error) {
-        log(`运行 ${runId} 的隔离 checkout 没能回收：${error instanceof Error ? error.message : String(error)}`);
-      }
+      // NOTHING IS WRITTEN FOR A LAUNCH THAT NEVER HAPPENED (reviewer P1): the
+      // arming line is inert on its own (`openRuns` ignores it), so the ledger
+      // keeps NO run this session never was — no `run-settled`, no ghost in the
+      // panel's history. The checkout goes back and the slot stays owed.
+      releaseCheckout(cut.worktree, task, runId);
       if (started.permanent === true) {
         // A PERMANENT obstacle (no tmux to run at all): retrying every 20 s
         // would burn the schedule on something no retry can repair. The slot is
@@ -651,10 +634,32 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // A SESSION IS ALREADY RUNNING: from here on the slot counts as dealt with
     // and this run holds its checkout, whatever the disk does next.
     dealt(task, at, slot);
-    // …AND WHERE ITS WINDOW IS, in a SECOND line (2026-10-03): the coordinates
-    // did not exist when the `run-started` line had to be written. Best-effort —
-    // a run with no coordinates is closed the only remaining way, when its
-    // process exits and tmux reclaims the window.
+    const run: ScheduleRunStarted = {
+      kind: "run-started",
+      runId,
+      taskId: task.id,
+      sessionId,
+      at: at.toISOString(),
+      // THE RUN'S OWN CHECKOUT, IN THE LEDGER (lib/schedule-worktree.ts settles
+      // it by exactly these four facts, and the contract adoption reads the
+      // owner record they point at).
+      worktree: cut.worktree.path,
+      branch: cut.worktree.branch,
+      base: cut.worktree.base,
+    };
+    try {
+      appendScheduleRun(deps.home, run);
+    } catch (error) {
+      // The session is REAL and running; only its ledger line is missing. It is
+      // remembered in memory so it still settles — and the arming line already
+      // on disk keeps a restart from treating the slot as unhandled.
+      unrecordedRuns.set(runId, run);
+      log(`运行 ${runId} 写不进台账（会话已在跑，先记在内存里）：${error instanceof Error ? error.message : String(error)}`);
+    }
+    // …AND WHERE ITS WINDOW IS, in its own line (2026-10-03): the coordinates
+    // did not exist until the launch returned. Best-effort — a run with no
+    // coordinates is closed the only remaining way, when its process exits and
+    // tmux reclaims the window.
     if (started.scopeSession !== undefined && started.windowId !== undefined) {
       try {
         appendScheduleRun(deps.home, {
@@ -672,6 +677,22 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     }
     log(`调度任务 ${task.name} 已发起运行 ${runId}（会话 ${started.sessionId}）`);
     return run;
+  }
+
+  /**
+   * Give a checkout back after a launch that never happened.
+   *
+   * The run produced nothing — no session was ever started in it — so this is a
+   * `failed` settlement, which recycles an empty checkout and keeps a non-empty
+   * one for a human (lib/schedule-worktree.ts). A settlement that throws is
+   * logged and forgotten: the slot's fate must not depend on it.
+   */
+  function releaseCheckout(worktree: ScheduleWorktreeOwner, task: ScheduledTask, runId: string): void {
+    try {
+      worktrees.settle({ worktree, outcome: "failed", station: task.contract.restatement.station });
+    } catch (error) {
+      log(`运行 ${runId} 的隔离 checkout 没能回收：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /**
@@ -817,6 +838,19 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // owed and the `due` branch below runs it — see `dueDecision`.)
         if (!decision.due) continue;
         const slot = slotKey(task.id, decision.scheduledAt);
+        // A CONTRACT THAT DOES NOT CHECK OUT IS NOT A RUNNABLE TASK (2026-10-03,
+        // reviewer P1): adoption refuses it at `session_start`
+        // (lib/schedule-run-contract.ts), so starting a session for it would
+        // burn the slot on a run that can never adopt what the user approved.
+        // The store's own validator is what answers — never a second copy.
+        const contractProblem = scheduleContractProblem(task.contract);
+        if (contractProblem !== undefined) {
+          // PERMANENT: no retry repairs a corrupted contract. The slot is
+          // consumed and the ledger names it.
+          if (unrecordedSlots.has(slot)) dealt(task, at, slot);
+          else skipped(task, at, `任务契约不成立（${contractProblem}）`, slot);
+          continue;
+        }
         // THE SAME SLOT IS NOT STARTED TWICE, even when nothing can be
         // written: a session that was started but not recorded would otherwise
         // be started again on every tick, forever.
