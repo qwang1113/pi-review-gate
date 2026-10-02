@@ -11,21 +11,22 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 
 import {
-  createScheduler,
+  createScheduler as createSchedulerRaw,
   dueDecision,
   openRuns,
-  repoHolder,
   runTaskText,
   settlementFor,
-  SLOT_GRACE_MS,
   type DueDecision,
   type DueReason,
   type Scheduler,
+  type SchedulerDeps,
 } from "../lib/daemon/scheduler.ts";
+import type { CutScheduleWorktree, ScheduleSettlement } from "../lib/schedule-worktree.ts";
 import {
   addScheduledTask,
   appendScheduleRun,
@@ -48,6 +49,36 @@ import { fakeRunner, scheduleContract, scheduleTaskInput, scratchHome, scratchRe
  * that {@link justDueStamp} can name the slot a task is counting towards.
  */
 const EVERY_FIVE_MINUTES = "*/5 * * * *";
+
+/**
+ * THE CHECKOUT SEAM, FAKED (2026-10-03).
+ *
+ * A tick test has no git repository on disk and does not need one: what it
+ * verifies is the SCHEDULER's own decisions — when a run starts, what its
+ * ledger line carries, and what happens to a slot it could not start at all.
+ * The real `git worktree` behaviour (cut, seed, land, reclaim) is
+ * test/schedule-worktree.test.ts's subject, where a real repository is the
+ * point.
+ */
+const FAKE_WORKTREES = {
+  cut: (input: { repo: string; runId: string }): CutScheduleWorktree => ({
+    ok: true,
+    worktree: {
+      repo: input.repo,
+      runId: input.runId,
+      branch: `rg-schedule-${input.runId.replace(/[^A-Za-z0-9]/g, "")}`,
+      base: "0".repeat(40),
+      path: join(tmpdir(), `rg-fake-worktree-${input.runId}`),
+    },
+    seed: [],
+  }),
+  settle: (): ScheduleSettlement => ({ action: "reclaimed", branch: "", changes: false, note: "fake" }),
+};
+
+/** Every scheduler in this file gets the faked checkout seam. */
+function createScheduler(deps: Omit<SchedulerDeps, "worktrees">): Scheduler {
+  return createSchedulerRaw({ ...deps, worktrees: FAKE_WORKTREES });
+}
 
 /**
  * A `lastFiredAt` that puts the task's NEXT slot INSIDE `SLOT_GRACE_MS`.
@@ -150,51 +181,51 @@ test("due: a never-fired task counts from createdAt, and one slot is dealt with 
   assert.equal(dueDecision({ task: fired, now: new Date(2026, 8, 30, 9, 30), openRun: false }).due, false);
   assert.equal(dueDecision({ task: fired, now: new Date(2026, 9, 1, 9, 0, 30), openRun: false }).due, true);
 
-  // A task whose daemon was away for a week is NOT due: the slot it names is
-  // the first one it missed, and a missed slot is skipped (the dedicated test
-  // below owns that rule and the base it consumes).
+  // A task whose daemon was away for a week IS due: the slot it names is the
+  // first one it missed, and a slot that arrived while no daemon was running is
+  // now RUN rather than discarded (2026-10-03). One run, not seven — `lastFiredAt`
+  // names a single next slot however long the gap is.
   const stale = task({ lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() });
   const late = dueDecision({ task: stale, now: new Date(2026, 8, 30, 10, 0), openRun: false });
-  assert.equal(late.due, false);
-  assert.equal(late.reason, "missed");
+  assert.equal(late.due, true);
+  assert.equal(late.reason, "due");
+  assert.equal(late.scheduledAt?.getTime(), new Date(2026, 8, 21, 9, 0).getTime(), "欠着的是基准之后的第一个槽");
 
   // A stamp at or past the slot it is being judged against: already dealt with.
   const stamped = task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 30).toISOString() });
   assert.equal(dueDecision({ task: stamped, now: new Date(2026, 8, 30, 9, 0, 40), openRun: false }).reason, "not-yet");
 });
 
-test("due: a slot the daemon slept through is MISSED — skipped, never named in the past", () => {
+test("due: a slot the daemon slept through is OWED, not skipped (2026-10-03)", () => {
   const now = new Date(2026, 8, 30, 10, 0);
   const stale = task({ lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() });
-  const missed = dueDecision({ task: stale, now, openRun: false });
-  assert.equal(missed.due, false);
-  assert.equal(missed.reason, "missed");
-  assert.equal(missed.missedAt?.getTime(), new Date(2026, 8, 21, 9, 0).getTime(), "被错过的就是基准之后的第一个槽");
-  assert.equal(missed.scheduledAt?.getTime(), new Date(2026, 9, 1, 9, 0).getTime(), "scheduledAt 滑到 now 之后的下一次");
-  assert.ok(missed.scheduledAt!.getTime() > now.getTime(), "…所以它不会指着一个过去的时间，说下一次在那里");
+  const owed = dueDecision({ task: stale, now, openRun: false });
+  assert.equal(owed.due, true);
+  assert.equal(owed.reason, "due");
+  assert.equal(owed.scheduledAt?.getTime(), new Date(2026, 8, 21, 9, 0).getTime(), "欠着的就是基准之后的第一个槽");
+  assert.ok(owed.scheduledAt!.getTime() < now.getTime(), "它确实落在过去 — 那正是「欠着」的意思");
 
-  // A slot that has NOT arrived is a different word — and no missedAt.
+  // A slot that has NOT arrived is a different word.
   const ahead = dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 5).toISOString() }), now, openRun: false });
   assert.equal(ahead.reason, "not-yet");
-  assert.equal(ahead.missedAt, null);
 });
 
-test("due: the grace window is what separates a late tick from a missed slot", () => {
+test("due: lateness no longer separates a late tick from a runnable slot", () => {
   const fresh = task(); // the first slot after it was authored: 2026-09-30 09:00 local
   const slot = new Date(2026, 8, 30, 9, 0);
-  const edge = new Date(slot.getTime() + SLOT_GRACE_MS);
-  assert.equal(dueDecision({ task: fresh, now: edge, openRun: false }).reason, "due", "宽限之内仍算到点");
-  const past = new Date(edge.getTime() + 1);
-  assert.equal(dueDecision({ task: fresh, now: past, openRun: false }).reason, "missed", "宽限之外就是错过");
+  assert.equal(dueDecision({ task: fresh, now: slot, openRun: false }).reason, "due", "刚到点当然跑");
+  const hoursLater = new Date(slot.getTime() + 6 * 60 * 60_000);
+  assert.equal(dueDecision({ task: fresh, now: hoursLater, openRun: false }).reason, "due", "迟到六小时也是这一槽，跑它而不是丢掉");
 });
 
-test("due: scheduledAt never names a time the daemon slept through", () => {
+test("due: scheduledAt names the slot the task is OWED, in the past or not", () => {
   // THE FIELD EVERY SURFACE RENDERS (the API's `nextRunAt`, the panel,
-  // `schedule_task({action:"list"})`) must never claim that a slot the daemon
-  // slept through is what comes next. Only two things may sit behind `now` at
-  // all: the slot that has just arrived (inside the grace window, a tick away
-  // from being dealt with or skipped), and the slot an UNSETTLED RUN is holding
-  // — the open-run case below says why that one is honest rather than stale.
+  // `schedule_task({action:"list"})`) names the slot the tick will act on. Two
+  // things may sit behind `now`: the slot that has just arrived, and the slot an
+  // owed run (or an unsettled one) is holding — in both cases the run a tick is
+  // about to start IS for that slot, which is why they are honest rather than
+  // stale (2026-10-03: late slots used to be skipped, and the field had to
+  // pretend they never existed).
   //
   // `already-dealt` is NOT in the table: it is unreachable by construction
   // (`nextRunAfter` is strictly later than the base it is counted from, and that
@@ -227,24 +258,16 @@ test("due: scheduledAt never names a time the daemon slept through", () => {
       decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 5).toISOString() }), now: at, openRun: false }),
     },
     {
-      label: "missed",
-      now: at,
-      expected: "missed",
-      decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() }), now: at, openRun: false }),
-    },
-    {
-      // A WEEK-OLD BASE **and** an unsettled run: the only shape that reaches
-      // this branch with a slot behind `now`.
       label: "open-run",
       now: at,
       expected: "open-run",
       decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() }), now: at, openRun: true }),
     },
     {
-      label: "due",
-      now: new Date(2026, 8, 30, 9, 1),
+      label: "due (owed while the daemon was away)",
+      now: at,
       expected: "due",
-      decision: dueDecision({ task: task(), now: new Date(2026, 8, 30, 9, 1), openRun: false }),
+      decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() }), now: at, openRun: false }),
     },
     {
       label: "due (never fired)",
@@ -256,20 +279,17 @@ test("due: scheduledAt never names a time the daemon slept through", () => {
   for (const { label, now: moment, expected, decision } of cases) {
     assert.equal(decision.reason, expected, `${label} 必须命中它命名的分支`);
     if (decision.scheduledAt === null) continue;
-    if (expected === "open-run") {
-      // THE ONE EXCEPTION, AND IT IS THE POINT OF THIS BRANCH: an unsettled run
-      // holds the slot it was STARTED for, and a run that has been going for
-      // days holds a slot from days ago. Nothing may move that base until the
-      // run settles, so the honest answer is the old slot — not a "next" one
-      // that would not be honoured. No panel ever sees it: `GET /api/schedules`
-      // asks with `openRun: false` (daemon/server.ts), and the tool face names
-      // it 「已过期：本任务还有一次运行没结算」 instead of promising a tick.
-      assert.ok(decision.scheduledAt.getTime() < moment.getTime(), "open-run 显示的是那次运行正在处理的槽");
+    if (expected === "not-yet") {
+      assert.ok(decision.scheduledAt.getTime() > moment.getTime(), `${label} 指向未来`);
       continue;
     }
+    // `due` AND `open-run` both name a slot at or behind `now`: the first is the
+    // slot that has arrived (possibly long ago — that is what "owed" means),
+    // the second the slot an unsettled run is holding. What matters is that they
+    // do not name a time in the FUTURE.
     assert.ok(
-      decision.scheduledAt.getTime() > moment.getTime() - SLOT_GRACE_MS,
-      `${label}: ${decision.scheduledAt.toISOString()} 落在宽限之外（now ${moment.toISOString()}）`,
+      decision.scheduledAt.getTime() <= moment.getTime(),
+      `${label}: ${decision.scheduledAt.toISOString()} 不该落在未来`,
     );
   }
 });
@@ -441,7 +461,7 @@ test("settlement: a run that still holds its checkout is not 'gone' (t6 defect 2
 // the ledger's questions
 // ---------------------------------------------------------------------------
 
-test("openRuns drops what settled, and repoHolder compares normalized paths", () => {
+test("openRuns drops what settled", () => {
   const records = [
     { kind: "run-started" as const, runId: "r1", taskId: "t1", sessionId: "s1", at: "2026-10-01T00:00:00.000Z" },
     { kind: "run-started" as const, runId: "r2", taskId: "t2", sessionId: "s2", at: "2026-10-01T01:00:00.000Z" },
@@ -457,11 +477,6 @@ test("openRuns drops what settled, and repoHolder compares normalized paths", ()
     { kind: "run-skipped" as const, taskId: "t3", at: "2026-10-01T03:00:00.000Z", reason: "busy" },
   ];
   assert.deepEqual(openRuns(records).map((run) => run.runId), ["r2"]);
-  const repoOf = (run: { taskId: string }): string => (run.taskId === "t1" ? "/a/repo" : "/b/repo");
-  const open = openRuns(records);
-  assert.equal(repoHolder(open, "/a/repo", repoOf), undefined, "the settled run no longer holds anything");
-  assert.equal(repoHolder(open, "/b/repo/", repoOf)?.runId, "r2", "a trailing slash is the same repository");
-  assert.equal(repoHolder(open, "/c/repo", repoOf), undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -516,11 +531,11 @@ test("a tick fires a due task once, and a restart does not fire it again", () =>
   assert.match(opening, /declare_done/);
 });
 
-test("a week offline SKIPS the missed slot — and the next real slot still fires (no dead stop)", () => {
+test("a week offline RUNS the owed slot once, and the rhythm resumes from there (2026-10-03)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
   // A daily 09:00 task whose base is a week old: the slot it is counting
-  // towards arrived while no daemon was running.
+  // towards arrived while no daemon was running. LATE IS NOT LOST any more.
   const added = addScheduledTask(home, scheduleTaskInput(repo, { cron: "0 9 * * *" }));
   if (!added.ok) assert.fail(added.problem);
   const stamped = updateScheduledTask(
@@ -530,44 +545,65 @@ test("a week offline SKIPS the missed slot — and the next real slot still fire
     { from: "gate" },
   );
   if (!stamped.ok) assert.fail(stamped.problem);
-  // THE TICK'S OWN CLOCK, moved by hand: the daemon "comes back up" here, and
-  // the next real slot is an assignment away.
-  let at = new Date(2026, 8, 30, 10, 0);
+  // THE TICK'S OWN CLOCK, moved by hand: the daemon "comes back up" here.
+  const at = new Date(2026, 8, 30, 10, 0);
   const tmux = fakeTmux();
   const scheduler = createScheduler({ home, runTmux: tmux, observer: fakeObserver([]), now: () => at.getTime() });
 
-  // THREE TICKS IN A ROW: nothing starts, and the skipped slot is recorded ONCE
-  // — the base moved forward, so ticks 2 and 3 are no longer looking at it.
   scheduler.tick();
-  scheduler.tick();
-  scheduler.tick();
-  assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0, "停机跨过的时点不补跑");
-  const skips = readScheduleRuns(home).filter((record) => record.kind === "run-skipped");
-  assert.equal(skips.length, 1, "一槽只记一条 run-skipped");
-  assert.match(skips[0]!.reason, /跳过不补跑/);
-  assert.ok(
-    skips[0]!.reason.includes(new Date(2026, 8, 21, 9, 0).toISOString()),
-    `reason 点名被错过的那个时刻：${skips[0]!.reason}`,
-  );
+  assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 1, "停机跨过的时点补跑一次");
+  const records = readScheduleRuns(home);
+  assert.equal(records.filter((record) => record.kind === "run-started").length, 1);
+  assert.equal(records.filter((record) => record.kind === "run-skipped").length, 0, "不写跳过：这一槽是被跑掉的");
+  // ONE RUN, NOT SEVEN: the base moves to `now`, so the other slots the outage
+  // covered are never named by anything — there is no catch-up queue.
   const table = readSchedules(home);
   assert.ok(table.ok, table.ok ? "" : table.problem);
-  assert.equal(
-    table.ok && table.file.tasks[0]!.lastFiredAt,
-    at.toISOString(),
-    "被错过的槽被消费掉：基准前移，任务不会永远停在旧槽上",
-  );
-
-  // AND THE NEXT REAL SLOT STILL FIRES: ten hours later its own 09:00 arrives.
-  at = new Date(2026, 9, 1, 9, 0, 30);
+  assert.equal(table.ok && table.file.tasks[0]!.lastFiredAt, at.toISOString(), "这一槽被消费：基准前移到现在");
   scheduler.tick();
   assert.equal(
     readScheduleRuns(home).filter((record) => record.kind === "run-started").length,
     1,
-    "跳过一个时点不等于停死：下一次到点照常跑",
+    "同一个槽不会跑第二遍",
   );
 });
 
-test("a run that outlives its own slot is missed for the RIGHT reason (itself, not a stopped daemon)", () => {
+test("a checkout that cannot be cut KEEPS the slot — the next tick tries again (2026-10-03)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  const task = dueTask(home, repo, { name: "unbuildable-checkout" });
+  const tmux = fakeTmux();
+  const logs: string[] = [];
+  // A TEMPORARY obstacle: a full disk, a repo mid-rebuild. Nothing may be
+  // consumed — if the slot were stamped, the run would be lost for a whole
+  // period because of something that fixes itself in seconds.
+  const broken = createSchedulerRaw({
+    home,
+    runTmux: tmux,
+    observer: fakeObserver([]),
+    log: (message) => logs.push(message),
+    worktrees: {
+      cut: () => ({ ok: false, problem: "磁盘满了" }),
+      settle: () => ({ action: "reclaimed", branch: "", changes: false, note: "fake" }),
+    },
+  });
+  broken.tick();
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-started").length, 0, "切不出 checkout 就不发车");
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-skipped").length, 0, "暂时障碍不写 run-skipped");
+  assert.ok(logs.some((message) => message.includes("磁盘满了")), logs.join("\n"));
+  const table = readSchedules(home);
+  assert.ok(table.ok, table.ok ? "" : table.problem);
+  assert.equal(table.ok && table.file.tasks[0]!.lastFiredAt, task.lastFiredAt, "槽没被消费：基准没动");
+
+  // THE OBSTACLE PASSES — and the very next tick runs that same slot.
+  const healthy = createScheduler({ home, runTmux: tmux, observer: fakeObserver([]) });
+  healthy.tick();
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-started").length, 1, "条件一好就补上这一次");
+  healthy.tick();
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-started").length, 1, "仍然只跑一次");
+});
+
+test("a run that outlives its own slot keeps that slot owed until it settles (2026-10-03)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
   const added = addScheduledTask(home, scheduleTaskInput(repo, { cron: "0 * * * *" }));
@@ -597,73 +633,55 @@ test("a run that outlives its own slot is missed for the RIGHT reason (itself, n
   const scheduler = createScheduler({ home, runTmux: tmux, observer, now: () => at.getTime() });
 
   // The 10:00 slot arrived while THIS TASK'S OWN run was still going: nothing
-  // starts, and that is `open-run` — not a missed slot.
+  // starts — `open-run` — and the slot itself is NOT consumed.
   scheduler.tick();
   assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-skipped").length, 0, "运行还在跑：那是 open-run");
   assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0);
 
-  // IT SETTLES AT 11:30 — and the tick that finds it settled is where the base
-  // finally moves. The slot is missed, but the daemon was NEVER away, and the
-  // ledger has to say so.
+  // IT SETTLES AT 11:30 — and the tick that finds it settled runs the owed
+  // slot right there: late by an hour and a half is still runnable.
   at = new Date(2026, 8, 30, 11, 30);
   sessions = [sessionFor("sess-cccc7777", { repo, state: "done", rounds: { sent: 1, recorded: 1, lastVerdict: "READY" } })];
   scheduler.tick();
   assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-settled").length, 1, "运行在本 tick 结算");
-  const skips = readScheduleRuns(home).filter((record) => record.kind === "run-skipped");
-  assert.equal(skips.length, 1, "结算之后，这一槽才被判错过");
-  assert.ok(
-    skips[0]!.reason.includes(new Date(2026, 8, 30, 10, 0).toISOString()),
-    `reason 点名被错过的那个槽：${skips[0]!.reason}`,
-  );
-  assert.match(
-    skips[0]!.reason,
-    /本任务自己还有一次运行没结算/,
-    "成因不能只说「daemon 不在跑」——它一直在跑",
-  );
-  assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0, "这一轮也不重新发车");
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-skipped").length, 0, "不写跳过");
+  assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 1, "结算之后，欠着的那一槽立刻跑");
 });
 
-test("a run is not fired into a checkout another LIVE SESSION holds (quality round P1)", () => {
+test("another live session in the repo no longer stops the run (2026-10-03)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
-  const task = dueTask(home, repo, { name: "held-repo-task" });
+  dueTask(home, repo, { name: "busy-repo-task" });
   const presence = join(repo, ".pi", "session-presence.json");
-  const writePresence = (at: string): void => {
-    mkdirSync(join(repo, ".pi"), { recursive: true });
-    writeFileSync(presence, JSON.stringify({ sessionId: "other-session", pid: 4242, host: "host", at }), { mode: 0o600 });
-  };
-  const scheduler = createScheduler({ home, runTmux: fakeTmux(), observer: fakeObserver([]) });
-
-  // A FRESH heartbeat = somebody is working in that checkout right now. The
-  // gate would refuse to arm the run's session, and a run that cannot arm
-  // cannot adopt its contract — so nothing is started.
-  writePresence(new Date().toISOString());
-  scheduler.tick();
-  let records = readScheduleRuns(home);
-  assert.equal(records.filter((record) => record.kind === "run-started").length, 0, "被占用的 checkout 里不出发起会话");
-  const skips = records.filter((record) => record.kind === "run-skipped");
-  assert.equal(skips.length, 1, "占用写成一条 run-skipped，而不是一辆开不动的车");
-  assert.match(skips[0]!.reason, /other-session/, "reason 点名占用者");
-
-  // The skip stamps the slot like any other decision: the next tick is quiet.
-  scheduler.tick();
-  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-skipped").length, 1);
-
-  // A LAPSED heartbeat is nobody (the exclusivity rule's own fail-open
-  // direction): with the slot put back in the past, the run goes out.
-  writePresence(new Date(Date.now() - 5 * 60_000).toISOString());
-  const rewound = updateScheduledTask(home, task.id, { lastFiredAt: justDueStamp() }, { from: "gate" });
-  assert.equal(rewound.ok, true);
-  scheduler.tick();
-  records = readScheduleRuns(home);
-  assert.equal(records.filter((record) => record.kind === "run-started").length, 1, "过期心跳不挡车");
+  mkdirSync(join(repo, ".pi"), { recursive: true });
+  // A FRESH heartbeat: somebody is working in the MAIN repo right now. That used
+  // to cost a `run-skipped` per slot — six of them in one day on this machine.
+  // The run works in its own checkout now, so it is not a conflict at all (the
+  // presence file is not even read on this path any more).
+  writeFileSync(
+    presence,
+    JSON.stringify({ sessionId: "other-session", pid: 4242, host: "host", at: new Date().toISOString() }),
+    { mode: 0o600 },
+  );
+  const tmux = fakeTmux();
+  createScheduler({ home, runTmux: tmux, observer: fakeObserver([]) }).tick();
+  const records = readScheduleRuns(home);
+  assert.equal(records.filter((record) => record.kind === "run-started").length, 1, "主 repo 有人也照常起");
+  assert.equal(records.filter((record) => record.kind === "run-skipped").length, 0, "不再有「被占」这条跳过");
+  // AND THE LEDGER NAMES THE RUN'S OWN CHECKOUT: that is what the settlement
+  // and the contract adoption both need.
+  const run = records.find((record) => record.kind === "run-started");
+  assert.ok(run !== undefined && run.kind === "run-started", JSON.stringify(records));
+  assert.equal(run.worktree?.includes("rg-fake-worktree-"), true, JSON.stringify(run));
+  assert.match(run.branch ?? "", /^rg-schedule-run/);
+  assert.equal(run.base, "0".repeat(40));
 });
 
-test("a repo with an unsettled run blocks the next one, and the skip names the holder", () => {
+test("two tasks in one repo no longer block each other (2026-10-03)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
   const holder = dueTask(home, repo, { name: "task-a" });
-  const blocked = dueTask(home, repo, { name: "task-b", requirement: "同一 repo 的第二个任务" });
+  const second = dueTask(home, repo, { name: "task-b", requirement: "同一 repo 的第二个任务" });
   appendScheduleRun(home, {
     kind: "run-started",
     runId: "run-aaaa1111",
@@ -678,21 +696,18 @@ test("a repo with an unsettled run blocks the next one, and the skip names the h
     observer: fakeObserver([sessionFor("sess-run-aaaa1111", { state: "working", repo })]),
   });
 
+  // THE HAND-WRITTEN RUN IS STILL GOING, and the second task's slot is due:
+  // both are open at once now — each in its own checkout, which is the whole
+  // point. It used to be a `run-skipped` against the first run's id.
   scheduler.tick();
   const records = readScheduleRuns(home);
-  assert.equal(records.filter((record) => record.kind === "run-started").length, 1, "the open run is the only one started");
-  const skips = records.filter((record) => record.kind === "run-skipped");
-  assert.equal(skips.length, 1, "the same repo's second task is skipped, not started");
-  assert.equal(skips[0]!.taskId, blocked.id);
-  assert.match(skips[0]!.reason, /run-aaaa1111/);
-  assert.match(skips[0]!.reason, new RegExp(holder.id));
-
-  // The skip stamps the slot: a 20-second-later tick does not repeat it.
-  scheduler.tick();
-  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-skipped").length, 1);
+  const started = records.filter((record) => record.kind === "run-started");
+  assert.equal(started.length, 2, "两个任务各起各的，不再互相阻塞");
+  assert.equal(started.filter((record) => record.taskId === second.id).length, 1);
+  assert.equal(records.filter((record) => record.kind === "run-skipped").length, 0);
 });
 
-test("a settling run frees its repo — for exactly one successor", () => {
+test("a settling run is settled ONCE, and the repo's other task runs anyway (2026-10-03)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
   const first = dueTask(home, repo, { name: "task-a" });
@@ -719,16 +734,15 @@ test("a settling run frees its repo — for exactly one successor", () => {
   assert.equal(settled[0]!.outcome, "passed");
   assert.deepEqual(settled[0]!.unmet, ["code-review"]);
 
-  // Both tasks are due and share a repo: the settled run released it, ONE of
-  // them starts, and the other is skipped against the run that just started.
+  // BOTH tasks are due and share a repo — and both run. Nothing waits for the
+  // other's checkout any more.
   const started = records.filter((record) => record.kind === "run-started");
-  assert.equal(started.length, 2, "the hand-written run plus exactly one new one");
-  const fresh = started.find((record) => record.runId !== "run-bbbb2222")!;
-  assert.equal(fresh.taskId, first.id, "the task whose run settled goes first");
-  const skips = records.filter((record) => record.kind === "run-skipped");
-  assert.equal(skips.length, 1);
-  assert.equal(skips[0]!.taskId, second.id);
-  assert.match(skips[0]!.reason, new RegExp(fresh.runId));
+  assert.equal(started.length, 3, "the hand-written run plus one for EACH due task");
+  assert.deepEqual(
+    started.filter((record) => record.runId !== "run-bbbb2222").map((record) => record.taskId).sort(),
+    [first.id, second.id].sort(),
+  );
+  assert.equal(records.filter((record) => record.kind === "run-skipped").length, 0);
 });
 
 test("a settled run's window is closed — the checkout it held is reclaimed (quality round P1)", () => {
@@ -778,33 +792,12 @@ test("a settled run's window is closed — the checkout it held is reclaimed (qu
   }).tick();
   assert.equal(tmux.calls.filter((argv) => argv[0] === "kill-window").length, killsBefore, "别人的 window 不关");
 
-  // …AND IF THAT CLOSE HAD FAILED (quality round P2): the leftover window holds
-  // the repo, so the next due slot finds it through the guard and closes it
-  // again instead of only skipping forever.
-  dueTask(home, repo, { name: "closing-task-next" });
-  mkdirSync(join(repo, ".pi"), { recursive: true });
-  writeFileSync(
-    join(repo, ".pi", "session-presence.json"),
-    JSON.stringify({ sessionId: "sess-bbbb2222", pid: 4242, host: "host", at: new Date().toISOString() }),
-    { mode: 0o600 },
-  );
-  const kills = tmux.calls.filter((argv) => argv[0] === "kill-window").length;
-  createScheduler({
-    home,
-    runTmux: tmux,
-    observer: fakeObserver([
-      sessionFor("sess-bbbb2222", { state: "done", repo, tmux: { session: scopeName!, window: "@7", pane: "%7" } }),
-    ]),
-  }).tick();
-  assert.equal(
-    tmux.calls.filter((argv) => argv[0] === "kill-window").length,
-    kills + 1,
-    "已结算运行的遗留窗口在下一次到期时被补关",
-  );
+  // A SETTLEMENT HAPPENS ONCE: the next tick has nothing left to settle for it.
+  createScheduler({ home, runTmux: tmux, observer: fakeObserver([]) }).tick();
   assert.equal(
     readScheduleRuns(home).filter((record) => record.kind === "run-settled" && record.runId === "run-bbbb2222").length,
     1,
-    "补关不会重复结算",
+    "同一个运行不会结算两次",
   );
 });
 
@@ -866,14 +859,10 @@ test("a settled run whose pane lost its @rg_sid is still closed by its launch re
     tmux.calls.some((argv) => argv[0] === "kill-window" && argv.includes(`${scopeName}:@9`)),
     `expected the RECORDED window to be closed, got: ${JSON.stringify(tmux.calls)}`,
   );
-  // AND THE SAME COORDINATES ARE WHAT THE LEFTOVER GUARD RETRIES WITH. The fake
-  // tmux killed nothing, so the checkout heartbeat is still fresh: the next due
-  // slot finds the occupant through it and closes the window from the receipt,
-  // instead of only skipping this repo forever.
-  const stamped = updateScheduledTask(home, added.value.id, { lastFiredAt: justDueStamp() }, { from: "gate" });
-  if (!stamped.ok) assert.fail(stamped.problem);
+  // AND THE RUN IS NOT SETTLED TWICE: the next tick finds nothing left for it,
+  // whatever the checkout's heartbeat says.
   scheduler().tick();
-  assert.ok(logs.some((message) => message.includes("已补关")), logs.join("\n"));
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-settled").length, 1, logs.join("\n"));
 });
 
 test("a run the listing cannot place is not settled while its own checkout still names it (t6 defect 2)", () => {

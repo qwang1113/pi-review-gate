@@ -76,6 +76,21 @@ Alt+Enter 排队的 followUp 消息需要 turn 边界才能进来。judge / work
 `--no-extensions` 启动，把 `pi-anthropic-oauth` 认证扩展也关掉了，请求按 extra usage 计费被 400；
 而且它只试 `slots[0]`，没有降级 —— 代答因此静默失败，agent 只看到「门禁没有替用户决定」。
 
+### 总则 · 定时任务到点就尽力跑（2026-10-03，用户决定）
+
+实测（2026-10-02 的 market-radar-scan 台账）：一天里六次没跑成 —— 三次「读不到 tmux server」
+（launchd 的 PATH 里没 tmux，或 server 没起来），两次是 daemon 重启期间错过的时点被判「错过不补跑」，
+一次是主 repo 里开着会话被判「被占」。用户的决定：**除非条件实在不允许，否则总要执行**。
+
+- **迟到不是丢失**：daemon 当时不在跑而到点的槽，恢复后照跑；一次只有一个槽，停机一周也只跑一次。
+- **暂时性障碍不消费槽**：割隔离 checkout 失败、会话起不来、tmux server 没起来 —— 什么都不写，下一次 tick 再试。
+  只有四类永久障碍写 `run-skipped`：任务停用、cron 非法、repo 不存在或不是 git 仓库、tmux 可执行文件找不到。
+- **每次运行在自己的隔离 checkout 里**（`/tmp/rg-worktrees/<repo>-sch-<runId>`，`lib/schedule-worktree.ts`）：
+  「主 repo 有别的会话」不再是跳过的理由，同一 repo 的两个任务也不再互相等。
+- **产出按结论落地**：只有记录过 READY 且有改动的运行才落地；站点 `precommit`/`commit` 合并回主 repo
+  （staged、不提交），站点 `pr` 留在隔离分支；没到 READY 的改动留在分支上等人工；没有改动就整个回收。
+- 面板上点任务的「历史」能看到每一槽的结果与原因（`GET /api/schedules/:id/runs` 加了 `offset` / `total`，可逐页走完）。
+
 ### Single-review loop (the only execution path, agent-initiated)
 
 **Judge roles run in their own windows** — the review is the only parallel

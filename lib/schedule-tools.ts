@@ -151,19 +151,23 @@ interface TaskView {
   enabled: boolean;
   nextRunAt: string | null;
   /**
-   * The slot this task is counting towards has already arrived — one the daemon
-   * still owes a decision on. `missed` says what that decision will be.
+   * The slot this task is counting towards has already arrived: the daemon owes
+   * it a run. Late is not lost (2026-10-03) — the owed slot keeps its identity
+   * until a run consumes it, and `nextRunAt` names THAT slot.
    */
   overdue: boolean;
-  /**
-   * The slot was missed while no daemon was there to run it: it will be SKIPPED
-   * (recorded as one `run-skipped`), not replayed — `nextRunAt` is already the
-   * slot after it.
-   */
-  missed: boolean;
   station: DeliveryStation;
   /** The newest run of this task, or null when it never ran. */
-  lastRun: { at: string; outcome: string; verdict: string | null; runId: string } | null;
+  lastRun: {
+    at: string;
+    outcome: string;
+    verdict: string | null;
+    runId: string;
+    /** The branch holding this run's output, when its settlement kept one. */
+    branch?: string;
+    /** What the settlement did with that output, in one line. */
+    landing?: string;
+  } | null;
 }
 
 function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], now: Date): TaskView {
@@ -185,11 +189,6 @@ function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], n
   const openRun = lastRun?.kind === "run-started";
   const decision = dueDecision({ task, now, openRun });
   const slot = decision.scheduledAt;
-  // `missed` is the one case where the slot is already past — and therefore
-  // overdue — while `nextRunAt` is NOT: the missed slot is skipped, so the
-  // field that says "what is next" slides to the slot after it instead of
-  // naming a time that will never be run.
-  const missed = decision.reason === "missed";
   return {
     id: task.id,
     name: task.name,
@@ -198,13 +197,19 @@ function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], n
     describe: describeCron(task.cron),
     enabled: task.enabled,
     nextRunAt: slot ? slot.toISOString() : null,
-    overdue: missed || (slot !== null && slot.getTime() <= now.getTime()),
-    missed,
+    overdue: slot !== null && slot.getTime() <= now.getTime(),
     station: task.contract.restatement.station,
     lastRun: lastRun === undefined
       ? null
       : lastRun.kind === "run-settled"
-        ? { at: lastRun.at, outcome: lastRun.outcome, verdict: lastRun.verdict, runId: lastRun.runId }
+        ? {
+            at: lastRun.at,
+            outcome: lastRun.outcome,
+            verdict: lastRun.verdict,
+            runId: lastRun.runId,
+            ...(lastRun.branch === undefined ? {} : { branch: lastRun.branch }),
+            ...(lastRun.landing === undefined ? {} : { landing: lastRun.landing }),
+          }
         : { at: lastRun.at, outcome: "open", verdict: null, runId: lastRun.runId },
   };
 }
@@ -234,13 +239,11 @@ function listReply(home: string, tasks: readonly ScheduledTask[], version: numbe
       ? "（停用或 cron 无解，不再跑）"
       : t.nextRunAt + (t.overdue
         ? (t.lastRun?.outcome === "open"
-          ? "（已过期：本任务还有一次运行没结算，结算后 daemon 才会处理）"
-          : t.missed
-            ? "（已错过：到点时没有启动运行（daemon 当时不在跑，或本任务自己还有一次运行没结算），按用户决定跳过不补跑 —— 下一次到点才跑；daemon 的下一次 tick 会记一条 run-skipped）"
-            : "（到点了：daemon 的下一次 tick 会处理；若同一 repo 还有别的运行没结算，这个 slot 会被跳过并记一条 run-skipped）")
+          ? "（已过期：本任务还有一次运行没结算；它一结算，这一槽立刻跑）"
+          : "（已到点还没跑：daemon 的下一次 tick 会处理；暂时起不来时这一槽会留着，不会被丢掉）")
         : "")}`,
     `  交付站点: ${t.station}`,
-    `  最近一次运行: ${t.lastRun === null ? "从未运行" : `${t.lastRun.at} → ${t.lastRun.outcome}${t.lastRun.verdict ? `（${t.lastRun.verdict}）` : ""}`}`,
+    `  最近一次运行: ${t.lastRun === null ? "从未运行" : `${t.lastRun.at} → ${t.lastRun.outcome}${t.lastRun.verdict ? `（${t.lastRun.verdict}）` : ""}${t.lastRun.branch ? `\n  产出留在: ${t.lastRun.branch}${t.lastRun.landing ? `（${t.lastRun.landing}）` : ""}` : ""}`}`,
   ].join("\n"));
   return toolReply(
     `review-gate: 定时任务 ${described.length} 条（调度表 version ${version}）：\n` + lines.join("\n"),

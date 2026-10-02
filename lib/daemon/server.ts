@@ -42,6 +42,7 @@ import { createDaemonTmuxRunner, launchTask, listCandidateRepos, sendSessionMess
 import {
   findScheduledTask,
   readScheduleRuns,
+  readScheduleRunPage,
   readSchedules,
   removeScheduledTask,
   scheduleNameProblem,
@@ -313,11 +314,11 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
           // THE SAME JUDGEMENT THE SCHEDULER MAKES, so the panel and the tick
           // cannot disagree about what is coming: the slot this task is
           // COUNTING TOWARDS (`lastFiredAt`'s next one, or the first one after
-          // it was authored), counted from the task's own base — never a time
-          // in the past. A slot the daemon slept through is SKIPPED rather than
-          // replayed, so once it is missed this field slides to the slot after
-          // it (lib/daemon/scheduler.ts's `SLOT_GRACE_MS` decides where
-          // "arrived" ends and "missed" begins).
+          // it was authored), counted from the task's own base. A slot that
+          // arrived while the daemon was down is NOT skipped (2026-10-03): it
+          // stays this field's answer — already in the past — and the next tick
+          // runs it. The panel renders that as overdue, which is honest and is
+          // exactly what the scheduler will do.
           //
           // WHY `openRun` IS ALWAYS FALSE HERE: this field answers 「按时间表下
           // 一个槽是哪个」, not 「运行结束后会发生什么」. Asking with the task's real
@@ -428,10 +429,17 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
         const found = taskById(opts.home, ctx.params.id!);
         if ("reply" in found) return found.reply;
         const limit = Math.min(Math.max(numberParam(ctx.query.get("limit")) ?? DEFAULT_RUNS_LIMIT, 1), MAX_RUNS_LIMIT);
+        // `offset` SKIPS THAT MANY OF THE NEWEST RECORDS (2026-10-03): with it
+        // the panel can walk the whole history instead of a window of 500 — and
+        // `total` is what tells it whether anything older remains.
+        const offset = Math.max(numberParam(ctx.query.get("offset")) ?? 0, 0);
+        const page = readScheduleRunPage(opts.home, { taskId: found.task.id, limit, offset });
         return ok({
           schema: DAEMON_SCHEMA,
           taskId: found.task.id,
-          runs: readScheduleRuns(opts.home, { taskId: found.task.id, limit }),
+          total: page.total,
+          offset,
+          runs: page.runs,
         });
       },
     },

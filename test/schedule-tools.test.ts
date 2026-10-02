@@ -442,23 +442,24 @@ test("list: every task with its run facts, and an empty table is a real answer",
   assert.match(out.content[0]!.text, /最近一次运行: 从未运行/);
 });
 
-test("list: a MISSED slot reads as overdue, and names the NEXT slot rather than the lost one", async () => {
+test("list: an OWED slot reads as overdue and names THAT slot — it will be run, not skipped", async () => {
   const f = fake();
   seed(f);
-  // A month after it was AUTHORED: the task never ran, so its first slot is
-  // long past — and a slot the daemon slept through is SKIPPED, not replayed,
-  // so 「下次运行」 is the slot AFTER it, not a time that will never be run
-  // (the panel's `/api/schedules` reads the same `dueDecision`, so the two
-  // surfaces cannot disagree).
+  // A month after it was AUTHORED: the task never ran, so its first slot is long
+  // past — and it is still OWED (2026-10-03). 「下次运行」 names that very slot rather
+  // than a later one, because that is the slot the next tick runs. The panel's
+  // `/api/schedules` reads the same `dueDecision`, so the two cannot disagree.
   const later = daysAfterSeeded(f, 30);
   f.deps.now = () => later;
   const out = await doScheduleTask(f.deps, { action: "list" }, {}, undefined);
   const task = (out.details?.tasks as Array<Record<string, unknown>>)[0]!;
   assert.equal(task.overdue, true);
-  assert.equal(task.missed, true, "这个槽已经错过（daemon 当时不在跑）");
-  assert.ok(Date.parse(String(task.nextRunAt)) > later.getTime(), String(task.nextRunAt));
-  assert.match(out.content[0]!.text, /已错过/);
-  assert.doesNotMatch(out.content[0]!.text, /已过期/, "错过不再等于「欠着」");
+  assert.ok(
+    Date.parse(String(task.nextRunAt)) < later.getTime(),
+    `欠着的槽就在过去，如实显示：${task.nextRunAt}`,
+  );
+  assert.match(out.content[0]!.text, /已到点还没跑/);
+  assert.doesNotMatch(out.content[0]!.text, /跳过/);
 });
 
 test("list: a task with an UNSETTLED run says so, and its overdue note promises no tick", async () => {

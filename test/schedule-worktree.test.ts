@@ -1,0 +1,248 @@
+/**
+ * THE RUN'S OWN CHECKOUT, ON A REAL REPOSITORY.
+ *
+ * Why this file exists at all (2026-10-03): a scheduled run used to work in the
+ * task's repository, so "that repo is busy" — the user's session, an earlier run
+ * of any task there — was a reason to SKIP the slot. Six slots in one day were
+ * lost to it on this machine. The fix gives every run its own checkout, and the
+ * checkout's whole life (cut from HEAD, seeded, and then landed or recycled by
+ * its outcome and its station) is `git` behaviour: it cannot be faked and still
+ * be tested.
+ *
+ * The scheduler's own tests fake this seam (`test/daemon-scheduler.test.ts`):
+ * they verify WHEN a checkout is cut and what a slot it could not cut does,
+ * which is not a git question at all.
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import {
+  createScheduleWorktree,
+  isScheduleWorktreePath,
+  readScheduleWorktreeOwner,
+  scheduleOwnerRecordPath,
+  scheduleWorktreeBranch,
+  scheduleWorktreePath,
+  scheduleWorktreeToken,
+  settleScheduleWorktree,
+  type ScheduleWorktreeOwner,
+} from "../lib/schedule-worktree.ts";
+import { gateWorktreeRoot } from "../lib/worktree-root.ts";
+
+/** Run git and return its trimmed stdout; throws on a non-zero exit. */
+function git(cwd: string, args: readonly string[]): string {
+  return execFileSync("git", [...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+/** A real repository with one commit, on `main`. */
+function gitRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "rg-sched-wt-repo-"));
+  git(dir, ["init", "-q", "-b", "main"]);
+  git(dir, ["config", "user.email", "gate-test@example.invalid"]);
+  git(dir, ["config", "user.name", "gate test"]);
+  writeFileSync(join(dir, "README.md"), "hello\n");
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", "init"]);
+  return dir;
+}
+
+/** Every directory this file creates is removed again, root included. */
+const made: string[] = [];
+function track<T extends string>(path: T): T {
+  made.push(path);
+  return path;
+}
+test.after(() => {
+  for (const path of made) rmSync(path, { recursive: true, force: true });
+});
+
+function cut(repo: string, runId = "run-aaaa1111"): ScheduleWorktreeOwner {
+  const result = createScheduleWorktree({ repo, runId });
+  if (!result.ok) assert.fail(result.problem);
+  made.push(result.worktree.path, scheduleOwnerRecordPath(result.worktree.path));
+  return result.worktree;
+}
+
+/** Commit `files` inside the checkout, on the run's own branch. */
+function commitIn(worktree: ScheduleWorktreeOwner, files: Record<string, string>, message = "feat: run output"): void {
+  for (const [name, content] of Object.entries(files)) {
+    writeFileSync(join(worktree.path, name), content);
+  }
+  git(worktree.path, ["add", "-A"]);
+  git(worktree.path, ["commit", "-q", "-m", message]);
+}
+
+// ---------------------------------------------------------------------------
+// pure naming
+// ---------------------------------------------------------------------------
+
+test("a run's token comes from its run id, and only our own paths look like ours", () => {
+  assert.equal(scheduleWorktreeToken("run-aaaa1111"), "runaaaa1111");
+  assert.equal(scheduleWorktreeBranch("runaaaa1111"), "rg-schedule-runaaaa1111");
+  const inside = scheduleWorktreePath("/somewhere/Repo.Name", "runaaaa1111");
+  assert.equal(inside, join(gateWorktreeRoot(), "Repo.Name-sch-runaaaa1111"));
+  assert.equal(isScheduleWorktreePath(inside), true);
+  assert.equal(isScheduleWorktreePath(join(gateWorktreeRoot(), "Repo.Name-s-runaaaa1111")), false, "会话的 worktree 不是我的");
+  assert.equal(isScheduleWorktreePath("/tmp/elsewhere/Repo.Name-sch-runaaaa1111"), false, "根目录之外的不是我的");
+});
+
+// ---------------------------------------------------------------------------
+// cutting
+// ---------------------------------------------------------------------------
+
+test("a run's checkout is cut from HEAD, seeded, and carries an owner record", () => {
+  const repo = track(gitRepo());
+  const worktree = cut(repo, "run-bbbb2222");
+  assert.equal(worktree.repo, repo);
+  assert.equal(worktree.branch, "rg-schedule-runbbbb2222");
+  assert.equal(worktree.base, git(repo, ["rev-parse", "HEAD"]), "base 是切的那一刻的 HEAD");
+  assert.equal(existsSync(worktree.path), true);
+  assert.equal(existsSync(join(worktree.path, "README.md")), true);
+  assert.equal(git(worktree.path, ["rev-parse", "--abbrev-ref", "HEAD"]), worktree.branch);
+  // THE OWNER RECORD IS WHAT MAKES CONTRACT ADOPTION POSSIBLE: a run's cwd is
+  // this path, not the task's repo, and the adoption has to accept it.
+  const owner = readScheduleWorktreeOwner(worktree.path);
+  assert.deepEqual(owner, worktree);
+  assert.equal(git(repo, ["worktree", "list"]).includes(worktree.path), true, "git 也认得它");
+  assert.equal(
+    readScheduleWorktreeOwner(join(repo, "nowhere")),
+    undefined,
+    "没有归属记录的目录不是我们的 checkout",
+  );
+});
+
+test("the checkout starts from the committed HEAD, not from the user's uncommitted work", () => {
+  const repo = track(gitRepo());
+  writeFileSync(join(repo, "README.md"), "uncommitted in the main repo\n");
+  writeFileSync(join(repo, "draft.txt"), "never committed\n");
+  const worktree = cut(repo, "run-cccc3333");
+  assert.equal(readFileSync(join(worktree.path, "README.md"), "utf8"), "hello\n", "未提交的改动不跟进来");
+  assert.equal(existsSync(join(worktree.path, "draft.txt")), false);
+  assert.equal(readFileSync(join(repo, "README.md"), "utf8"), "uncommitted in the main repo\n", "主 repo 一个字没动");
+});
+
+test("a checkout that cannot be cut says so instead of throwing", () => {
+  const notARepo = track(mkdtempSync(join(tmpdir(), "rg-sched-wt-norepo-")));
+  const result = createScheduleWorktree({ repo: notARepo, runId: "run-dddd4444" });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.problem, /worktree add 失败/);
+});
+
+// ---------------------------------------------------------------------------
+// settling
+// ---------------------------------------------------------------------------
+
+test("a run that produced NOTHING is recycled whole — branch and checkout both", () => {
+  const repo = track(gitRepo());
+  const worktree = cut(repo, "run-aaaa0001");
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "precommit" });
+  assert.equal(settlement.action, "reclaimed");
+  assert.equal(settlement.changes, false);
+  assert.equal(existsSync(worktree.path), false);
+  assert.equal(existsSync(scheduleOwnerRecordPath(worktree.path)), false);
+  assert.equal(git(repo, ["branch", "--list", worktree.branch]), "", "空分支不留");
+  assert.equal(git(repo, ["status", "--porcelain"]), "", "主 repo 逐字节不变");
+});
+
+test("READY output lands in the main repo STAGED and uncommitted", () => {
+  const repo = track(gitRepo());
+  const worktree = cut(repo, "run-aaaa0002");
+  commitIn(worktree, { "feature.txt": "done\n" });
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "precommit" });
+  assert.equal(settlement.action, "merged");
+  assert.equal(settlement.changes, true);
+  assert.equal(existsSync(worktree.path), false, "目录用完即回收");
+  // STAGED, NOT COMMITTED: at `precommit` the USER commits — that is what the
+  // station means, and a run may not take that decision for them.
+  assert.equal(git(repo, ["status", "--porcelain"]), "A  feature.txt");
+  assert.equal(git(repo, ["log", "--oneline", "-1"]).includes("init"), true, "没有新 commit");
+  assert.equal(readFileSync(join(repo, "feature.txt"), "utf8"), "done\n");
+  assert.equal(git(repo, ["branch", "--list", worktree.branch]) !== "", true, "分支留着作为 merged 的锚点");
+});
+
+test("output that did NOT conclude READY stays on its branch, untouched", () => {
+  const repo = track(gitRepo());
+  const worktree = cut(repo, "run-aaaa0003");
+  commitIn(worktree, { "half-done.txt": "wip\n" });
+  const settlement = settleScheduleWorktree({ worktree, outcome: "failed", station: "precommit" });
+  assert.equal(settlement.action, "branch-kept");
+  assert.match(settlement.note, /failed/);
+  assert.equal(settlement.branch, worktree.branch);
+  assert.equal(existsSync(worktree.path), false);
+  assert.equal(git(repo, ["status", "--porcelain"]), "", "主 repo 一动不动");
+  assert.equal(git(repo, ["show", `${worktree.branch}:half-done.txt`]), "wip", "改动在分支上，没丢");
+});
+
+test("UNCOMMITTED work is committed onto the run's branch before the directory goes", () => {
+  const repo = track(gitRepo());
+  const worktree = cut(repo, "run-aaaa0004");
+  writeFileSync(join(worktree.path, "loose.txt"), "not committed at all\n");
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "commit" });
+  // `commit` is still below `pr`, so a READY run lands — and the loose file had
+  // to be put on the branch first or the cleanup would have eaten it.
+  assert.equal(settlement.action, "merged");
+  assert.equal(readFileSync(join(repo, "loose.txt"), "utf8"), "not committed at all\n");
+  assert.equal(git(repo, ["status", "--porcelain"]), "A  loose.txt");
+});
+
+test("a `pr` run keeps its branch and is NEVER merged into the main repo", () => {
+  const repo = track(gitRepo());
+  const worktree = cut(repo, "run-aaaa0005");
+  commitIn(worktree, { "shipped.txt": "pr\n" });
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "pr" });
+  assert.equal(settlement.action, "branch-kept");
+  assert.match(settlement.note, /站点 pr/);
+  assert.equal(git(repo, ["status", "--porcelain"]), "", "合并回主 repo 会让那个 PR 失去意义");
+  assert.equal(git(repo, ["show", `${worktree.branch}:shipped.txt`]), "pr");
+});
+
+test("a DIRTY main repo is left alone — the branch is kept and named instead", () => {
+  const repo = track(gitRepo());
+  const worktree = cut(repo, "run-aaaa0006");
+  commitIn(worktree, { "feature.txt": "done\n" });
+  // The user is in the middle of their own work in the main repo.
+  writeFileSync(join(repo, "README.md"), "user's own edit\n");
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "precommit" });
+  assert.equal(settlement.action, "branch-kept");
+  assert.match(settlement.note, /未提交改动/);
+  assert.equal(readFileSync(join(repo, "README.md"), "utf8"), "user's own edit\n", "用户的改动没被动过");
+  assert.match(git(repo, ["status", "--porcelain"]), /^M README\.md$/m, "主 repo 只有用户自己那一处改动");
+  assert.equal(git(repo, ["show", `${worktree.branch}:feature.txt`]), "done");
+});
+
+test("a merge that would COLLIDE aborts, leaves the repo as it was, and keeps the branch", () => {
+  const repo = track(gitRepo());
+  const worktree = cut(repo, "run-aaaa0007");
+  commitIn(worktree, { "README.md": "the run's version\n" });
+  // The main repo moved on to a different content for the same file: a staged
+  // merge cannot land without a human's decision, and a run does not get to
+  // make it.
+  writeFileSync(join(repo, "README.md"), "main moved on\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-q", "-m", "fix: main moved on"]);
+  const before = git(repo, ["rev-parse", "HEAD"]);
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "commit" });
+  assert.equal(settlement.action, "branch-kept");
+  assert.match(settlement.note, /合并回主 repo 失败/);
+  assert.equal(git(repo, ["rev-parse", "HEAD"]), before, "主 repo 的 HEAD 一点没动");
+  assert.equal(git(repo, ["status", "--porcelain"]), "", "冲突被 abort 掉了，没有半合并的残留");
+  assert.equal(readFileSync(join(repo, "README.md"), "utf8"), "main moved on\n");
+  assert.equal(git(repo, ["show", `${worktree.branch}:README.md`]), "the run's version", "分支留着，人可以自己处理");
+});
+
+test("a second run of the same id replaces a leftover checkout instead of failing", () => {
+  const repo = track(gitRepo());
+  const first = cut(repo, "run-aaaa0008");
+  // The daemon died between cutting and launching: the next attempt at the SAME
+  // run id meets its own leftovers, and must not be stopped by them.
+  writeFileSync(join(first.path, "leftover.txt"), "from a dead attempt\n");
+  const second = createScheduleWorktree({ repo, runId: "run-aaaa0008" });
+  assert.equal(second.ok, true, second.ok ? "" : second.problem);
+  if (second.ok) made.push(second.worktree.path, scheduleOwnerRecordPath(second.worktree.path));
+  assert.equal(existsSync(join(first.path, "leftover.txt")), false, "上一次的残留不进入新的 checkout");
+});

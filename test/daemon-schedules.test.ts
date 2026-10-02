@@ -139,14 +139,14 @@ test("GET /api/schedules lists an empty table, then the tasks with their derived
   }
 });
 
-test("GET /api/schedules never names a slot in the past for a daemon that was away", async () => {
+test("GET /api/schedules names the slot the daemon OWES, even when it is in the past (2026-10-03)", async () => {
   const h = await harness();
   try {
     const task = addTask(h.home, h.repo, { name: "slept-through", enabled: true });
     // THE DAEMON WAS AWAY FOR A WEEK: the slot this task was counting towards
-    // arrived while nothing was running. That slot is SKIPPED rather than
-    // replayed, so the row must not keep pointing at it — `nextRunAt` is either
-    // a future slot or nothing at all, never a time that will not be run.
+    // arrived while nothing was running. That slot is OWED — the next tick runs
+    // it — so the row names it exactly, in the past and all. It used to be
+    // skipped and this field slid to the following slot; that whole idea is gone.
     const restored = updateScheduledTask(
       h.home,
       task.id,
@@ -155,9 +155,14 @@ test("GET /api/schedules never names a slot in the past for a daemon that was aw
     );
     if (!restored.ok) assert.fail(restored.problem);
     const row = (await taskList(h)).find((candidate) => candidate.id === task.id)!;
+    assert.ok(row.nextRunAt !== null, "有下一次要跑的槽");
     assert.ok(
-      row.nextRunAt === null || Date.parse(String(row.nextRunAt)) >= Date.now(),
-      `nextRunAt 要么未来要么 null，得到 ${String(row.nextRunAt)}`,
+      Date.parse(String(row.nextRunAt)) < Date.now(),
+      `欠着的槽就在过去，实话实说：得到 ${String(row.nextRunAt)}`,
+    );
+    assert.ok(
+      Date.parse(String(row.nextRunAt)) > Date.now() - 8 * 24 * 60 * 60 * 1_000,
+      "它是基准之后的第一个槽，不是一周前那个时刻",
     );
   } finally {
     await h.runtime.stop();
@@ -314,13 +319,55 @@ test("GET /api/schedules/:id/runs answers one task's ledger, newest `limit` entr
     }
     appendScheduleRun(h.home, { kind: "run-skipped", taskId: other.id, at: "2026-10-01T00:00:00.000Z", reason: "busy" });
 
-    const all = await h.json<{ taskId: string; runs: Array<{ runId: string }> }>(`/api/schedules/${task.id}/runs`);
+    const all = await h.json<{ taskId: string; runs: Array<{ runId: string }>; total: number; offset: number }>(
+      `/api/schedules/${task.id}/runs`,
+    );
     assert.equal(all.taskId, task.id);
+    assert.equal(all.total, 4, "total 是这个任务自己的台账总数");
+    assert.equal(all.offset, 0);
     assert.deepEqual(all.runs.map((record) => record.runId), ["run-1", "run-2", "run-3", "run-4"], "another task's ledger stays out");
     const limited = await h.json<{ runs: Array<{ runId: string }> }>(`/api/schedules/${task.id}/runs?limit=2`);
     assert.deepEqual(limited.runs.map((record) => record.runId), ["run-3", "run-4"], "the NEWEST entries survive the limit");
     assert.equal((await h.call(`/api/schedules/${task.id}/runs?limit=0`)).status, 200, "0 clamps to 1 rather than failing");
     assert.equal((await h.call("/api/schedules/sch-ffffffff/runs")).status, 404);
+  } finally {
+    await h.runtime.stop();
+  }
+});
+
+test("`offset` walks the WHOLE ledger, one page at a time, without gaps or repeats (2026-10-03)", async () => {
+  const h = await harness();
+  try {
+    const task = addTask(h.home, h.repo);
+    // MORE THAN ONE PAGE, and deliberately more than the panel asks for at
+    // once: the point of `offset` is that the 500-record ceiling stops being the
+    // end of the history.
+    for (let index = 0; index < 12; index += 1) {
+      appendScheduleRun(h.home, {
+        kind: "run-settled",
+        runId: `run-${String(index).padStart(2, "0")}`,
+        taskId: task.id,
+        at: `2026-10-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+        outcome: "passed",
+        verdict: "READY",
+        unmet: [],
+      });
+    }
+    const seen: string[] = [];
+    let offset = 0;
+    for (;;) {
+      const page = await h.json<{ runs: Array<{ runId: string }>; total: number }>(
+        `/api/schedules/${task.id}/runs?limit=5&offset=${offset}`,
+      );
+      assert.equal(page.total, 12);
+      if (page.runs.length === 0) break;
+      seen.push(...page.runs.map((record) => record.runId));
+      offset += page.runs.length;
+    }
+    assert.equal(seen.length, 12, "每一页都不重不漏");
+    assert.deepEqual([...seen].sort(), Array.from({ length: 12 }, (_, index) => `run-${String(index).padStart(2, "0")}`).sort());
+    const beyond = await h.json<{ runs: unknown[] }>(`/api/schedules/${task.id}/runs?limit=5&offset=99`);
+    assert.deepEqual(beyond.runs, [], "越过最早一条只有一个空页，不是错误");
   } finally {
     await h.runtime.stop();
   }

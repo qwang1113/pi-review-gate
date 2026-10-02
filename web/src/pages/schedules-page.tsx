@@ -11,7 +11,7 @@
  * `connected`（流断线重连：断线期间的事件已经丢了）。
  */
 
-import { PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { HistoryIcon, PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -30,6 +30,7 @@ import type {
   ScheduledTask,
   ScheduledTaskRun,
   SchedulesResponse,
+  ScheduleRunsResponse,
   ScheduleTaskWriteResponse,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -92,6 +93,186 @@ function RunSummary({ run }: { run: ScheduledTaskRun | undefined }) {
   );
 }
 
+/** One entry in the history: a run (its start + its result) or a single skip. */
+interface HistoryEntry {
+  key: string;
+  at: string;
+  started?: Extract<ScheduledTaskRun, { kind: "run-started" }>;
+  settled?: Extract<ScheduledTaskRun, { kind: "run-settled" }>;
+  skipped?: Extract<ScheduledTaskRun, { kind: "run-skipped" }>;
+}
+
+/**
+ * Pair each `run-started` with its `run-settled` (by run id) and keep every
+ * `run-skipped` on its own — that is what "一次运行" looks like to a human.
+ *
+ * A PAGE BOUNDARY CAN SPLIT A PAIR: the older page's `run-started` arrives
+ * before its settlement is fetched. Such an entry renders as "started, not yet
+ * settled" rather than being dropped, which is also the honest reading of a run
+ * that really is still going.
+ */
+function groupHistory(runs: readonly ScheduledTaskRun[]): HistoryEntry[] {
+  const byRun = new Map<string, HistoryEntry>();
+  const entries: HistoryEntry[] = [];
+  for (const run of runs) {
+    if (run.kind === "run-skipped") {
+      entries.push({ key: `skip-${run.at}-${entries.length}`, at: run.at, skipped: run });
+      continue;
+    }
+    let entry = byRun.get(run.runId);
+    if (entry === undefined) {
+      entry = { key: run.runId, at: run.at };
+      byRun.set(run.runId, entry);
+      entries.push(entry);
+    }
+    if (run.kind === "run-started") {
+      entry.started = run;
+      entry.at = run.at;
+    } else {
+      entry.settled = run;
+    }
+  }
+  return entries;
+}
+
+/**
+ * THE TASK'S WHOLE EXECUTION HISTORY, fetched on demand (2026-10-03).
+ *
+ * The API has offered `GET /api/schedules/:id/runs` all along; the panel never
+ * called it, so the only history on screen was the single "最近一次" line. This
+ * walks the ledger newest-first and — with `offset` — keeps going past the
+ * 500-record ceiling the endpoint alone would impose.
+ */
+function ScheduleHistory({ taskId }: { taskId: string }) {
+  const PAGE = 25;
+  const [runs, setRuns] = useState<ScheduledTaskRun[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(
+    async (offset: number) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const page = await api<ScheduleRunsResponse>(
+          `/api/schedules/${encodeURIComponent(taskId)}/runs?limit=${PAGE}&offset=${offset}`,
+        );
+        setTotal(page.total);
+        setRuns((previous) => (offset === 0 ? page.runs : [...page.runs, ...previous]));
+      } catch (failure) {
+        setError(describeError(failure));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [taskId],
+  );
+
+  useEffect(() => {
+    void load(0);
+  }, [load]);
+
+  // Newest first: the page a human wants is the top one, and "加载更早" appends
+  // below it exactly where the older records belong.
+  const entries = groupHistory(runs).reverse();
+  const hasMore = total !== null && runs.length < total;
+
+  if (error !== null) {
+    return (
+      <div className="border-t px-4 py-2 text-[11px] text-destructive">
+        读不到运行台账：{error}
+      </div>
+    );
+  }
+  if (total === null && loading) {
+    return <div className="border-t px-4 py-2 text-[11px] text-muted-foreground">正在读取运行台账…</div>;
+  }
+  if (entries.length === 0) {
+    return <div className="border-t px-4 py-2 text-[11px] text-muted-foreground">还没有任何运行记录。</div>;
+  }
+  return (
+    <div className="border-t">
+      {entries.map((entry) => (
+        <HistoryRow key={entry.key} entry={entry} />
+      ))}
+      <div className="flex items-center gap-2 px-4 py-2">
+        {hasMore ? (
+          <Button size="sm" variant="ghost" disabled={loading} onClick={() => void load(runs.length)}>
+            {loading ? "读取中…" : "加载更早"}
+          </Button>
+        ) : (
+          <span className="text-[11px] text-muted-foreground">已到最早一条（共 {total ?? 0} 条）</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function HistoryRow({ entry }: { entry: HistoryEntry }) {
+  if (entry.skipped !== undefined) {
+    return (
+      <div className="flex items-start justify-between gap-3 border-t px-4 py-2 text-[11px] first:border-t-0">
+        <div className="min-w-0">
+          <span className="inline-flex items-center gap-1.5">
+            <Badge variant="outline">已跳过</Badge>
+            <span className="text-muted-foreground">
+              {dateTime(entry.at)} · {relativeTime(entry.at)}
+            </span>
+          </span>
+          <div className="mt-0.5 break-words text-muted-foreground">{entry.skipped.reason}</div>
+        </div>
+      </div>
+    );
+  }
+  const settled = entry.settled;
+  const variant =
+    settled === undefined
+      ? "info"
+      : settled.outcome === "passed"
+        ? "success"
+        : settled.outcome === "blocked"
+          ? "destructive"
+          : settled.outcome === "gone"
+            ? "warning"
+            : "secondary";
+  const label =
+    settled === undefined
+      ? "已发起（未结算）"
+      : settled.outcome === "passed"
+        ? (settled.verdict ?? "READY")
+        : settled.outcome === "blocked"
+          ? (settled.verdict ?? "BLOCKED")
+          : settled.outcome === "gone"
+            ? "会话消失"
+            : "未结论结束";
+  return (
+    <div className="flex items-start justify-between gap-3 border-t px-4 py-2 text-[11px] first:border-t-0">
+      <div className="min-w-0">
+        <span className="inline-flex items-center gap-1.5">
+          <Badge variant={variant}>{label}</Badge>
+          <span className="text-muted-foreground">
+            {dateTime(entry.at)} · {relativeTime(entry.at)}
+          </span>
+          {settled !== undefined && settled.unmet.length > 0 && (
+            <span className="text-muted-foreground">未满足 {settled.unmet.length}</span>
+          )}
+        </span>
+        {(settled?.landing ?? entry.started?.branch) !== undefined && (
+          <div className="mt-0.5 break-words text-muted-foreground">
+            {settled?.landing ?? `产出在分支 ${entry.started?.branch}`}
+          </div>
+        )}
+      </div>
+      {entry.started !== undefined && (
+        <Link className="shrink-0 underline-offset-2 hover:underline" to={`/sessions/${entry.started.sessionId}`}>
+          打开那次会话
+        </Link>
+      )}
+    </div>
+  );
+}
+
 function ScheduleRow({
   task,
   busy,
@@ -114,6 +295,7 @@ function ScheduleRow({
   onCancelDelete: () => void;
 }) {
   const last = task.lastRuns[task.lastRuns.length - 1];
+  const [showHistory, setShowHistory] = useState(false);
   return (
     <Card className="gap-2 py-3">
       <CardHeader>
@@ -150,6 +332,10 @@ function ScheduleRow({
           <RunSummary run={last} />
         </div>
         <div className="flex items-center gap-1">
+          <Button size="sm" variant="ghost" onClick={() => setShowHistory((open) => !open)}>
+            <HistoryIcon className="size-3.5" />
+            {showHistory ? "收起历史" : "历史"}
+          </Button>
           <Button size="sm" variant="ghost" disabled={busy} onClick={onEditCron}>
             <PencilIcon className="size-3.5" />
             编辑周期
@@ -175,6 +361,7 @@ function ScheduleRow({
           )}
         </div>
       </div>
+      {showHistory && <ScheduleHistory taskId={task.id} />}
     </Card>
   );
 }

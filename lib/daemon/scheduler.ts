@@ -12,7 +12,7 @@
  * IO, so "why did it not run" is answerable without a real daemon and a real
  * cron minute.
  *
- * ── WHAT "DUE" MEANS ──
+ * ── WHAT "DUE" MEANS (2026-10-03) ──
  *
  * Counting the next slot from `now` would be useless for firing: a brand-new
  * task's first slot would always be one period away, so a task that never ran
@@ -20,15 +20,19 @@
  * first slot is the first cron minute after the task was AUTHORED (authored
  * 08:59 for `0 9 * * *` ⇒ fires at 09:00).
  *
- * A SLOT THE DAEMON SLEPT THROUGH IS SKIPPED, NOT REPLAYED (user decision):
- * the slot due is `lastFiredAt`'s next one, and it is judged against `now`.
- * Still ahead ⇒ `not-yet`; just passed, inside {@link SLOT_GRACE_MS} ⇒ `due`
- * (that window is what absorbs a late tick); further behind than that ⇒
- * `missed` — nothing starts, and `scheduledAt` becomes the NEXT slot instead of
- * the one that was lost, so no surface ever names a slot the daemon slept
- * through. The missed slot is consumed by the tick that judged it (it stamps
- * the base forward and records a `run-skipped`), which is what keeps "skip this
- * one" from turning into "never run again".
+ * A SLOT THE DAEMON SLEPT THROUGH IS RUN, NOT DISCARDED (2026-10-03, user
+ * decision — it replaced "missed slots are skipped, not replayed"). A machine
+ * that was off, or a daemon that was restarting, no longer loses the slot: it
+ * is still the task's next slot when the daemon comes back, and the next tick
+ * runs it. Only ONE slot can ever be owed — `nextRunAfter` always answers with
+ * the single slot after `lastFiredAt`, so a week of downtime produces one run,
+ * never seven ("the user's rule: run it unless it genuinely cannot be run").
+ * Reloaded slots are never CATCH-UP CATCH-UP: from that one run onward the
+ * base is `now` and the ordinary rhythm resumes.
+ *
+ * The only thing that stops a due slot is the task's OWN run being unsettled
+ * (`open-run`) — and that slot is not consumed either: it is judged again on
+ * the tick that finds the run settled.
  *
  * ONE SOURCE FOR "WHAT IS NEXT": the API's `nextRunAt` (daemon/server.ts) and
  * `schedule_task({action:"list"})` both read `dueDecision`'s `scheduledAt`, so
@@ -50,15 +54,15 @@
  * cannot be written at all (read-only home, full disk) the slot is kept in
  * `unrecordedSlots` and the run in `unrecordedRuns` — this process only — so
  * the same slot is never started twice while the disk is broken, and the run
- * still holds its repo and still settles. Both maps are pruned by age, which
+ * still holds its checkout and still settles. Both maps are pruned by age, which
  * is what lets a permanently broken home recover rather than grow forever.
  * The window this leaves is the one between the stamp landing and the append:
  * a process killed there leaves a RUNNING session with no `run-started` line,
  * so a restart neither settles it nor finds it in the ledger. THAT SESSION
- * STILL HOLDS ITS REPO, though — in the way the ledger cannot see: it writes
- * the checkout's presence heartbeat, which is what `liveSessionHolder` refuses
- * later runs on (and what makes the user's own new session in that repo be
- * refused too, until the process is gone). The other
+ * STILL HOLDS ITS CHECKOUT, though — in the way the ledger cannot see: it writes
+ * the checkout's presence heartbeat, which is what {@link liveSessionHolder}
+ * answers with, and that heartbeat is what keeps the run from being read as
+ * "gone" while its process is still there. The other
  * order is the fail-spin the quality round measured — one real session per
  * tick, forever — which is strictly worse.
  *
@@ -68,13 +72,16 @@
  * the version it just read — otherwise one colliding panel edit would leave
  * the task believing its slot was dealt with while `lastFiredAt` never moved.
  *
- * ── WHY A RUN MUST SETTLE BEFORE THE NEXT ONE IN THE SAME REPO STARTS ──
+ * ── WHY A RUN GETS ITS OWN CHECKOUT (2026-10-03) ──
  *
  * Two writers in one checkout overwrite each other (the invariant
- * lib/session-worktree.ts enforces for orchestration children). A run that is
- * still open therefore blocks every other run whose task sits in the same
- * repo, and the skip is RECORDED with the run that holds it — "nothing ran
- * today" and "something ran and never finished" must not look alike.
+ * lib/session-worktree.ts enforces for orchestration children) — which is why
+ * a run used to be SKIPPED whenever the main repo had another live session, or
+ * an earlier run of any task in that repo had not settled. That answer cost
+ * six slots in one day on this machine. It is gone: every run works in its own
+ * checkout cut from the main repo's HEAD (lib/schedule-worktree.ts), so the
+ * main repo's occupants stop being a reason to skip. The one writer rule is
+ * still enforced where it matters — inside the run's own checkout.
  */
 
 import { randomBytes } from "node:crypto";
@@ -82,7 +89,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { nextRunAfter } from "../cron-schedule.ts";
-import { normalizeRepoPath, STATION_CAP_ENV } from "../repo-pr-policy.ts";
+import { STATION_CAP_ENV } from "../repo-pr-policy.ts";
 import {
   checkSessionExclusivity,
   parsePresence,
@@ -90,6 +97,8 @@ import {
   type PresenceRecord,
 } from "../session-exclusivity.ts";
 import { GATE_MODE_ENV } from "../task-mode.ts";
+import { createScheduleWorktree, settleScheduleWorktree, type CutScheduleWorktree, type ScheduleSettlement, type ScheduleWorktreeOwner } from "../schedule-worktree.ts";
+import type { DeliveryStation } from "../delivery-station.ts";
 import {
   appendScheduleRun,
   readScheduleRuns,
@@ -109,24 +118,6 @@ import type { TmuxRunner } from "../orchestrator-tmux.ts";
 
 /** How often the daemon looks for work. */
 export const SCHEDULE_TICK_MS = 20_000;
-
-/**
- * How late a slot may be and still be RUN rather than skipped.
- *
- * The daemon ticks every 20 s, so "the tick landed a few seconds into the cron
- * minute" is the NORMAL case, not a delay — zero tolerance would mean a task
- * only ever fires when a tick happens to land exactly on its minute. This
- * window also absorbs the tick that arrived late for an ordinary reason: a
- * laptop lid closed for a few minutes, a tick held up by a full precommit.
- *
- * WHY IT IS NOT LARGER: past this window the slot is MISSED, and the user's
- * decision is that a missed slot is SKIPPED rather than replayed (a machine
- * that was off for a week must not fire the tasks it slept through). A window
- * of hours would quietly restore the catch-up run this rule removes. Ten
- * minutes is several tick intervals and still well below any cron period a
- * schedule is likely to use.
- */
-export const SLOT_GRACE_MS = 10 * 60 * 1_000;
 
 /**
  * How long a slot / a run that could NOT be written to disk is remembered in
@@ -155,20 +146,16 @@ export const LAST_RUNS_SHOWN = 5;
 // The due decision
 // ---------------------------------------------------------------------------
 
-export type DueReason = "due" | "disabled" | "not-yet" | "already-dealt" | "open-run" | "bad-time" | "bad-cron" | "missed";
+export type DueReason = "due" | "disabled" | "not-yet" | "already-dealt" | "open-run" | "bad-time" | "bad-cron";
 
 export interface DueDecision {
   due: boolean;
   /**
    * The slot this decision is about; `null` when the schedule cannot name one.
-   * NEVER A TIME THE DAEMON SLEPT THROUGH: for `missed` it is the NEXT slot,
-   * not the one that was lost (that one rides in {@link missedAt}). A `due`
-   * slot is one that just arrived, and the slot an `open-run` task is holding is
-   * the one its running session was started for — neither is a stale promise.
+   * A `due` slot is one that has arrived — possibly long ago, while the daemon
+   * was down: an owed slot keeps its identity until a run consumes it.
    */
   scheduledAt: Date | null;
-  /** Set only for `missed`: the slot the daemon slept through, which the tick consumes. */
-  missedAt: Date | null;
   reason: DueReason;
 }
 
@@ -179,32 +166,29 @@ export interface DueDecision {
  * settled" — a second run of the SAME task would mean two sessions racing on
  * one goal.
  *
- * THE FOUR WORDS A SLOT CAN HAVE (see the module docblock for why): `not-yet`
- * (still ahead), `due` (just arrived, or arrived within {@link SLOT_GRACE_MS}),
- * `missed` (the daemon was not there when it arrived — skipped, and
- * `scheduledAt` slides to the next one), and `open-run` (the task's own run has
- * not settled; it is not this slot's turn yet). A task still running keeps
- * `open-run` even for a slot that is long past — consuming that slot belongs to
- * the tick that finds the run settled.
+ * THE FOUR WORDS A SLOT CAN HAVE: `not-yet` (still ahead), `due` (arrived —
+ * including one that arrived while the daemon was not running, which is now
+ * RUN rather than discarded), `open-run` (the task's own run has not settled;
+ * it is not this slot's turn yet — and the slot is KEPT, not consumed), and
+ * the schedule's own failures (`bad-time` / `bad-cron`). A task still running
+ * keeps `open-run` even for a slot that is long past — consuming that slot
+ * belongs to the tick that finds the run settled.
  *
- * THE ONE PLACE `scheduledAt` MAY BE OLD, SAID PLAINLY: `open-run` returns the
- * slot the RUNNING session was started for, and a run that has been going for
- * days holds a slot from days ago. That is honest rather than stale — nothing
- * will move that base until the run settles — and it is the reading
- * `schedule_task({action:"list"})` already names (「已过期：本任务还有一次运行没
- * 结算」). No panel sees it: `GET /api/schedules` passes `openRun: false`
- * (daemon/server.ts), so the HTTP field never names a slot the daemon slept
- * through.
+ * THE ONE PLACE `scheduledAt` MAY BE OLD is exactly the owed slot: a slot that
+ * arrived while the daemon was down stays `due` however late the tick is, and
+ * `schedule_task({action:"list"})` renders it as overdue rather than promising
+ * a tick it would skip. That is honest — the run some tick is about to start
+ * IS for that slot.
  */
 export function dueDecision(input: { task: ScheduledTask; now: Date; openRun: boolean }): DueDecision {
   const task = input.task;
-  if (task?.enabled !== true) return { due: false, scheduledAt: null, missedAt: null, reason: "disabled" };
+  if (task?.enabled !== true) return { due: false, scheduledAt: null, reason: "disabled" };
   const base = task.lastFiredAt ?? task.createdAt;
   if (!Number.isFinite(Date.parse(base))) {
-    return { due: false, scheduledAt: null, missedAt: null, reason: "bad-time" };
+    return { due: false, scheduledAt: null, reason: "bad-time" };
   }
   const scheduledAt = nextRunAfter(task.cron, new Date(base));
-  if (scheduledAt === null) return { due: false, scheduledAt: null, missedAt: null, reason: "bad-cron" };
+  if (scheduledAt === null) return { due: false, scheduledAt: null, reason: "bad-cron" };
   const dealtAt = task.lastFiredAt === null ? undefined : Date.parse(task.lastFiredAt);
   // UNREACHABLE TODAY, KEPT AS A GUARD: `nextRunAfter` is STRICTLY later than
   // its base, and the base IS `lastFiredAt` whenever this branch could fire — so
@@ -213,22 +197,15 @@ export function dueDecision(input: { task: ScheduledTask; now: Date; openRun: bo
   // ("a slot at or behind the stamp is already dealt with") is the one that must
   // hold if that ever changes. One slot, dealt with once.
   if (dealtAt !== undefined && dealtAt >= scheduledAt.getTime()) {
-    return { due: false, scheduledAt, missedAt: null, reason: "already-dealt" };
+    return { due: false, scheduledAt, reason: "already-dealt" };
   }
   const nowMs = input.now.getTime();
-  if (scheduledAt.getTime() > nowMs) return { due: false, scheduledAt, missedAt: null, reason: "not-yet" };
-  if (input.openRun) return { due: false, scheduledAt, missedAt: null, reason: "open-run" };
-  if (nowMs - scheduledAt.getTime() > SLOT_GRACE_MS) {
-    // MISSED: the daemon was not there when this slot arrived, and the user's
-    // decision is that it is skipped rather than replayed. `scheduledAt` must
-    // not keep naming a time in the past — every surface (the API's
-    // `nextRunAt`, the panel, `schedule_task({action:"list"})`) renders this
-    // field, and "一次性欠着" is exactly the reading this rule removes. The
-    // slot the daemon slept through rides along as `missedAt`, because the
-    // tick's `run-skipped` line names WHAT was skipped.
-    return { due: false, scheduledAt: nextRunAfter(task.cron, input.now), missedAt: scheduledAt, reason: "missed" };
-  }
-  return { due: true, scheduledAt, missedAt: null, reason: "due" };
+  if (scheduledAt.getTime() > nowMs) return { due: false, scheduledAt, reason: "not-yet" };
+  if (input.openRun) return { due: false, scheduledAt, reason: "open-run" };
+  // LATE IS NOT LOST (2026-10-03, user decision): a slot that arrived while the
+  // daemon was down is still the task's owed slot, and running it is the point.
+  // Whatever lateness the old grace window used to reject is now just lateness.
+  return { due: true, scheduledAt, reason: "due" };
 }
 
 // ---------------------------------------------------------------------------
@@ -375,27 +352,6 @@ export function openRuns(records: readonly ScheduleRunRecord[]): ScheduleRunStar
   return [...open.values()];
 }
 
-/**
- * The open run already writing in this repo, if there is one.
- *
- * `repoOf` answers where a run's task sits; a run whose repo cannot be named
- * (its task was deleted) falls back to the observed session's repo at the call
- * site, and a repo nobody can name blocks nobody — an unreadable fact must not
- * be read as a conflict.
- */
-export function repoHolder(
-  runs: readonly ScheduleRunStarted[],
-  repo: string,
-  repoOf: (run: ScheduleRunStarted) => string | undefined,
-): ScheduleRunStarted | undefined {
-  const wanted = normalizeRepoPath(repo);
-  if (wanted === "") return undefined;
-  return runs.find((run) => {
-    const other = repoOf(run);
-    return other !== undefined && other !== "" && normalizeRepoPath(other) === wanted;
-  });
-}
-
 // ---------------------------------------------------------------------------
 // The tick
 // ---------------------------------------------------------------------------
@@ -421,6 +377,20 @@ export interface SchedulerDeps {
   intervalMs?: number;
   clock?: SchedulerClock;
   log?: (message: string) => void;
+  /**
+   * THE RUN'S OWN CHECKOUT, INJECTED — the same seam shape the rest of this
+   * module uses (`runTmux`, `observer`, `now`, `clock`).
+   *
+   * Production uses lib/schedule-worktree.ts unchanged; a tick test injects a
+   * fake so it can exercise "the checkout could not be cut, so the slot stays
+   * owed" and "a finished run lands here" without a real repository on disk.
+   * The real git behaviour has its own tests (test/schedule-worktree.test.ts),
+   * where a real repo is the point.
+   */
+  worktrees?: {
+    cut: (input: { repo: string; runId: string }) => CutScheduleWorktree;
+    settle: (input: { worktree: ScheduleWorktreeOwner; outcome: ScheduleRunOutcome; station: DeliveryStation }) => ScheduleSettlement;
+  };
 }
 
 export interface Scheduler {
@@ -435,6 +405,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   const intervalMs = deps.intervalMs ?? SCHEDULE_TICK_MS;
   const clock = deps.clock ?? defaultSchedulerClock;
   const log = deps.log ?? ((): void => { /* silent by default */ });
+  const worktrees = deps.worktrees ?? { cut: createScheduleWorktree, settle: settleScheduleWorktree };
   let stopTimer: (() => void) | undefined;
   let running = false;
   /**
@@ -455,11 +426,24 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * `tick` folds them into its open list.
    */
   const unrecordedRuns = new Map<string, ScheduleRunStarted>();
+  /**
+   * The slots this process TRIED and could not start, for a reason that may
+   * pass (a full disk, a repo mid-rebuild, a tmux server that is starting up).
+   *
+   * Nothing is stamped for these — the slot is OWED and the next tick tries
+   * again — so this map exists only to keep one failed attempt from printing
+   * the same log line every 20 seconds. An entry is dropped the moment its slot
+   * is dealt with, and pruned by age like `unrecordedSlots`.
+   */
+  const deferredSlots = new Map<string, number>();
 
   /** Drop what is too old to matter: a resident process must not grow forever. */
   function pruneUnrecorded(nowMs: number): void {
     for (const [slot, atMs] of unrecordedSlots) {
       if (nowMs - atMs > UNRECORDED_TTL_MS) unrecordedSlots.delete(slot);
+    }
+    for (const [slot, atMs] of deferredSlots) {
+      if (nowMs - atMs > UNRECORDED_TTL_MS) deferredSlots.delete(slot);
     }
     for (const [runId, run] of unrecordedRuns) {
       const atMs = Date.parse(run.at);
@@ -472,13 +456,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    *
    * Asked fresh on every tick, because both answers move: the presence
    * heartbeat is renewed every 10s and lapses on its own, and a transcript
-   * stops growing the moment its session does. The presence file is the SAME
-   * one the fire-side guard reads (`liveSessionHolder`), asked here with the
-   * run's own identity — a fresh heartbeat by SOMEBODY ELSE in that checkout is
-   * not this run being alive.
+   * stops growing the moment its session does. The heartbeat lives in THE RUN'S
+   * OWN CHECKOUT (2026-10-03) — ask the main repo and every run would look dead
+   * the moment the observer cannot place its session, which is exactly the case
+   * this evidence exists for. A heartbeat by SOMEBODY ELSE there is not this
+   * run being alive either.
    */
   function runEvidence(run: ScheduleRunStarted, repo: string | undefined, at: Date): RunEvidence {
-    const holder = repo === undefined || repo === "" ? undefined : liveSessionHolder(repo, at);
+    const checkout = run.worktree ?? repo;
+    const holder = checkout === undefined || checkout === "" ? undefined : liveSessionHolder(checkout, at);
     const path = deps.observer.transcriptFor(run.sessionId);
     return {
       holdsCheckout: holder !== undefined && holder.sessionId === run.sessionId,
@@ -526,6 +512,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // REMEMBER FIRST, FORGET AFTER: between these two writes the process can
     // die, and the disk can refuse both — either way the slot is known to be
     // dealt with. See `unrecordedSlots` for why that matters.
+    deferredSlots.delete(slot);
     unrecordedSlots.set(slot, at.getTime());
     let problem = "未知原因";
     // TWO ATTEMPTS, BECAUSE THE FIRST CAN LOSE A RACE: the version read here
@@ -564,8 +551,20 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
 
   function fire(task: ScheduledTask, at: Date, slot: string): ScheduleRunStarted | undefined {
     const runId = `run-${randomBytes(4).toString("hex")}`;
+    // THE CHECKOUT FIRST (2026-10-03): the run works in its own copy of the
+    // repo, so cutting that copy is part of STARTING it. A checkout that cannot
+    // be cut is a TEMPORARY obstacle (a full disk, a repo mid-rebuild): nothing
+    // is stamped, the slot stays owed, and the next tick tries again.
+    const cut = worktrees.cut({ repo: task.repo, runId });
+    if (!cut.ok) {
+      deferred(task, at, slot, `切隔离 checkout 失败：${cut.problem}`);
+      return undefined;
+    }
     const started = launchTask({ home: deps.home, runTmux: deps.runTmux, now: deps.now }, {
       repo: task.repo,
+      // THE RUN'S OWN CHECKOUT, NEVER THE MAIN REPO — this is what makes the
+      // user's own session there stop blocking the task.
+      workdir: cut.worktree.path,
       task: runTaskText(task, at, runId),
       mode: "loop",
       // THE CONTRACT'S STATION IS THE CEILING the run may deliver at: the user
@@ -574,7 +573,22 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       env: { [SCHEDULE_ID_ENV]: task.id, [SCHEDULE_RUN_ENV]: runId },
     });
     if (!started.ok || started.sessionId === undefined) {
-      skipped(task, at, `起会话失败：${started.problem ?? "launchTask 没给出 sessionId"}`, slot);
+      const problem = started.problem ?? "launchTask 没给出 sessionId";
+      // THE CHECKOUT GOES BACK with a launch that never happened — it holds
+      // nothing and no session was ever started in it.
+      try {
+        worktrees.settle({ worktree: cut.worktree, outcome: "failed", station: task.contract.restatement.station });
+      } catch (error) {
+        log(`运行 ${runId} 的隔离 checkout 没能回收：${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (started.permanent === true) {
+        // A PERMANENT obstacle (no tmux to run at all): retrying every 20 s
+        // would burn the schedule on something no retry can repair. The slot is
+        // consumed and the ledger names the reason.
+        skipped(task, at, `起会话失败（永久障碍）：${problem}`, slot);
+      } else {
+        deferred(task, at, slot, `起会话失败：${problem}`);
+      }
       return undefined;
     }
     const run: ScheduleRunStarted = {
@@ -583,6 +597,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       taskId: task.id,
       sessionId: started.sessionId,
       at: at.toISOString(),
+      // THE RUN'S OWN CHECKOUT, IN THE LEDGER (lib/schedule-worktree.ts settles
+      // it by exactly these four facts, and the contract adoption reads the
+      // owner record they point at).
+      worktree: cut.worktree.path,
+      branch: cut.worktree.branch,
+      base: cut.worktree.base,
       // THE LAUNCH RECEIPT, KEPT WITH THE RUN (see `ScheduleRunStarted`): the
       // window cannot be read back off the pane once the pane has lost
       // `@rg_sid`, and the settlement needs to close it.
@@ -590,7 +610,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       ...(started.windowId === undefined ? {} : { windowId: started.windowId }),
     };
     // A SESSION IS ALREADY RUNNING: from here on the slot counts as dealt with
-    // and this run holds its repo, whatever the disk does next.
+    // and this run holds its checkout, whatever the disk does next.
     dealt(task, at, slot);
     try {
       appendScheduleRun(deps.home, run);
@@ -600,6 +620,49 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     }
     log(`调度任务 ${task.name} 已发起运行 ${runId}（会话 ${started.sessionId}）`);
     return run;
+  }
+
+  /**
+   * A slot that could NOT be run, for a reason that may pass.
+   *
+   * The slot is KEPT — nothing is stamped, nothing is written to the ledger —
+   * so the next tick, 20 seconds later, tries again, and a daemon restart
+   * changes nothing because nothing was written. The log line is printed ONCE
+   * per slot: a disk that stays full for an hour must not produce 180 identical
+   * lines.
+   */
+  function deferred(task: ScheduledTask, at: Date, slot: string, reason: string): void {
+    const first = !deferredSlots.has(slot);
+    deferredSlots.set(slot, at.getTime());
+    if (first) log(`调度任务 ${task.name} 本次没能起成（${reason}）—— 这个时间点留着，下一次 tick 再试`);
+  }
+
+  /**
+   * WHERE A FINISHED RUN'S OUTPUT LANDS — the ONE call site of the rule
+   * (lib/schedule-worktree.ts). A run whose record predates isolated checkouts
+   * has no `worktree`, and nothing is settled for it: its output is wherever it
+   * always was.
+   */
+  function settleRunWorktree(
+    run: ScheduleRunStarted,
+    outcome: ScheduleRunOutcome,
+    station: DeliveryStation,
+    repo: string | undefined,
+  ): ScheduleSettlement | undefined {
+    if (run.worktree === undefined || run.branch === undefined || run.base === undefined) return undefined;
+    if (repo === undefined || repo === "") return undefined;
+    try {
+      const settlement = worktrees.settle({
+        worktree: { repo, runId: run.runId, branch: run.branch, base: run.base, path: run.worktree },
+        outcome,
+        station,
+      });
+      log(`运行 ${run.runId} 的隔离 checkout 已结算：${settlement.action} —— ${settlement.note}`);
+      return settlement;
+    } catch (error) {
+      log(`运行 ${run.runId} 的隔离 checkout 结算失败（目录留在 ${run.worktree}）：${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
   }
 
   function tick(): void {
@@ -612,35 +675,13 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       return;
     }
     const records = readScheduleRuns(deps.home);
-    // WHICH SESSIONS WERE RUNS OF OURS THAT ALREADY SETTLED. A leftover window of
-    // one of those is an unfinished cleanup, not an occupant — see the guard
-    // inside the loop below (quality round P2, 2026-10-02).
-    const startedSessions = new Map<string, string>();
-    for (const record of records) {
-      if (record.kind === "run-started") startedSessions.set(record.runId, record.sessionId);
-    }
-    const settledSessions = new Set<string>();
-    for (const record of records) {
-      if (record.kind !== "run-settled") continue;
-      const sessionId = startedSessions.get(record.runId);
-      if (sessionId !== undefined) settledSessions.add(sessionId);
-    }
     // RUNS THAT NEVER REACHED THE LEDGER ARE STILL RUNNING: the session is
     // live, so it holds its repo and it must settle like any other run.
     const open = [...openRuns(records), ...unrecordedRuns.values()];
     const repos = new Map(table.file.tasks.map((task) => [task.id, task.repo] as const));
-    // THE WINDOW EACH RUN RECORDED, by session id: the receiver of a run's
-    // launch receipt can be closed by coordinates even when its pane has no
-    // `@rg_sid` to read them from (see `closeTargetFor` and the retry below).
-    const recordedWindows = new Map<string, RunWindowTarget>();
-    for (const record of records) {
-      if (record.kind !== "run-started" || record.scopeSession === undefined || record.windowId === undefined) continue;
-      recordedWindows.set(record.sessionId, {
-        repo: repos.get(record.taskId) ?? "",
-        session: record.scopeSession,
-        window: record.windowId,
-      });
-    }
+    // WHICH STATION EACH TASK'S RUN DELIVERS AT: the settlement needs it to
+    // decide where a finished checkout's output lands (lib/schedule-worktree.ts).
+    const stations = new Map(table.file.tasks.map((task) => [task.id, task.contract.restatement.station] as const));
 
     // SETTLE FIRST: a run that just ended must release its repo in THIS tick,
     // or the slot that is due right now gets blocked by its own predecessor.
@@ -662,6 +703,13 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         const evidence = runEvidence(run, repo, at);
         const decision = settlementFor({ run, session, now: at, evidence });
         if (!decision.settle) continue;
+        // WHERE THE RUN'S OUTPUT LANDS IS DECIDED HERE, ONCE (2026-10-03): its
+        // own checkout is settled — recycled whole when it produced nothing,
+        // merged (staged) into the main repo when it concluded READY below the
+        // `pr` station, kept as a branch otherwise. The note goes into the
+        // ledger so the panel and `schedule_task({action:"list"})` can say which
+        // branch holds it.
+        const settlement = settleRunWorktree(run, decision.outcome ?? "failed", stations.get(run.taskId) ?? "precommit", repo);
         appendScheduleRun(deps.home, {
           kind: "run-settled",
           runId: run.runId,
@@ -670,6 +718,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           outcome: decision.outcome ?? "failed",
           verdict: decision.verdict,
           unmet: decision.unmet,
+          ...(settlement === undefined || settlement.action === "reclaimed"
+            ? {}
+            : { branch: settlement.branch, landing: settlement.note }),
         });
         settled.add(run.runId);
         unrecordedRuns.delete(run.runId);
@@ -693,39 +744,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     for (const task of table.file.tasks) {
       try {
         const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
-        // A SLOT THE DAEMON SLEPT THROUGH IS CONSUMED, NOT ABANDONED: judging it
-        // `missed` and moving on would leave `lastFiredAt` on the OLD base, so
-        // every 20-second tick would judge the same stale slot missed again —
-        // and the task would never run again. Consuming it is two writes: the
-        // base moves forward (the same `dealt` stamp a fired slot gets) and the
-        // ledger keeps WHY nothing ran.
-        //
-        // THE STAMP IS `now`, NOT THE SLOT THAT WAS LOST: the next slot is
-        // counted from the stamp, so `now` is what lines the schedule up with
-        // real time in ONE step. Stamping the lost slot instead would leave the
-        // base a period behind and the NEXT slot due at once — a skip per tick
-        // until it caught up. Neither choice breaks "one slot is dealt with
-        // once": that rule reads `lastFiredAt`, and the tick that stamps a slot
-        // is the only one that ever judges it.
-        if (decision.reason === "missed" && decision.missedAt !== null) {
-          // TWO WAYS A SLOT IS MISSED, AND THE LEDGER NAMES BOTH: the daemon was
-          // not running at all, or the task's OWN run was still open when the
-          // slot arrived and settled later (that settlement is what finally
-          // moves this base — `open-run` only says "nothing starts at THIS
-          // instant", not "nothing was running at that one"). A reason that
-          // named only the first would be wrong for the second.
-          const reason =
-            `错过时点 ${decision.missedAt.toISOString()}：那一槽到达时没有启动运行（daemon 当时不在跑，` +
-            "或本任务自己还有一次运行没结算），按用户决定跳过不补跑 —— 下一个到点照常跑";
-          const stale = slotKey(task.id, decision.missedAt);
-          // ONE LEDGER LINE PER SLOT EVEN WHEN THE STAMP CANNOT BE WRITTEN: a
-          // failed stamp leaves the slot in `unrecordedSlots`, and the retry
-          // below keeps re-attempting the stamp (without it the task stays
-          // pinned to the old base) while the skip is not written twice.
-          if (unrecordedSlots.has(stale)) dealt(task, at, stale);
-          else skipped(task, at, reason, stale);
-          continue;
-        }
+        // (A slot the daemon slept through is no longer CONSUMED here: it stays
+        // owed and the `due` branch below runs it — see `dueDecision`.)
         if (!decision.due) continue;
         const slot = slotKey(task.id, decision.scheduledAt);
         // THE SAME SLOT IS NOT STARTED TWICE, even when nothing can be
@@ -735,47 +755,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           log(`调度任务 ${task.name} 的这个时间点已经起过会话、只是没能落盘（写不进去），本次不重复启动`);
           continue;
         }
-        const holder = repoHolder(stillOpen, task.repo, repoOfRun);
-        if (holder !== undefined) {
-          skipped(task, at, `repo ${task.repo} 上还有未结算的运行 ${holder.runId}（任务 ${holder.taskId}，${holder.at} 起）—— 两个写者不能同时进同一个 checkout`, slot);
-          continue;
-        }
-        // ANOTHER SESSION'S CHECKOUT IS NO MORE SHARABLE THAN ANOTHER RUN'S.
-        // The gate will REFUSE to arm the session this tick would start, and a
-        // session that cannot arm cannot adopt its contract: it would sit on
-        // L8 with every edit blocked. Skip it (recorded, with the occupant's
-        // name) instead of starting a run that cannot work — the user's own
-        // window counts here even after `declare_done`: the holder is whoever
-        // still has the process.
-        const sessionHolder = liveSessionHolder(task.repo, at);
-        if (sessionHolder !== undefined) {
-          // A LEFTOVER WINDOW OF OURS IS NOT AN OCCUPANT FOREVER (quality round
-          // P2, 2026-10-02): closing a settled run's window is BEST-EFFORT — the
-          // settlement must never depend on tmux — so a close that failed, or a
-          // process killed between the two, left a window holding this repo
-          // with nothing left to retry it. Here is the retry: the one place
-          // that already has to name the occupant.
-          if (settledSessions.has(sessionHolder.sessionId)) {
-            const leftover = (collection ?? deps.observer.collect()).sessions
-              .find((candidate) => candidate.sessionId === sessionHolder.sessionId);
-            // THE SAME TWO ADDRESSES THE SETTLEMENT USED: the pane's, when the
-            // observer has one, and otherwise the coordinates the launch
-            // receipt recorded — a session that lost `@rg_sid` is exactly the
-            // one whose leftover window would otherwise never be reclaimed.
-            const recorded = recordedWindows.get(sessionHolder.sessionId);
-            const target: RunWindowTarget | undefined = leftover !== undefined && leftover.tmux !== null
-              ? { repo: leftover.repo, session: leftover.tmux.session, window: leftover.tmux.window }
-              : recorded !== undefined && recorded.repo !== "" ? recorded : undefined;
-            if (target !== undefined && closeRunWindowAt(deps, target)) {
-              log(`上一次结算没关掉的运行窗口 ${sessionHolder.sessionId} 已补关（${task.repo}）—— 下一个时间点起可以正常跑`);
-            }
-          }
-          skipped(task, at, `repo ${task.repo} 上还有别的活会话 ${sessionHolder.sessionId}（最后心跳 ${sessionHolder.at}）占着这块 worktree —— 门禁不会为运行会话启动，契约继承不了（关掉那个会话，或等它的心跳过期）`, slot);
-          continue;
-        }
-        // A RUN STARTED IN THIS TICK IS OPEN TOO: without adding it, two tasks in
-        // one repo that are both due would both start here — the second seeing a
-        // `stillOpen` computed before the first one existed.
+        // NOTHING ASKS "IS SOMEBODY ELSE IN THE REPO" ANY MORE (2026-10-03): the
+        // run works in its own checkout now (lib/schedule-worktree.ts), so the
+        // user's session in the main repo — or another run of any task in it —
+        // stopped being a reason to skip. That check cost six slots in one day
+        // on this machine. The only writer rule that survives is inside the
+        // run's checkout, and "one run per checkout" holds by construction.
         const run = fire(task, at, slot);
         if (run !== undefined) stillOpen.push(run);
       } catch (error) {
@@ -841,27 +826,28 @@ function slotKey(taskId: string, scheduledAt: Date | null): string {
 /**
  * THE LIVE SESSION HOLDING THIS CHECKOUT, if there is one.
  *
- * A scheduled run is an ORDINARY loop session: it arms the gate in the
- * checkout, and the gate refuses to arm a second session in a worktree someone
- * else holds (lib/session-exclusivity.ts, `.pi/session-presence.json`, a 10s
- * heartbeat with a 60s window). A run that cannot arm cannot adopt its contract
- * either — `adoptScheduledRunContract` fails closed when it cannot persist — so
- * it would sit there with L8 blocking every edit while the ledger called it
- * "running", and the user would see none of it. THAT IS WHY THE SCHEDULER ASKS
- * BEFORE IT FIRES (quality round P1, 2026-10-02): the same question the session
- * itself will ask, through the SAME function, so the two cannot drift.
+ * WHAT ASKS IT NOW (2026-10-03): {@link runEvidence}, answering "is the process
+ * behind this run still there" when the observer cannot place its session at
+ * all — the run's own heartbeat in ITS OWN checkout is the fact that keeps a
+ * live run from being settled as `gone`. It is asked with the run's own
+ * identity: a fresh heartbeat by SOMEBODY ELSE in that checkout is not this run
+ * being alive.
  *
- * It is asked with the RUN's identity, not the daemon's: an ordinary loop
- * session claims the main sidecar, so the only thing that can refuse it is a
- * fresh heartbeat by somebody else — and the fail-open direction is the
- * function's own (a missing, unreadable or nonsensical record is nobody).
- *
- * WHAT THIS DOES NOT CLOSE, said plainly: the session asks the SAME question
- * again a few seconds later (pi's cold start), and a session that claims this
- * checkout inside that window still lands in the failure this guard exists to
- * avoid. The answer is not a bigger guard — the window is inherent — but the
- * doc says so (docs/daemon/api.md §13.7) rather than promising the absence of a
- * state that can still happen.
+ * WHAT USED TO ASK IT: the scheduler's fire-side guard. A run worked in the
+ * main repo, so a fresh heartbeat there meant "somebody else is in this
+ * checkout" and the slot was skipped — the session could not arm (the gate
+ * refuses a second session in one worktree) and could not adopt its contract
+ * either, so sending it would have been a car that cannot drive (quality round
+ * P1, 2026-10-02). Every run has its own checkout now (lib/schedule-worktree.ts)
+ * and that conflict cannot happen, so nothing asks this question before firing.
+ * WHERE IT IS ASKED, AND WHAT IT ANSWERS NOW (2026-10-03). It used to be the
+ * scheduler's OWN fire-side guard: a fresh heartbeat in the MAIN repo meant
+ * "somebody else is in this checkout", and the slot was skipped — with the
+ * session's own refusal to arm as the justification. No more: the run works in
+ * its own checkout ({@link runEvidence}), so nothing asks this question before
+ * firing. What survives is the EVIDENCE role — "is the process behind this run
+ * still there?" — and for that the two facts are equivalent: a missing,
+ * unreadable or nonsensical record is nobody.
  */
 export function liveSessionHolder(repo: string, now: Date): PresenceRecord | undefined {
   let raw: string | undefined;

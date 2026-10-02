@@ -177,6 +177,15 @@ export interface LaunchTaskInput {
   station?: string;
   name?: string;
   /**
+   * The directory the session WORKS IN, when it is not the repo itself.
+   *
+   * A scheduled run passes its own isolated checkout here
+   * (lib/schedule-worktree.ts, 2026-10-03): `repo` stays the anchor the
+   * daemon's scope session is derived from, while the run's `cwd` — and
+   * therefore everything the gate binds to — is the copy. Omitted ⇒ the repo.
+   */
+  workdir?: string;
+  /**
    * Extra environment for the new session.
    *
    * The scheduler's run identity (`RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`) rides
@@ -190,6 +199,13 @@ export interface LaunchTaskInput {
 export interface LaunchTaskOutcome {
   ok: boolean;
   problem?: string;
+  /**
+   * `true` when NOTHING a retry could do will change the answer — the tmux the
+   * daemon starts sessions with cannot run at all. The scheduler consumes the
+   * slot for these and keeps it for every other failure (a server that is
+   * coming up, a directory that is mid-rebuild).
+   */
+  permanent?: boolean;
   sessionId?: string;
   /** The pi session id the window runs with — deterministic, so it can be resumed. */
   scopeSession?: string;
@@ -304,6 +320,8 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
   }
 
   const daemonId = ensureDaemonIdentity(deps.home);
+  // WHERE THE SESSION WORKS — the run's own checkout when it was given one.
+  const workdir = (input.workdir ?? repo).trim() === "" ? repo : (input.workdir ?? repo).trim();
   const scope = daemonTmuxScope({ home: deps.home, identity: daemonId, runTmux: deps.runTmux, anchorRepo: repo });
   const sessionId = randomUUID();
   const opening = [taskText];
@@ -333,12 +351,14 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
   const env: Record<string, string> = { ...input.env, [GATE_MODE_ENV]: mode, [DAEMON_HOME_ENV]: deps.home };
   if (station !== "") env[STATION_CAP_ENV] = station;
   const opened = openScopeWindow(run, scope, {
-    cwd: repo,
+    cwd: workdir,
     env,
     command,
     ...(name === "" ? {} : { windowName: safeWindowName(name) }),
   });
-  if (!opened.ok) return { ok: false, problem: opened.error };
+  if (!opened.ok) {
+    return { ok: false, problem: opened.error, ...(opened.permanent === true ? { permanent: true } : {}) };
+  }
   return {
     ok: true,
     sessionId,

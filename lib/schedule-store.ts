@@ -162,6 +162,15 @@ export interface ScheduleRunStarted {
   taskId: string;
   sessionId: string;
   at: string;
+  /**
+   * THE RUN'S OWN CHECKOUT (2026-10-03, lib/schedule-worktree.ts): where it
+   * worked, the branch its output lives on, and the commit that branch was cut
+   * from. All three optional — a record written before isolated checkouts has
+   * none, and such a run's output is settled by nothing.
+   */
+  worktree?: string;
+  branch?: string;
+  base?: string;
   /** The daemon's own tmux session the window was opened in. */
   scopeSession?: string;
   /** The tmux window id (`@N`) `launchTask` created for this run. */
@@ -170,6 +179,15 @@ export interface ScheduleRunStarted {
 export interface ScheduleRunSettled {
   kind: "run-settled"; runId: string; taskId: string; at: string;
   outcome: ScheduleRunOutcome; verdict: string | null; unmet: string[];
+  /**
+   * WHERE THE RUN'S OUTPUT WENT, when it produced any: the branch that holds it
+   * and one line naming what happened to it (merged staged into the repo, kept
+   * for a human, shipped as a PR). Written by the settlement — the panel and
+   * `schedule_task({action:"list"})` render both, so "the run did something and
+   * you cannot see where it went" does not happen.
+   */
+  branch?: string;
+  landing?: string;
 }
 export interface ScheduleRunSkipped { kind: "run-skipped"; taskId: string; at: string; reason: string }
 
@@ -687,4 +705,30 @@ export function readScheduleRuns(home: string, options: ReadScheduleRunsOptions 
   const limit = options.limit;
   if (limit === undefined || !Number.isFinite(limit) || limit < 0 || filtered.length <= limit) return filtered;
   return filtered.slice(filtered.length - Math.floor(limit));
+}
+
+/**
+ * ONE PAGE OF A TASK'S HISTORY, COUNTED FROM THE NEWEST RECORD BACKWARDS.
+ *
+ * `offset` skips that many of the NEWEST records, which is what makes the
+ * panel's "load older" walk the whole ledger without a cursor in the client: a
+ * ledger is append-only and ordered, so the count from either end is stable
+ * while the panel reads (a new run may append at the FRONT, and it can shift
+ * what the next page contains — but it can never make the walk skip a record
+ * that was already behind the page the reader is holding).
+ *
+ * `total` comes back with the page so the caller can say how much history there
+ * is and whether anything older remains — the fact `limit` alone cannot carry.
+ */
+export function readScheduleRunPage(
+  home: string,
+  options: { taskId: string; limit: number; offset: number },
+): { runs: ScheduleRunRecord[]; total: number } {
+  const all = readScheduleRuns(home, { taskId: options.taskId });
+  const total = all.length;
+  const offset = Math.max(0, Math.floor(options.offset));
+  const limit = Math.max(0, Math.floor(options.limit));
+  const end = Math.max(0, total - offset);
+  const start = Math.max(0, end - limit);
+  return { runs: all.slice(start, end), total };
 }

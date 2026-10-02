@@ -13,11 +13,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { adoptScheduledRunContract } from "../lib/schedule-run-contract.ts";
+import { createScheduleWorktree, scheduleOwnerRecordPath } from "../lib/schedule-worktree.ts";
 import {
   addScheduledTask,
   appendScheduleRun,
@@ -212,4 +214,33 @@ test("a goal file that cannot be written leaves NO approval record behind", () =
   assert.equal(f.st.loopGoal, undefined, "an approval record may never claim a file that is not there");
   assert.equal(f.st.restatement, undefined);
   assert.deepEqual(f.persisted, []);
+});
+
+test("a run in its OWN checkout adopts the contract too (2026-10-03)", () => {
+  // THE SHAPE THE SCHEDULER PRODUCES: every run works in the checkout cut from
+  // the task's repository (lib/schedule-worktree.ts), so its cwd is NOT the
+  // task's repo. Asking for path equality would refuse every run that exists —
+  // and a refused session cannot adopt the contract it was started for.
+  const f = fake();
+  const repo = mkdtempSync(join(tmpdir(), "rg-run-contract-git-"));
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "gate-test@example.invalid"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "gate test"], { cwd: repo });
+  writeFileSync(join(repo, "README.md"), "hello\n");
+  execFileSync("git", ["add", "-A"], { cwd: repo });
+  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+  const id = seed(f, { repo });
+  const cut = createScheduleWorktree({ repo, runId: "run-1" });
+  assert.equal(cut.ok, true, cut.ok ? "" : cut.problem);
+  if (!cut.ok) return;
+  try {
+    const out = adoptScheduledRunContract({ ...deps(f), repoRoot: () => cut.worktree.path }, {}, env(id));
+    assert.equal(out.adopted, true, out.adopted ? "" : out.reason);
+    assert.deepEqual(f.written, [{ path: join(cut.worktree.path, ".pi", "loop-goal.md"), text: GOAL + "\n" }]);
+    assert.equal(f.st.loopGoal?.station, "commit", "契约里的站点跟着过来");
+  } finally {
+    rmSync(cut.worktree.path, { recursive: true, force: true });
+    rmSync(scheduleOwnerRecordPath(cut.worktree.path), { force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

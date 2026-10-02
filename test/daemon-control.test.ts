@@ -236,14 +236,32 @@ test("launchTask refuses a bad repo, mode, station or a name somebody holds", ()
   assert.match(launchTask(base, { repo: process.cwd(), task: "x", name: "taken-name" }).problem ?? "", /已被占用/);
 });
 
-test("a tmux that cannot list sessions refuses the launch instead of creating one", () => {
+test("a tmux that cannot run at all refuses the launch instead of creating one", () => {
   const home = scratchHome();
+  // ENOENT is the shape a MISSING EXECUTABLE has — the failure that silently
+  // ate every scheduled run on 2026-10-02, and the one retrying cannot fix.
   const outcome = launchTask(
-    { home, userHome: home, runTmux: fakeRunner(() => ({ ok: false, stdout: "", stderr: "no server" })) },
+    { home, userHome: home, runTmux: fakeRunner(() => ({ ok: false, stdout: "", stderr: "spawnSync tmux ENOENT" })) },
     { repo: process.cwd(), task: "x" },
   );
   assert.equal(outcome.ok, false);
-  assert.match(outcome.problem ?? "", /读不到 tmux server|list-sessions/);
+  assert.equal(outcome.permanent, true, "永久障碍：调度器据此消费掉那一槽，而不是每 20 秒重试");
+  assert.match(outcome.problem ?? "", /起不来 tmux/);
+});
+
+test("a tmux server that is merely DOWN does not stop the launch (2026-10-03)", () => {
+  const home = scratchHome();
+  // `no server running` means there is no session to find — and `new-session` is
+  // exactly what starts one. Refusing here used to lose the slot every time.
+  const tmux = fakeRunner((argv) => {
+    if (argv[0] === "list-sessions") return { ok: false, stdout: "", stderr: "no server running on /tmp/tmux-501/default" };
+    if (argv[0] === "new-session") return { ok: true, stdout: "@1 %1\n", stderr: "" };
+    return { ok: true, stdout: "", stderr: "" };
+  });
+  const outcome = launchTask({ home, userHome: home, runTmux: tmux }, { repo: process.cwd(), task: "x" });
+  assert.equal(outcome.ok, true, outcome.problem ?? "");
+  assert.ok(outcome.sessionId !== undefined);
+  assert.ok(tmux.calls.some((argv) => argv[0] === "new-session"), JSON.stringify(tmux.calls));
 });
 
 test("candidate repos come from running sessions and from the workspace roots", () => {

@@ -675,8 +675,8 @@ pi-gate daemon uninstall
 | `contract` | object | `{restatement:{text,hash,station,at}, goal:{text,hash,at}, approvedAt}`：**用户实际批准过的东西**，两段文本各绑自己的 hash |
 | `enabled` | boolean | 关了就不触发 |
 | `createdAt` / `updatedAt` | string | ISO |
-| `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、跳过、起不来都算）—— 下一个时间点从这里数；被错过的时点也会被它消费掉（见下一行） |
-| `nextRunAt` | string \| null | **派生**：这个任务**按时间表下一个要处理的** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**永远不会是「很久以前」**：daemon 停机跨过的时点按用户决定**跳过、不补跑**，所以宽限窗口（`SLOT_GRACE_MS`，10 分钟）之外的过去不存在 —— 要么在未来，要么就在刚过去的 10 分钟内（「刚到点」：daemon 的下一次 tick 照常跑它）；一个已经被错过的时点，这里显示的是**它之后的下一个**（被错过的那个只出现在台账的 `run-skipped` 里，§13.7）。**这是按时间表算的，不看「这个任务是不是还有一次运行没结算」**（§13.6）：那种情况下这个槽会被推迟，原因写在 `GET /api/schedules/:id/runs` 里 —— 最后一条 `run-started` 没有对应的 `run-settled`（工具面的 `schedule_task({action:"list"})` 会直接写「已过期：本任务还有一次运行没结算」）。`enabled:false`、cron 非法、或 `createdAt` 读不出时间时是 `null` |
+| `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、因永久障碍跳过、起不来都算）—— 下一个时间点从这里数。**暂时起不来的那一次不写它**：那一槽留着，下次 tick 再试（§13.7） |
+| `nextRunAt` | string \| null | **派生**：这个任务**按时间表下一个要处理的** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**它可能落在过去**（2026-10-03 起）：到点了但还没跑成（daemon 当时不在跑，或本任务自己还有一次运行没结算）时，这里就是**那一槽**，daemon 的下一次 tick 会跑它 —— 「迟到」不再是跳过的理由，也不再有 10 分钟的宽限窗口。**这是按时间表算的，不看「这个任务是不是还有一次运行没结算」**（§13.6）：那种情况下这个槽会被推迟，原因写在 `GET /api/schedules/:id/runs` 里 —— 最后一条 `run-started` 没有对应的 `run-settled`。`enabled:false`、cron 非法、或 `createdAt` 读不出时间时是 `null` |
 | `describe` | string | **派生**：`describeCron` 的一行人话，如 `每天 09:00` |
 | `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-started` 不是结果，不列） |
 
@@ -723,13 +723,14 @@ pi-gate daemon uninstall
 
 ### 13.6 `GET /api/schedules/:id/runs?limit=`
 
-`200`：`{ schema: 1, taskId, runs: [ … ] }` —— 该任务的台账，旧→新；
-`limit` 默认 **50**、下限 1、上限 **500**。未知 `id` ⇒ `404`。
+`200`：`{ schema: 1, taskId, total, offset, runs: [ … ] }` —— 该任务的台账，旧→新；
+`limit` 默认 **50**、下限 1、上限 **500**；`offset` 从**最新一条往回数**、跳过这么多条（面板的「加载更早」用它走完整个历史，
+不受 500 的上限限制），`total` 是这个任务台账里的总条数。未知 `id` ⇒ `404`。
 
 | `kind` | 字段 |
 | --- | --- |
-| `run-started` | `runId`, `taskId`, `sessionId`, `at`，以及 `scopeSession` / `windowId`（发起回执里的窗口坐标，可选；见下） |
-| `run-settled` | `runId`, `taskId`, `at`, `outcome`, `verdict`, `unmet` |
+| `run-started` | `runId`, `taskId`, `sessionId`, `at`，以及 `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 路径、它所在的分支、切出来的 commit）与 `scopeSession` / `windowId`（发起回执里的窗口坐标，可选；见下） |
+| `run-settled` | `runId`, `taskId`, `at`, `outcome`, `verdict`, `unmet`，以及 `branch` / `landing`（产出留在哪条分支上、结算把它怎么处理了；没有产出 / 已合并回收时没有这两个字段） |
 | `run-skipped` | `taskId`, `at`, `reason` |
 
 `outcome` 的四个值：`passed`（会话**记录过 READY**）/ `blocked`（BLOCKED）/ `failed`（会话结束但结论不是这两个）/`gone`（读不到门禁 state，或会话确证消失）。**没有 READY 不记 passed** —— 这是「一次定时运行要过 reviewer」
@@ -743,40 +744,49 @@ pi-gate daemon uninstall
 
 ### 13.7 调度器的行为（不在 HTTP 面上，但同属契约）
 
-- **到点才跑**：`enabled`、下一个 cron 时刻已经到点且仍在宽限窗口内、且该任务没有未结算的运行。
-  **同一个时间点只处理一次** —— daemon 重启、tick 抖动都不重复跑（`lastFiredAt` 落在文件里，
-  那是跨进程、跨重启的那一份）。写盘失败（只读 home、磁盘满）时本次进程还会把那个 slot / 那次运行
+- **到点就尽力跑；LATE IS NOT LOST**（2026-10-03，用户决定）：`enabled`、下一个 cron 时刻已经到点、且该任务没有未结算的运行 ⇒ 跑。
+  **没有宽限窗口，也没有「错过」这个概念**：槽是 `lastFiredAt` 之后的**那一个**，它到达之后一直是这一槽 —— daemon 当时不在跑
+  （关机 / 休眠 / 重启）也照样是它，恢复后的第一次 tick 就跑。**一次只有一个槽**（`nextRunAfter` 只给一个），
+  所以停机一周回来也是跑一次，不是七次。**同一个时间点只处理一次** —— daemon 重启、tick 抖动都不重复跑（`lastFiredAt`
+  落在文件里，那是跨进程、跨重启的那一份）。写盘失败（只读 home、磁盘满）时本次进程还会把那个 slot / 那次运行
   记在内存里（`unrecordedSlots` / `unrecordedRuns`，按龄回收）：已经起出去的会话收不回来，
   「同一个时间点不重复起」因此在坏盘上也成立。
-- **错过的时点跳过，不补跑**（用户决定）：到点时没有启动运行的那些 cron 时刻（daemon 没在跑，或本任务自己还有一次运行没结算），距 now 超过 `SLOT_GRACE_MS`（10 分钟）就**一律不跑**，也不会「补跑一次」（错过就是错过）；下一次真实到点照常跑。
-  跳过是**消费掉**那一槽：调度器把 `lastFiredAt` 前移到处理时刻，并写一条 `run-skipped`
-  （`reason` 点名被错过的那个时刻**与成因**）—— 所以「跳过」不会变成「从此再也不跑」。宽限窗口（10 分钟，
-  是 20 s tick 间隔的好几倍）只用来吸收正常的迟到 tick（系统睡了/被占了几分钟），不是补跑。
-- **一个 repo 同时只有一个写者**：两类占用都会让本次**不启动**，各写一条 `run-skipped`、`reason` 点名占着它的那一方：
-  ① 该 repo 上还有**未结算的运行**（点名它的 `runId`）；② 该 repo 上还有**别的活会话**（点名 `sessionId` 与最后心跳）——
-  判据是 `<repo>/.pi/session-presence.json` 里那条 **60 s 内**的心跳，与门禁自己拒第二个会话时用的**同一个函数**
-  （`lib/session-exclusivity.ts`；哪怕那个会话已经 `declare_done`，只要进程还在就算）。② 是必需的：门禁不会为运行会话启动，
-  契约继承不了，发出去的会是一辆开不动的车（quality round P1，2026-10-02）。daemon 自己开的运行窗口在结算时就关掉，所以
-  daemon 留下的旧窗口不会变成长期占用者。
-- **起会话失败也是 `run-skipped`**：`launchTask` 被拒（repo 不存在、会话名被占…）或 tmux 根本摸不到
-  （`list-sessions` 失败 —— 最典型的是 launchd 起的 daemon 的 `PATH` 里没有 tmux，见 `docs/daemon/README.md` §1）时，
-  这一槽同样被消费掉并写明 `reason`，下一个整点照常再试。
+- **只有永久障碍才写 `run-skipped` 并消费掉那一槽**（2026-10-03，用户决定）。四类：任务停用、cron 非法、
+  repo 路径不存在或不是 git 仓库、tmux 可执行文件找不到（`spawnSync … ENOENT`）。
+  **其它失败什么都不写**：隔离 checkout 建不出来、会话起不来、tmux server 暂时摸不到 —— 槽留着，
+  20 秒后的下一次 tick 再试，条件一好就把它跑掉（还是只跑一次：槽只有一个）。上一次运行没结算也是
+  `open-run` 而不是跳过：它一结算，下一次 tick 就处理那一槽。
+- **每次运行都在自己的隔离 checkout 里**（2026-10-03，用户决定）：从主 repo 的 `HEAD` 在
+  `/tmp/rg-worktrees/<repo>-sch-<runId>` 切一条 `rg-schedule-<runId>` 分支（按 `lib/worktree-seed.ts` 播种
+  `.pi` 配置 / `.env` / `node_modules`），运行在它里面干活。**主 repo 里的会话、或同一 repo 上别的未结算运行，都不再是跳过的理由**
+  —— 「一个 checkout 一个写者」照样成立，只是在各自的 checkout 里；发车到会话 `session_start` 之间那个「几秒里被人占住」的窗口也随之消失。
+  旧记录（没有 `worktree` 字段）仍按老规矩结算：没什么可收的。
+- **结算按结论落地，站点只决定落地方式**（2026-10-03，用户决定）：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒
+  写 `run-settled`、关掉这次运行的窗口（`closeRunWindowAt`，只关 daemon 自己那个 scope session 里的窗口，坐标优先取 pane、
+  pane 丢了 `@rg_sid` 就取 `run-started` 里记下的发起回执），**并结算它的 checkout**：
+  ① 没有改动 ⇒ 目录与分支一并回收，主 repo 的 `git status --porcelain` 逐字节不变；
+  ② 有改动**且 `outcome === "passed"`（记录过 READY）** —— 站点 `precommit`/`commit` ⇒ 把分支 `merge` 回主 repo
+  （staged、**不提交**：用户自己提交）；站点 `pr` ⇒ 留在隔离分支上（那次运行自己 push / 开 PR），**不 merge**；
+  ③ 有改动但不是 `passed` ⇒ 分支保留、主 repo 一动不动（未通过 READY 的产出绝不落地）；
+  ④ 主 repo 工作区不干净、或 merge 冲突 ⇒ 主 repo 不动（冲突会 `merge --abort`）、分支保留。
+  结算前会把 checkout 里还没提交的改动 **commit 到那条分支上**（`precommit` 站点的运行本来就该停在这里），
+  否则删目录就把它们删掉了。分支名与结算说明写进 `run-settled` 的 `branch` / `landing`，面板与
+  `schedule_task({action:"list"})` 都显示它们。
 - **运行就是普通 loop 会话**：`RG_GATE_MODE=loop`、`RG_STATION_CAP=<契约里的 station>`、
-  `RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`（本次运行的标识）；门禁在 `session_start` 按这两个变量
-  把契约**从 `schedules.json` 读回来**（两个 hash 与文本相符 + 任务 repo 就是本会话 repo +
-  台账里有本 runId 且 `sessionId` 就是本会话的 `run-started` 记录，四道闸全过才生效），再**写出**
+  `RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`（本次运行的标识），cwd 是这次运行自己的隔离 checkout；门禁在 `session_start` 按这两个变量
+  把契约**从 `schedules.json` 读回来**（两个 hash 与文本相符 + 本会话的 repo 就是任务 repo **或从它切出来的隔离 checkout**
+  —— 归属记录 `lib/schedule-worktree.ts` 证明后者 + 台账里有本 runId 且 `sessionId` 就是本会话的 `run-started` 记录，四道闸全过才生效），再**写出**
   `.pi/loop-goal.md` 与 sidecar 的 `restatement` / `loopGoal`（`lib/schedule-run-contract.ts`）；
   任一道闸不过就什么都不写、只记一条日志（fail-closed）；那种情况下它没有契约可用（hash 不符、repo 不符、台账里没有本 runId 都会走到这里），
-  它要么自己重新谈一份 goal，要么停在那里等人。②「repo 被人占着」在发车前就被 `liveSessionHolder` 挡下了，
-  但发车到会话真正 `session_start` 之间有**几秒**（pi 冷启动）：这期间新占住这个 checkout 的会话仍会让它落到这里 ——
-  窗口很小，但不是零。
+  它要么自己重新谈一份 goal，要么停在那里等人。
 - **结算**：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒ 写 `run-settled`，**并把这次运行的窗口关掉**（`lib/daemon/control.ts` 的 `closeRunWindowAt`，只关 daemon 自己那个 scope session 里的窗口）：
   普通会话要等**进程退出**才释放 worktree 占用（`declare_done` 不释放），留着的窗口会让这个 repo 永远“被占”，以后每次运行都被跳过。
   **每一个 `outcome` 都会走这一步**，用两个地址里能用的那一个：会话还在列表里、pane 坐标读得到就用它；
   pane 丢了 `@rg_sid`（观测不到那个窗口）而 checkout 心跳还新鲜（进程确实还在）就用 `run-started` 里记下的发起回执坐标（§13.6）。
   两个地址都没有的结算（进程已经退了）本来就没什么可关的，tmux 自己会收回那个窗口。
-- **「观测不到」不是「已经结束」**：列表里没有这个会话时，先问它自己的记录 —— `<repo>/.pi/session-presence.json`
-  的心跳还新鲜且 `sessionId` 就是它、或它的转写还在动（`TRANSCRIPT_ACTIVE_MS`），就继续等；
+- **「观测不到」不是「已经结束」**：列表里没有这个会话时，先问它自己的记录 —— **它自己那个 checkout 里**
+  `<worktree>/.pi/session-presence.json` 的心跳还新鲜且 `sessionId` 就是它（旧记录没有 checkout，就回退到主 repo）、
+  或它的转写还在动（`TRANSCRIPT_ACTIVE_MS`），就继续等；
   刚起的会话在观测里要过一会儿才出现，这段宽限期（120 s）内「没看见」不算消失。
   反过来，一个还占着自己 checkout 的活进程也不是「已结束」：`dead` / `idle` 的会话只有在它**没有**完成记录
   （`state.completion`，即 `declare_done` 被接受）时才会被这条证据挡住 —— 跑着的运行不会被误结算，

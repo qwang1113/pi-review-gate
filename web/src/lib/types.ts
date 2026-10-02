@@ -211,7 +211,17 @@ export interface ScheduleContract {
 
 /** 台账里的一条运行记录（§13.6）。`run-started` 不是「结果」，不在 `lastRuns` 里。 */
 export type ScheduledTaskRun =
-  | { kind: "run-started"; runId: string; taskId: string; sessionId: string; at: string }
+  | {
+      kind: "run-started";
+      runId: string;
+      taskId: string;
+      sessionId: string;
+      at: string;
+      /** 这次运行自己的隔离 checkout、它所在的分支，以及切出来的那个 commit（§13.6）。 */
+      worktree?: string;
+      branch?: string;
+      base?: string;
+    }
   | {
       kind: "run-settled";
       runId: string;
@@ -220,8 +230,22 @@ export type ScheduledTaskRun =
       outcome: "passed" | "blocked" | "failed" | "gone";
       verdict: string | null;
       unmet: string[];
+      /** 产出留在哪个分支上（没产出 / 已合并回收时没有）。 */
+      branch?: string;
+      /** 结算把产出怎么处理了，一行话。 */
+      landing?: string;
     }
   | { kind: "run-skipped"; taskId: string; at: string; reason: string };
+
+/** `GET /api/schedules/:id/runs` 的一页（§13.6）：`offset` 从最新一条往回数。 */
+export interface ScheduleRunsResponse {
+  schema: number;
+  taskId: string;
+  /** 这个任务的台账总条数 —— 还有没有更早的，看它。 */
+  total: number;
+  offset: number;
+  runs: ScheduledTaskRun[];
+}
 
 /** 一行定时任务：存储字段 + §13.1 的三个派生字段。 */
 export interface ScheduledTask {
@@ -237,8 +261,9 @@ export interface ScheduledTask {
   /** 调度器上一次**处理**这个任务的时间（跑了、跳过、起不来都算）。 */
   lastFiredAt: string | null;
   /**
-   * 派生：这个任务下一个要处理的 cron 时刻 —— 错过的时点会被跳过（不补跑），
-   * 所以它不会停在很久以前；`enabled:false` 或 cron 非法时是 `null`。
+   * 派生：这个任务下一个要处理的 cron 时刻 —— 到点时没跑成的槽会**留着**
+   * （不丢弃），所以它可能落在刚过去的一段时间里（面板会把那种情况标成「已到点
+   * 还没跑」）；`enabled:false` 或 cron 非法时是 `null`。
    */
   nextRunAt: string | null;
   /** 派生：`describeCron` 的一行人话，如「每天 09:00」。 */

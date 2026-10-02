@@ -108,24 +108,28 @@ daemon 起一个 authoring 会话跟你谈；
 `restatement` / `loopGoal`；干完活照常走门禁
 （有代码改动就要过 reviewer）—— 台账里**只有记录过 READY** 的那次才算 `passed`。
 
-**两条不会变的行为**：
+**三条不会变的行为**（2026-10-03 用户决定）：
 
-- **错过的时点跳过，不补跑**。到点时没有启动运行的 cron 时刻（daemon 没在跑，或本任务自己还有一次运行没结算）
-  一律跳过 —— 不会「补跑一次」，更不会把停机一周的七个槽位补齐；下一次真实到点照常跑。
-  跳过是**消费掉**那一槽（基准前移），所以它不会变成「从此再也不跑」。台账里有证据：
-  `GET /api/schedules/:id/runs` 里能看到一条 `run-skipped`，`reason` 点名被错过的那个时刻**与成因**。
-  只有距 now 10 分钟以内（`SLOT_GRACE_MS`）的迟到 tick 仍算「到点」—— 那是不误杀正常的抖动，不是补跑。
-- **同一个 repo 同时只有一个写者**。上一个运行还没结算时，同一 repo 的下一个任务不启动；
-  同一 repo 上还有**别的活会话**时也不启动（哪怕那个会话已经 `declare_done`、只是窗口还开着）。
-  两种情况都在台账里记一条 `run-skipped`，`reason` 写明是谁占着（`runId` 或 `sessionId`）—— 理由同上：
-  门禁不会为运行会话启动，那样它连契约都继承不了。（daemon 自己开的运行窗口在结算时就关掉，所以它不会变成长期占用者；
-  占住 checkout 的一般是你自己的会话。）
+- **到点就尽力跑；只有永久障碍才跳过**。daemon 当时不在跑（关机 / 休眠 / 重启）不算「错过」：那一槽留着，
+  它回来后的第一次 tick 就跑 —— 一次只有一个槽，所以停机一周回来也是跑一次，不是七次。
+  只有四类永久障碍会写 `run-skipped` 并消费掉这一槽：任务停用、cron 非法、repo 不存在或不是 git 仓库、
+  tmux 可执行文件找不到。暂时起不来（隔离 checkout 建不出来、会话起不来、tmux server 没起来）什么都不写，
+  20 秒后的下一次 tick 再试；上一次运行还没结算也是等它。
+- **每次运行都在自己的隔离 checkout 里**。从主 repo 的 `HEAD` 切到
+  `/tmp/rg-worktrees/<repo>-sch-<runId>`，在 `rg-schedule-<runId>` 分支上干活。
+  **主 repo 里开着会话不再影响定时任务**，同一 repo 的两个任务也不再互相等。
+- **产出按结论落地**。没改动 ⇒ 目录与分支回收、主 repo 一点不变；记录过 READY 且有改动 ⇒
+  站点 `precommit`/`commit` 把分支 staged 合并回主 repo（你 commit 的时机不变），站点 `pr` 留在隔离分支上
+  （那次运行自己 push / 开 PR）；没到 READY 的改动留在分支上、主 repo 不动。
+  分支名与结算说明写进台账的 `run-settled`（`branch` / `landing`），面板的「历史」与
+  `schedule_task({action:"list"})` 都看得到。
+  运行结束后 daemon 会关掉自己开的那个窗口（普通会话要等进程退出才释放 checkout）。
 
 **排障**：
 
 | 症状 | 看哪里 |
 | --- | --- |
-| 到点没动静 | `GET /api/schedules` 的 `nextRunAt`：它**不会停在很久以前**（错过的时点被跳过，这个字段已经滑到下一个）—— 如果 `GET /api/schedules/:id/runs` 里最后一条 `run-started` 没有对应的 `run-settled`，它是在等那次运行结束；如果那里面有一条点名该时点的 `run-skipped`，那一次就是被跳过的那一次（成因写在 `reason` 里：daemon 当时不在跑，或本任务自己还有一次运行没结算）；`enabled:false` 则根本没有下一次 |
+| 到点没动静 | `GET /api/schedules` 的 `nextRunAt`：它**可能就在过去** —— 那就是「已到点、还没跑成」的那一槽（daemon 当时不在跑，或本任务自己还有一次运行没结算），daemon 的下一次 tick 会处理它。面板上点任务的「历史」能看每一槽的结果：`:id/runs` 里最后一条 `run-started` 没有对应的 `run-settled` ⇒ 它还在等那次运行结束；有一条 `run-skipped` ⇒ 那一次撞上了永久障碍（`reason` 写明是哪一类）；`enabled:false` 则根本没有下一次 |
 | 没跑起来 | `GET /api/schedules/:id/runs`：`run-skipped` 的 `reason` 说清为什么 —— repo 上还有**未结算的运行**（点名 `runId`）、repo 上还有**别的活会话**（点名 `sessionId` 与最后心跳；哪怕它已经 `declare_done`，只要进程还在就算）、或起会话失败 |
 | 会话起来了但不干活 | 面板打开那个会话（`GET /api/sessions` 里找 `RG_SCHEDULE_RUN` 对应的那条）—— 它就是一个普通会话，等回答 / 卡住都照旧显示 |
 | outcome 看不懂 | `passed` 只来自 READY；`gone` = 读不到门禁 state 或会话异常消失；`failed` = 结束了但结论不是 READY/BLOCKED |

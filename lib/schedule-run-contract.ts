@@ -20,6 +20,11 @@
  * "now" — the approval happened then, and pretending otherwise would make a
  * stale contract look freshly agreed).
  *
+ * AND IT RUNS IN ITS OWN CHECKOUT (2026-10-03): the session's repo is the
+ * isolated checkout cut from the task's repo (lib/schedule-worktree.ts), which
+ * its owner record proves — "this is the task's repo" and "this is the checkout
+ * cut from it" are both accepted, and anything else is not.
+ *
  * ── FAIL-CLOSED, AND SILENT ──
  *
  * Every uncertainty means "do nothing but say so in the log": a missing
@@ -34,6 +39,7 @@
 
 import { goalTextHash } from "./loop-goal.ts";
 import { normalizeRepoPath } from "./repo-pr-policy.ts";
+import { readScheduleWorktreeOwner } from "./schedule-worktree.ts";
 import { restatementHash } from "./restatement.ts";
 import {
   findScheduledTask,
@@ -106,8 +112,14 @@ export function adoptScheduledRunContract(
     const problem = scheduleContractProblem(task.contract);
     if (problem !== undefined) return skip(`契约不成立：${problem}`);
     const repo = deps.repoRoot();
-    if (normalizeRepoPath(task.repo) !== normalizeRepoPath(repo)) {
-      return skip(`任务 ${task.id} 的 repo 是 ${task.repo}，本会话在 ${repo}`);
+    // THE TASK'S REPO, OR THE CHECKOUT CUT FROM IT (2026-10-03): a scheduled
+    // run works in its OWN checkout (lib/schedule-worktree.ts), and "is this
+    // the task's repository" is answered by that checkout's owner record. Asking
+    // only for path equality would refuse every run the scheduler starts.
+    const owner = readScheduleWorktreeOwner(repo);
+    const fromTaskRepo = owner !== undefined && normalizeRepoPath(owner.repo) === normalizeRepoPath(task.repo);
+    if (normalizeRepoPath(task.repo) !== normalizeRepoPath(repo) && !fromTaskRepo) {
+      return skip(`任务 ${task.id} 的 repo 是 ${task.repo}，本会话在 ${repo}（也不是它的隔离 checkout）`);
     }
     // THE LEDGER PROVES IT: only a `run-started` line naming THIS session for
     // THIS run id makes this process the run it claims to be.
