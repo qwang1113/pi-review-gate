@@ -775,9 +775,18 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // observer can SEE is what tells the two apart: an arming nobody is behind
     // stays inert forever and costs nothing.
     const openIds = new Set(open.map((run) => run.runId));
+    // AN ARMING THAT EVER BECAME A RUN IS NOT AN ORPHAN (2026-10-03, quality
+    // round P1): a run whose `run-started` DID land has its own settlement, and
+    // its session stays visible in the observer for hours after it finished —
+    // asking "is it still open?" instead of "did a start line ever land?" would
+    // re-settle it on EVERY tick, appending a duplicate `run-settled` every 20
+    // seconds, forever.
+    const everStarted = new Set(
+      records.filter((record) => record.kind === "run-started" || record.kind === "run-settled").map((record) => record.runId),
+    );
     const orphaned: ScheduleRunStarted[] = records
       .filter((record): record is ScheduleRunArmed => record.kind === "run-armed")
-      .filter((armed) => !openIds.has(armed.runId))
+      .filter((armed) => !everStarted.has(armed.runId))
       .filter((armed) => (collection?.sessions ?? []).some((session) => session.sessionId === armed.sessionId))
       .map((armed) => ({
         kind: "run-started",

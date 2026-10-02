@@ -333,6 +333,23 @@ test("the gate's OWN untracked `.pi/` files do not block a merge (2026-10-03, qu
   assert.equal(git(repo, ["status", "--porcelain"]).includes(".pi"), false, "门禁自己的文件没被带进主 repo");
 });
 
+test("a `.pi/` change already COMMITTED on the run's branch also blocks the merge (2026-10-03, quality P2)", () => {
+  const repo = track(gitRepo());
+  mkdirSync(join(repo, ".pi"), { recursive: true });
+  writeFileSync(join(repo, ".pi", "settings.json"), "{}\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-q", "-m", "chore: track a .pi file"]);
+  const worktree = cut(repo, "run-aaaa0015");
+  // THE SESSION COMMITTED IT: the working tree is clean, so only the range
+  // `base..HEAD` can see this change at all.
+  commitIn(worktree, { ".pi/settings.json": "{\"edited\":true}\n" });
+  assert.equal(git(worktree.path, ["status", "--porcelain"]), "", "工作区是干净的");
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "precommit" });
+  assert.equal(settlement.action, "branch-kept", settlement.note);
+  assert.match(settlement.note, /不在审查范围/);
+  assert.equal(readFileSync(join(repo, ".pi", "settings.json"), "utf8"), "{}\n", "主 repo 没被改");
+});
+
 test("a second run of the same id replaces a leftover checkout instead of failing", () => {
   const repo = track(gitRepo());
   const first = cut(repo, "run-aaaa0008");

@@ -256,7 +256,18 @@ function settlementStatus(path: string): string | undefined {
  * the review, so it may not be merged either: the run keeps it on its branch and
  * a human decides (2026-10-03, reviewer P1).
  */
-function touchesGateExcludedDir(path: string): boolean {
+function touchesGateExcludedDir(path: string, base: string): boolean {
+  const isExcluded = (target: string): boolean =>
+    GATE_EXCLUDE_DIRS.some((dir) => target === dir || target.startsWith(`${dir}/`));
+  // COMMITTED FIRST (2026-10-03, quality round P2): a change already on the run's
+  // branch is INVISIBLE to the working-tree status below, and it is exactly the
+  // shape that must never be merged — it was never in front of a reviewer.
+  // Asking only the working tree made the same change merge or not depending on
+  // whether the session had committed it.
+  const committed = (gitRawOrNull(path, ["diff", "--name-only", "-z", `${base}..HEAD`]) ?? "")
+    .split("\0")
+    .filter((entry) => entry !== "");
+  if (committed.some(isExcluded)) return true;
   const raw = gitRawOrNull(path, ["status", "--porcelain"]);
   if (raw === null) return false; // an unreadable answer is the caller's tri-state
   return raw
@@ -272,7 +283,7 @@ function touchesGateExcludedDir(path: string): boolean {
       const entry = line.slice(3).trim();
       // `R  old -> new` names both sides; the one that matters is the new one.
       const target = entry.includes(" -> ") ? entry.slice(entry.indexOf(" -> ") + 4) : entry;
-      return GATE_EXCLUDE_DIRS.some((dir) => target === dir || target.startsWith(`${dir}/`));
+      return isExcluded(target);
     });
 }
 
@@ -393,7 +404,7 @@ export function settleScheduleWorktree(input: {
   }
   // ASKED BEFORE THE COMMIT: `commitLeftovers` clears the working-tree status
   // this reads (2026-10-03).
-  const gateOwned = changes && touchesGateExcludedDir(path);
+  const gateOwned = changes && touchesGateExcludedDir(path, base);
   if (changes) {
     const leftovers = commitLeftovers(path, runId);
     if (leftovers !== undefined) {

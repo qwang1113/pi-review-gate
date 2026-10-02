@@ -608,6 +608,36 @@ test("a checkout that cannot be cut KEEPS the slot — the next tick tries again
   assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-started").length, 1, "仍然只跑一次");
 });
 
+test("a run that already settled is not re-settled on every tick (2026-10-03, quality P1)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  // DISABLED so no due slot fires a second run into this test.
+  const added = addScheduledTask(home, scheduleTaskInput(repo, { name: "settled-long-ago", enabled: false }));
+  if (!added.ok) assert.fail(added.problem);
+  const at = new Date(Date.now() - 3_600_000).toISOString();
+  const checkout = { worktree: "/tmp/rg-worktrees/fake-sch", branch: "rg-schedule-runaaaa5555", base: "0".repeat(40) };
+  appendScheduleRun(home, { kind: "run-armed", runId: "run-aaaa5555", taskId: added.value.id, sessionId: "sess-aaaa5555", at, ...checkout });
+  appendScheduleRun(home, { kind: "run-started", runId: "run-aaaa5555", taskId: added.value.id, sessionId: "sess-aaaa5555", at, ...checkout });
+  appendScheduleRun(home, { kind: "run-settled", runId: "run-aaaa5555", taskId: added.value.id, at, outcome: "passed", verdict: "READY", unmet: [] });
+  const scheduler = createScheduler({
+    home,
+    runTmux: fakeTmux(),
+    // THE SESSION IS STILL VISIBLE (it finished an hour ago; the observer keeps
+    // sessions far longer than that): "is it still OPEN?" would re-settle this
+    // run every tick and append a duplicate `run-settled` forever.
+    observer: fakeObserver([
+      sessionFor("sess-aaaa5555", { repo, state: "done", rounds: { sent: 1, recorded: 1, lastVerdict: "READY" } }),
+    ]),
+  });
+  scheduler.tick();
+  scheduler.tick();
+  assert.equal(
+    readScheduleRuns(home).filter((record) => record.kind === "run-settled").length,
+    1,
+    "已结算的运行不会被每 20 秒重复结算",
+  );
+});
+
 test("an ARMED run whose `run-started` never landed is still settled (2026-10-03, quality P2)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
