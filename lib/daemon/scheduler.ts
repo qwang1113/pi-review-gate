@@ -541,17 +541,28 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * "run it unless it genuinely cannot be run" forbids. A rollback that itself
    * fails costs that one slot, and says so.
    */
-  function rollbackStamp(task: ScheduledTask, at: Date, slot: string): void {
+  function rollbackStamp(task: ScheduledTask, slot: string): void {
     deferredSlots.delete(slot);
     try {
-      updateScheduledTask(deps.home, task.id, { lastFiredAt: task.lastFiredAt }, { from: "gate" });
+      // WITH THE VERSION IT JUST READ, like every other write in this file: a
+      // rollback is still a write, and it must not clobber a panel edit that
+      // landed while the launch was failing.
+      const current = readSchedules(deps.home);
+      updateScheduledTask(deps.home, task.id, { lastFiredAt: task.lastFiredAt }, {
+        from: "gate",
+        ...(current.ok ? { expectedVersion: current.file.version } : {}),
+      });
     } catch (error) {
       log(`调度任务 ${task.id} 的槽戳没能回滚（这一槽被消费）：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   function skipped(task: ScheduledTask, at: Date, reason: string, slot: string): void {
-    dealt(task, at, slot);
+    // THE SKIP IS RECORDED ONLY ONCE THE SLOT IS ACTUALLY SPENT (2026-10-03,
+    // reviewer P1): a stamp that could not be written leaves the slot OWED, and
+    // the next tick will make this same decision — recording it every 20 seconds
+    // would fill the ledger with copies of one judgement.
+    if (!dealt(task, at, slot)) return;
     try {
       appendScheduleRun(deps.home, { kind: "run-skipped", taskId: task.id, at: at.toISOString(), reason });
     } catch (error) {
@@ -622,7 +633,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       // A SESSION CANNOT INHERIT A CONTRACT IT CANNOT READ: with the ledger
       // unwritable, nothing is launched. Both the checkout and the slot go back
       // — a broken disk is a TEMPORARY obstacle, not a reason to spend the slot.
-      rollbackStamp(task, at, slot);
+      rollbackStamp(task, slot);
       releaseCheckout(cut.worktree, task, runId);
       deferred(task, at, slot, `台账写不进去（${error instanceof Error ? error.message : String(error)}）`);
       return undefined;
@@ -645,7 +656,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       // THE SLOT GOES BACK (2026-10-03, reviewer P1): the stamp above consumed
       // it for a run that never happened, and a temporary obstacle must leave the
       // slot owed.
-      rollbackStamp(task, at, slot);
+      rollbackStamp(task, slot);
       // NOTHING IS WRITTEN FOR A LAUNCH THAT NEVER HAPPENED (reviewer P1): the
       // arming line is inert on its own (`openRuns` ignores it), so the ledger
       // keeps NO run this session never was — no `run-settled`, no ghost in the
