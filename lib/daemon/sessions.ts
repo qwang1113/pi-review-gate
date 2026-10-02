@@ -180,18 +180,33 @@ function defaultBranchOf(cwd: string): string | null {
 /** Every `*.jsonl` under the sessions root, keyed by the session id in its name. */
 function scanTranscripts(sessionsRoot: string): Map<string, TranscriptRef> {
   const found = new Map<string, TranscriptRef>();
-  let dirs: string[];
+  let entries: string[];
   try {
-    dirs = readdirSync(sessionsRoot);
+    entries = readdirSync(sessionsRoot);
   } catch {
     return found;
   }
-  for (const dir of dirs) {
-    const full = join(sessionsRoot, dir);
+  for (const entry of entries) {
+    const full = join(sessionsRoot, entry);
+    // TWO LAYOUTS, ONE SCAN: normally the root holds per-cwd subdirectories and
+    // the `.jsonl` files sit one level down, but when pi is told where its
+    // session dir is (`PI_CODING_AGENT_SESSION_DIR`, lib/session-dir.ts's
+    // `piSessionsRoot`) that directory IS the root and the files sit directly
+    // in it. Reading only the nested layout found no transcripts at all under
+    // the override, and the daemon then settled real runs as `gone` (quality
+    // round P1, t9).
+    let dir: string;
     let files: string[];
     try {
-      if (!statSync(full).isDirectory()) continue;
-      files = readdirSync(full);
+      if (statSync(full).isDirectory()) {
+        dir = full;
+        files = readdirSync(full);
+      } else if (entry.endsWith(".jsonl")) {
+        dir = sessionsRoot;
+        files = [entry];
+      } else {
+        continue;
+      }
     } catch {
       continue;
     }
@@ -201,7 +216,7 @@ function scanTranscripts(sessionsRoot: string): Map<string, TranscriptRef> {
       if (underscore < 0) continue;
       const sessionId = file.slice(underscore + 1, -".jsonl".length);
       if (sessionId === "") continue;
-      const path = join(full, file);
+      const path = join(dir, file);
       let mtimeMs: number;
       try {
         mtimeMs = statSync(path).mtimeMs;

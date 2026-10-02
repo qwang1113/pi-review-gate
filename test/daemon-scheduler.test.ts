@@ -23,6 +23,7 @@ import {
   settlementFor,
   SLOT_GRACE_MS,
   type DueDecision,
+  type DueReason,
   type Scheduler,
 } from "../lib/daemon/scheduler.ts";
 import {
@@ -188,49 +189,84 @@ test("due: the grace window is what separates a late tick from a missed slot", (
 });
 
 test("due: scheduledAt never names a time the daemon slept through", () => {
-  // ONE RULE FOR EVERY CALLER: the API's `nextRunAt`, the panel and
-  // `schedule_task({action:"list"})` all render this field, so a time that is
-  // long past must never come out of it — only the slot that has just arrived
-  // (inside the grace window, a tick away from being dealt with) may be behind
-  // `now` at all.
+  // THE FIELD EVERY SURFACE RENDERS (the API's `nextRunAt`, the panel,
+  // `schedule_task({action:"list"})`) must never claim that a slot the daemon
+  // slept through is what comes next. Only two things may sit behind `now` at
+  // all: the slot that has just arrived (inside the grace window, a tick away
+  // from being dealt with or skipped), and the slot an UNSETTLED RUN is holding
+  // — the open-run case below says why that one is honest rather than stale.
+  //
+  // `already-dealt` is NOT in the table: it is unreachable by construction
+  // (`nextRunAfter` is strictly later than the base it is counted from, and that
+  // base is `lastFiredAt` for every input that could reach the branch — see the
+  // guard's own comment in lib/daemon/scheduler.ts).
   const at = new Date(2026, 8, 30, 10, 0);
-  const cases: Array<{ label: string; now: Date; decision: DueDecision }> = [
-    { label: "disabled", now: at, decision: dueDecision({ task: task({ enabled: false }), now: at, openRun: false }) },
-    { label: "bad-time", now: at, decision: dueDecision({ task: task({ createdAt: "not a time" }), now: at, openRun: false }) },
-    { label: "bad-cron", now: at, decision: dueDecision({ task: task({ cron: "bogus" }), now: at, openRun: false }) },
+  const cases: Array<{ label: string; now: Date; expected: DueReason; decision: DueDecision }> = [
     {
-      label: "already-dealt",
+      label: "disabled",
       now: at,
-      decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 30).toISOString() }), now: at, openRun: false }),
+      expected: "disabled",
+      decision: dueDecision({ task: task({ enabled: false }), now: at, openRun: false }),
+    },
+    {
+      label: "bad-time",
+      now: at,
+      expected: "bad-time",
+      decision: dueDecision({ task: task({ createdAt: "not a time" }), now: at, openRun: false }),
+    },
+    {
+      label: "bad-cron",
+      now: at,
+      expected: "bad-cron",
+      decision: dueDecision({ task: task({ cron: "bogus" }), now: at, openRun: false }),
     },
     {
       label: "not-yet",
       now: at,
+      expected: "not-yet",
       decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 5).toISOString() }), now: at, openRun: false }),
     },
     {
       label: "missed",
       now: at,
+      expected: "missed",
       decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() }), now: at, openRun: false }),
     },
     {
+      // A WEEK-OLD BASE **and** an unsettled run: the only shape that reaches
+      // this branch with a slot behind `now`.
       label: "open-run",
       now: at,
-      decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 5).toISOString() }), now: at, openRun: true }),
+      expected: "open-run",
+      decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() }), now: at, openRun: true }),
     },
     {
       label: "due",
       now: new Date(2026, 8, 30, 9, 1),
+      expected: "due",
       decision: dueDecision({ task: task(), now: new Date(2026, 8, 30, 9, 1), openRun: false }),
     },
     {
       label: "due (never fired)",
       now: new Date(2026, 8, 30, 9, 0, 1),
+      expected: "due",
       decision: dueDecision({ task: task(), now: new Date(2026, 8, 30, 9, 0, 1), openRun: false }),
     },
   ];
-  for (const { label, now: moment, decision } of cases) {
+  for (const { label, now: moment, expected, decision } of cases) {
+    assert.equal(decision.reason, expected, `${label} 必须命中它命名的分支`);
     if (decision.scheduledAt === null) continue;
+    if (expected === "open-run") {
+      // THE ONE EXCEPTION, AND IT IS THE POINT OF THIS BRANCH: an unsettled run
+      // holds the slot it was STARTED for, and a run that has been going for
+      // days holds a slot from days ago. Nothing may move that base until the
+      // run settles, so the honest answer is the old slot — not a "next" one
+      // that would not be honoured. No panel ever sees it: `GET /api/schedules`
+      // asks with `openRun: false` (daemon/server.ts), and the tool face names
+      // it 「已过期：本任务还有一次运行没结算」 instead of promising a tick.
+      assert.ok(decision.scheduledAt.getTime() < moment.getTime(), "open-run 显示的是那次运行正在处理的槽");
+      continue;
+    }
     assert.ok(
       decision.scheduledAt.getTime() > moment.getTime() - SLOT_GRACE_MS,
       `${label}: ${decision.scheduledAt.toISOString()} 落在宽限之外（now ${moment.toISOString()}）`,

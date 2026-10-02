@@ -318,6 +318,16 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
           // replayed, so once it is missed this field slides to the slot after
           // it (lib/daemon/scheduler.ts's `SLOT_GRACE_MS` decides where
           // "arrived" ends and "missed" begins).
+          //
+          // WHY `openRun` IS ALWAYS FALSE HERE: this field answers 「按时间表下
+          // 一个槽是哪个」, not 「运行结束后会发生什么」. Asking with the task's real
+          // unsettled-run state would make it name the slot that run is HOLDING
+          // — a time in the past, for a run that has been going for days — while
+          // the panel renders this field as 「下次运行」. The price is stated in
+          // docs/daemon/api.md §13.1: a run that has not settled delays the slot
+          // named here, and 「它为什么不跑」 is answered by
+          // `GET /api/schedules/:id/runs` (its trailing `run-started` has no
+          // `run-settled`) rather than by a second next-run field.
           nextRunAt: dueDecision({ task, now: at, openRun: false }).scheduledAt?.toISOString() ?? null,
           describe: describeCron(task.cron),
           // `run-started` is not a RESULT: the panel shows what happened, not

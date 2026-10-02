@@ -236,7 +236,10 @@ export interface ScheduledTask {
   updatedAt: string;
   /** 调度器上一次**处理**这个任务的时间（跑了、跳过、起不来都算）。 */
   lastFiredAt: string | null;
-  /** 派生：调度器正要处理的那一个 cron 时刻；`enabled:false` 或 cron 非法时是 `null`。 */
+  /**
+   * 派生：这个任务下一个要处理的 cron 时刻 —— 错过的时点会被跳过（不补跑），
+   * 所以它不会停在很久以前；`enabled:false` 或 cron 非法时是 `null`。
+   */
   nextRunAt: string | null;
   /** 派生：`describeCron` 的一行人话，如「每天 09:00」。 */
   describe: string;

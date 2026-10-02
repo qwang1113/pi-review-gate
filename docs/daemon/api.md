@@ -676,7 +676,7 @@ pi-gate daemon uninstall
 | `enabled` | boolean | 关了就不触发 |
 | `createdAt` / `updatedAt` | string | ISO |
 | `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、跳过、起不来都算）—— 下一个时间点从这里数；被错过的时点也会被它消费掉（见下一行） |
-| `nextRunAt` | string \| null | **派生**：这个任务**下一个要处理的** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**永远不会是「很久以前」**：daemon 停机跨过的时点按用户决定**跳过、不补跑**，所以宽限窗口（`SLOT_GRACE_MS`，10 分钟）之外的过去不存在 —— 要么在未来，要么就在刚过去的 10 分钟内（「刚到点」：daemon 的下一次 tick 照常跑它）；一个已经被错过的时点，这里显示的是**它之后的下一个**（被错过的那个只出现在台账的 `run-skipped` 里，§13.7）。`enabled:false`、cron 非法、或 `createdAt` 读不出时间时是 `null` |
+| `nextRunAt` | string \| null | **派生**：这个任务**按时间表下一个要处理的** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**永远不会是「很久以前」**：daemon 停机跨过的时点按用户决定**跳过、不补跑**，所以宽限窗口（`SLOT_GRACE_MS`，10 分钟）之外的过去不存在 —— 要么在未来，要么就在刚过去的 10 分钟内（「刚到点」：daemon 的下一次 tick 照常跑它）；一个已经被错过的时点，这里显示的是**它之后的下一个**（被错过的那个只出现在台账的 `run-skipped` 里，§13.7）。**这是按时间表算的，不看「这个任务是不是还有一次运行没结算」**（§13.6）：那种情况下这个槽会被推迟，原因写在 `GET /api/schedules/:id/runs` 里 —— 最后一条 `run-started` 没有对应的 `run-settled`（工具面的 `schedule_task({action:"list"})` 会直接写「已过期：本任务还有一次运行没结算」）。`enabled:false`、cron 非法、或 `createdAt` 读不出时间时是 `null` |
 | `describe` | string | **派生**：`describeCron` 的一行人话，如 `每天 09:00` |
 | `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-started` 不是结果，不列） |
 

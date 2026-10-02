@@ -10,7 +10,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   extractGateState,
@@ -354,6 +355,35 @@ test("the observed roots are the producers' own, never the daemon's home", () =>
   );
   assert.equal(session.gateStateFound, true, "the transcript found there carries the gate state");
   assert.equal(session.rounds.lastVerdict, "READY");
+});
+
+test("a session-dir OVERRIDE is the whole root: a flat .jsonl layout is read too (t9 quality round)", () => {
+  // `PI_CODING_AGENT_SESSION_DIR` names the session dir ITSELF (lib/session-dir.ts
+  // `piSessionsRoot`), so pi lists the `.jsonl` files directly inside it — there
+  // is no per-cwd subdirectory to descend into. A reader that only ever looked
+  // one level down found no transcripts at all under the override: the panel
+  // lost every round, and a run that really passed settled as `gone`.
+  const home = scratchHome();
+  const flat = join(home, "override-sessions");
+  mkdirSync(flat, { recursive: true });
+  const transcript = join(flat, "2026-10-01T00-00-00-000Z_flat1.jsonl");
+  writeFileSync(
+    transcript,
+    `${JSON.stringify({ type: "session", id: "flat1", timestamp: new Date().toISOString(), cwd: "/repo" })}\n` +
+      `${JSON.stringify(gateStateRecord({ review: { verdict: "READY", fingerprint: "tree-1" } }))}\n`,
+  );
+  const previous = process.env.PI_CODING_AGENT_SESSION_DIR;
+  try {
+    process.env.PI_CODING_AGENT_SESSION_DIR = flat;
+    const observer = createSessionObserver({ userHome: home, runTmux: paneRunner([]) });
+    assert.equal(observer.transcriptFor("flat1"), transcript, "根下直接的 .jsonl 也要被认");
+    const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "flat1");
+    assert.equal(session?.gateStateFound, true, "门禁 state 仍然从那条转写里读得到");
+    assert.equal(session?.rounds.lastVerdict, "READY");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+    else process.env.PI_CODING_AGENT_SESSION_DIR = previous;
+  }
 });
 
 test("the verdict is read where it survives declare_done, not from the rounds it clears", () => {

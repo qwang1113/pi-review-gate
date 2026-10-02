@@ -185,8 +185,16 @@ export interface DueDecision {
  * `scheduledAt` slides to the next one), and `open-run` (the task's own run has
  * not settled; it is not this slot's turn yet). A task still running keeps
  * `open-run` even for a slot that is long past — consuming that slot belongs to
- * the tick that finds the run settled, which is the next time the base is
- * allowed to move.
+ * the tick that finds the run settled.
+ *
+ * THE ONE PLACE `scheduledAt` MAY BE OLD, SAID PLAINLY: `open-run` returns the
+ * slot the RUNNING session was started for, and a run that has been going for
+ * days holds a slot from days ago. That is honest rather than stale — nothing
+ * will move that base until the run settles — and it is the reading
+ * `schedule_task({action:"list"})` already names (「已过期：本任务还有一次运行没
+ * 结算」). No panel sees it: `GET /api/schedules` passes `openRun: false`
+ * (daemon/server.ts), so the HTTP field never names a slot the daemon slept
+ * through.
  */
 export function dueDecision(input: { task: ScheduledTask; now: Date; openRun: boolean }): DueDecision {
   const task = input.task;
@@ -198,9 +206,12 @@ export function dueDecision(input: { task: ScheduledTask; now: Date; openRun: bo
   const scheduledAt = nextRunAfter(task.cron, new Date(base));
   if (scheduledAt === null) return { due: false, scheduledAt: null, missedAt: null, reason: "bad-cron" };
   const dealtAt = task.lastFiredAt === null ? undefined : Date.parse(task.lastFiredAt);
-  // REDUNDANT ON PURPOSE: `nextRunAfter` is strictly later than its base, so
-  // the slot is always past `lastFiredAt` — except when a hand-edited file
-  // carries a stamp inside the slot being judged. One slot, dealt with once.
+  // UNREACHABLE TODAY, KEPT AS A GUARD: `nextRunAfter` is STRICTLY later than
+  // its base, and the base IS `lastFiredAt` whenever this branch could fire — so
+  // a stamp can never sit at or after the slot counted from it. It would take a
+  // future base other than `lastFiredAt` to reach this, and the rule it states
+  // ("a slot at or behind the stamp is already dealt with") is the one that must
+  // hold if that ever changes. One slot, dealt with once.
   if (dealtAt !== undefined && dealtAt >= scheduledAt.getTime()) {
     return { due: false, scheduledAt, missedAt: null, reason: "already-dealt" };
   }
@@ -698,7 +709,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // is the only one that ever judges it.
         if (decision.reason === "missed" && decision.missedAt !== null) {
           const reason =
-            `错过时点 ${decision.missedAt.toISOString()}：daemon 当时不在跑（或本任务当时还有未结算的运行），` +
+            `错过时点 ${decision.missedAt.toISOString()}：daemon 当时不在跑，` +
             "按用户决定跳过不补跑 —— 下一个到点照常跑";
           const stale = slotKey(task.id, decision.missedAt);
           // ONE LEDGER LINE PER SLOT EVEN WHEN THE STAMP CANNOT BE WRITTEN: a

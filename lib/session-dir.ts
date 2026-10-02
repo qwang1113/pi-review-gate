@@ -92,8 +92,21 @@ export function sessionDirForCwd(
  * `$HOME`, and nothing this package adds — `RG_DAEMON_HOME` included — moves
  * it; a reader that resolved this from the daemon's own home found no
  * transcripts at all under the documented override (t6 acceptance).
+ *
+ * A SESSION-DIR OVERRIDE **IS** THE ROOT, NOT ITS PARENT: `PI_CODING_AGENT_SESSION_DIR`
+ * (and its `TAU_` twin — the same two variables {@link sessionDirForCwd} reads)
+ * names the directory pi lists `.jsonl` files DIRECTLY in, with no per-cwd
+ * subdirectory underneath. So it is returned verbatim, and a scanner over this
+ * root has to accept that flat layout too (daemon/sessions.ts
+ * `scanTranscripts`) — reading only `<root>/<enc>/*.jsonl` found nothing under
+ * the override, and a daemon that cannot see a run's transcript settles a real
+ * `passed` as `gone` (quality round P1, t9).
  */
 export function piSessionsRoot(home: string = homedir(), env: NodeJS.ProcessEnv = process.env): string {
+  const override =
+    normalizeSessionPath(env.PI_CODING_AGENT_SESSION_DIR ?? "", home) ||
+    normalizeSessionPath(env.TAU_CODING_AGENT_SESSION_DIR ?? "", home);
+  if (override !== "") return override;
   const agentDir =
     normalizeSessionPath(env.PI_CODING_AGENT_DIR ?? "", home) ||
     normalizeSessionPath(env.TAU_CODING_AGENT_DIR ?? "", home) ||

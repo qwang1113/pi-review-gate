@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { findTranscriptPath, sessionDirForCwd } from "../lib/session-dir.ts";
+import { findTranscriptPath, piSessionsRoot, sessionDirForCwd } from "../lib/session-dir.ts";
 
 test("D06: the transcript is the `<timestamp>_<id>.jsonl` file that exists, or nothing", () => {
   const dir = mkdtempSync(join(tmpdir(), "rg-transcripts-"));
@@ -96,6 +96,26 @@ test("PI_CODING_AGENT_SESSION_DIR is the FINAL session dir, used verbatim (round
     if (prev === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
     else process.env.PI_CODING_AGENT_SESSION_DIR = prev;
   }
+});
+
+test("piSessionsRoot reads the SAME rule as sessionDirForCwd, override included (t9 quality round)", () => {
+  // The reader starts from a session id and has no cwd to encode, so it needs
+  // the root rather than one session's dir — and it must not disagree with the
+  // writer: an override IS the root (pi lists the `.jsonl` files directly in
+  // it), so returning `<home>/.pi/agent/sessions` under the override pointed
+  // the daemon at a directory nothing writes to.
+  assert.equal(piSessionsRoot(HOME, {}), join(HOME, ".pi", "agent", "sessions"), "no override ⇒ pi's default layout");
+  assert.equal(
+    piSessionsRoot(HOME, { PI_CODING_AGENT_DIR: "/custom/agent-dir" }),
+    join("/custom/agent-dir", "sessions"),
+    "the agent-dir override still moves it",
+  );
+  assert.equal(
+    piSessionsRoot(HOME, { PI_CODING_AGENT_SESSION_DIR: "/custom/sessions" }),
+    "/custom/sessions",
+    "the session-dir override IS the root — no encoded subdir",
+  );
+  assert.equal(piSessionsRoot(HOME, { TAU_CODING_AGENT_SESSION_DIR: "~/tau-sessions" }), join(HOME, "tau-sessions"));
 });
 
 test("~ and ~/ expand to the home dir in overrides and env, like pi's normalizePath (round-10 P1)", () => {
