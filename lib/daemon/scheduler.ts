@@ -557,7 +557,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // is stamped, the slot stays owed, and the next tick tries again.
     const cut = worktrees.cut({ repo: task.repo, runId });
     if (!cut.ok) {
-      deferred(task, at, slot, `切隔离 checkout 失败：${cut.problem}`);
+      const reason = `切隔离 checkout 失败：${cut.problem}`;
+      if (cut.permanent === true) {
+        // NO RETRY CAN FIX THESE — the repo is gone, or has no git in it. The
+        // slot is consumed and the ledger says why, instead of promising a tick
+        // that will fail the same way every 20 seconds (2026-10-03).
+        skipped(task, at, reason, slot);
+      } else {
+        deferred(task, at, slot, reason);
+      }
       return undefined;
     }
     const started = launchTask({ home: deps.home, runTmux: deps.runTmux, now: deps.now }, {

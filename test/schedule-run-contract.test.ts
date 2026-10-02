@@ -14,12 +14,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { adoptScheduledRunContract } from "../lib/schedule-run-contract.ts";
 import { createScheduleWorktree, scheduleOwnerRecordPath } from "../lib/schedule-worktree.ts";
+import { git } from "./helpers/git.ts";
 import {
   addScheduledTask,
   appendScheduleRun,
@@ -223,12 +223,12 @@ test("a run in its OWN checkout adopts the contract too (2026-10-03)", () => {
   // and a refused session cannot adopt the contract it was started for.
   const f = fake();
   const repo = mkdtempSync(join(tmpdir(), "rg-run-contract-git-"));
-  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
-  execFileSync("git", ["config", "user.email", "gate-test@example.invalid"], { cwd: repo });
-  execFileSync("git", ["config", "user.name", "gate test"], { cwd: repo });
+  git(repo, ["init", "-q", "-b", "main"]);
+  git(repo, ["config", "user.email", "gate-test@example.invalid"]);
+  git(repo, ["config", "user.name", "gate test"]);
   writeFileSync(join(repo, "README.md"), "hello\n");
-  execFileSync("git", ["add", "-A"], { cwd: repo });
-  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-q", "-m", "init"]);
   const id = seed(f, { repo });
   const cut = createScheduleWorktree({ repo, runId: "run-1" });
   assert.equal(cut.ok, true, cut.ok ? "" : cut.problem);

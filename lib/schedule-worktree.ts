@@ -43,7 +43,7 @@
  * adopt the contract it was started for.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 import { gitFailureText, gitOrNull, gitText } from "./git-exec.ts";
@@ -75,11 +75,6 @@ export function scheduleWorktreeBranch(token: string): string {
 
 export function scheduleOwnerRecordPath(worktreePath: string): string {
   return `${worktreePath}${OWNER_SUFFIX}`;
-}
-
-/** Is this path one of OUR scheduled-run checkouts (a direct child of the root)? */
-export function isScheduleWorktreePath(path: string): boolean {
-  return dirname(path) === gateWorktreeRoot() && /-sch-[A-Za-z0-9]+$/.test(basename(path));
 }
 
 /** What the owner record says, and therefore what a run's cwd really is. */
@@ -120,7 +115,17 @@ export function readScheduleWorktreeOwner(worktreePath: string): ScheduleWorktre
 
 export type CutScheduleWorktree =
   | { ok: true; worktree: ScheduleWorktreeOwner; seed: string[] }
-  | { ok: false; problem: string };
+  | {
+      ok: false;
+      problem: string;
+      /**
+       * NO RETRY CAN CHANGE THIS: there is no repository, or no git in it. The
+       * scheduler consumes the slot for these and keeps it for every other
+       * failure (`openScopeWindow`'s `permanent` is the same idea one layer
+       * down — 2026-10-03).
+       */
+      permanent?: boolean;
+    };
 
 /**
  * Cut the run's own checkout from the MAIN repo's `HEAD`.
@@ -142,6 +147,16 @@ export function createScheduleWorktree(input: {
   const token = scheduleWorktreeToken(input.runId);
   const path = scheduleWorktreePath(repo, token);
   const branch = scheduleWorktreeBranch(token);
+  // TWO OF THE FOUR PERMANENT OBSTACLES ARE CHECKED HERE, BEFORE ANY GIT RUNS
+  // (2026-10-03): a repo that is gone or that was never a repository will not
+  // become one by waiting, so the scheduler must be able to consume the slot
+  // instead of retrying every 20 seconds forever.
+  if (!existsSync(repo) || !statSync(repo).isDirectory()) {
+    return { ok: false, problem: `repo 不是存在的目录：${repo}`, permanent: true };
+  }
+  if (gitOrNull(repo, ["rev-parse", "--git-dir"]) === null) {
+    return { ok: false, problem: `repo 不是 git 仓库：${repo}`, permanent: true };
+  }
   try {
     mkdirSync(ensureGateWorktreeRoot(), { recursive: true });
   } catch (error) {
@@ -206,12 +221,34 @@ export interface ScheduleSettlement {
   note: string;
 }
 
-/** Does this checkout hold anything? The base is the commit it was cut from. */
-function hasChanges(path: string, base: string): boolean {
-  const dirty = gitOrNull(path, ["status", "--porcelain"]);
-  if (dirty !== null && dirty.trim() !== "") return true;
+/**
+ * WHAT THE SETTLEMENT LOOKS AT — everything except the gate's OWN artifacts.
+ *
+ * A run's session writes `.pi/loop-goal.md` and its sidecar state into its
+ * checkout: that is how the gate records the contract it adopted. Whether that
+ * shows up as "dirty" depends on the TARGET repo's `.gitignore`, which the gate
+ * does not get to assume — a repo that does not ignore `.pi/` would make every
+ * run look like it produced something, keep a branch for each one, and (at
+ * `precommit`/`commit` with a READY) stage the gate's own bookkeeping into the
+ * user's repository. Excluding it here is what makes "produced nothing" mean
+ * the run's work rather than the gate's (quality round P2, 2026-10-03).
+ */
+const SETTLEMENT_PATHS: readonly string[] = [".", ":(exclude).pi"];
+
+/**
+ * Does this checkout hold anything? The base is the commit it was cut from.
+ *
+ * `undefined` means CANNOT TELL, and that is deliberately not `false`: the
+ * caller deletes the directory when this says "nothing", so an unreadable
+ * answer must never be read as emptiness.
+ */
+function hasChanges(path: string, base: string): boolean | undefined {
+  const dirty = gitOrNull(path, ["status", "--porcelain", "--", ...SETTLEMENT_PATHS]);
+  if (dirty === null) return undefined;
+  if (dirty.trim() !== "") return true;
   const ahead = gitOrNull(path, ["rev-list", "--count", `${base}..HEAD`]);
-  return ahead !== null && Number.parseInt(ahead, 10) > 0;
+  if (ahead === null) return undefined;
+  return Number.parseInt(ahead, 10) > 0;
 }
 
 /**
@@ -223,10 +260,10 @@ function hasChanges(path: string, base: string): boolean {
  * the run's branch is what makes the work survive the cleanup.
  */
 function commitLeftovers(path: string, runId: string): string | undefined {
-  const dirty = gitOrNull(path, ["status", "--porcelain"]);
+  const dirty = gitOrNull(path, ["status", "--porcelain", "--", ...SETTLEMENT_PATHS]);
   if (dirty === null || dirty.trim() === "") return undefined;
   try {
-    gitText(path, ["add", "-A"]);
+    gitText(path, ["add", "-A", "--", ...SETTLEMENT_PATHS]);
     gitText(path, ["commit", "-m", `chore(schedule): keep the output of ${runId}`, "--no-verify"]);
     return undefined;
   } catch (error) {
@@ -262,20 +299,46 @@ export function settleScheduleWorktree(input: {
   station: DeliveryStation;
 }): ScheduleSettlement {
   const { repo, path, branch, base, runId } = input.worktree;
-  const committed = hasChanges(path, base);
-  const leftovers = committed ? commitLeftovers(path, runId) : undefined;
-  const changes = committed || leftovers === undefined ? committed : true;
-  // THE CHECKOUT IS ALWAYS REMOVED — the branch is the durable half. A branch
-  // whose output was never recorded (a failed leftover commit) is KEPT, never
-  // silently dropped: that is the one case where a human has to look.
-  if (changes && !committed && leftovers !== undefined) {
+  if (!existsSync(path)) {
+    // ALREADY SETTLED, OR TAKEN BY HAND: an earlier settlement whose ledger
+    // write failed (so the tick tries again), or a directory somebody deleted.
+    // Nothing is decided and — above all — NOTHING IS DELETED: the branch is the
+    // only copy, and a second settlement must be a no-op rather than a
+    // destroyer.
     return {
       action: "branch-kept",
       branch,
       changes: true,
-      note: `结算时提交遗留改动失败（${leftovers}）—— 分支 ${branch} 与它所在的目录都留着，请人工处理`,
+      note: `隔离 checkout 已经不在了（${path}）—— 分支 ${branch} 保持原样，结算不再动它`,
     };
   }
+  const changes = hasChanges(path, base);
+  if (changes === undefined) {
+    // CANNOT TELL IS NOT "NOTHING": the next step would delete the directory,
+    // and deleting work is the one mistake this module must not make. Both
+    // halves stay (the directory is the only copy of whatever is in it) and a
+    // human looks.
+    return {
+      action: "branch-kept",
+      branch,
+      changes: true,
+      note: `读不出这次运行的 checkout（${path}）有没有改动 —— 目录与分支都留着，请人工确认`,
+    };
+  }
+  if (changes) {
+    const leftovers = commitLeftovers(path, runId);
+    if (leftovers !== undefined) {
+      // Uncommitted work that could not be put on the branch: the directory is
+      // the only copy that exists, so it stays exactly where it is.
+      return {
+        action: "branch-kept",
+        branch,
+        changes: true,
+        note: `结算时提交遗留改动失败（${leftovers}）—— 分支 ${branch} 与目录 ${path} 都留着，请人工处理`,
+      };
+    }
+  }
+  // THE CHECKOUT IS REMOVED FROM HERE ON — the branch is the durable half.
   if (!changes) {
     discardCheckout(repo, path, branch);
     return { action: "reclaimed", branch, changes: false, note: "本次运行没有产生任何改动" };

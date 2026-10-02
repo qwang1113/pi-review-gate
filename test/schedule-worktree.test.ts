@@ -16,14 +16,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   createScheduleWorktree,
-  isScheduleWorktreePath,
   readScheduleWorktreeOwner,
   scheduleOwnerRecordPath,
   scheduleWorktreeBranch,
@@ -33,11 +31,7 @@ import {
   type ScheduleWorktreeOwner,
 } from "../lib/schedule-worktree.ts";
 import { gateWorktreeRoot } from "../lib/worktree-root.ts";
-
-/** Run git and return its trimmed stdout; throws on a non-zero exit. */
-function git(cwd: string, args: readonly string[]): string {
-  return execFileSync("git", [...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-}
+import { git } from "./helpers/git.ts";
 
 /** A real repository with one commit, on `main`. */
 function gitRepo(): string {
@@ -81,14 +75,13 @@ function commitIn(worktree: ScheduleWorktreeOwner, files: Record<string, string>
 // pure naming
 // ---------------------------------------------------------------------------
 
-test("a run's token comes from its run id, and only our own paths look like ours", () => {
+test("a run's token comes from its run id, and the checkout is named after its repo", () => {
   assert.equal(scheduleWorktreeToken("run-aaaa1111"), "runaaaa1111");
   assert.equal(scheduleWorktreeBranch("runaaaa1111"), "rg-schedule-runaaaa1111");
-  const inside = scheduleWorktreePath("/somewhere/Repo.Name", "runaaaa1111");
-  assert.equal(inside, join(gateWorktreeRoot(), "Repo.Name-sch-runaaaa1111"));
-  assert.equal(isScheduleWorktreePath(inside), true);
-  assert.equal(isScheduleWorktreePath(join(gateWorktreeRoot(), "Repo.Name-s-runaaaa1111")), false, "会话的 worktree 不是我的");
-  assert.equal(isScheduleWorktreePath("/tmp/elsewhere/Repo.Name-sch-runaaaa1111"), false, "根目录之外的不是我的");
+  assert.equal(
+    scheduleWorktreePath("/somewhere/Repo.Name", "runaaaa1111"),
+    join(gateWorktreeRoot(), "Repo.Name-sch-runaaaa1111"),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -126,11 +119,20 @@ test("the checkout starts from the committed HEAD, not from the user's uncommitt
   assert.equal(readFileSync(join(repo, "README.md"), "utf8"), "uncommitted in the main repo\n", "主 repo 一个字没动");
 });
 
-test("a checkout that cannot be cut says so instead of throwing", () => {
+test("a checkout that cannot be cut says so instead of throwing — and says whether retrying can help", () => {
   const notARepo = track(mkdtempSync(join(tmpdir(), "rg-sched-wt-norepo-")));
   const result = createScheduleWorktree({ repo: notARepo, runId: "run-dddd4444" });
   assert.equal(result.ok, false);
-  if (!result.ok) assert.match(result.problem, /worktree add 失败/);
+  if (!result.ok) {
+    assert.match(result.problem, /不是 git 仓库/);
+    assert.equal(result.permanent, true, "永久障碍：调度器据此消费掉那一槽");
+  }
+  const gone = createScheduleWorktree({ repo: join(notARepo, "nowhere"), runId: "run-dddd5555" });
+  assert.equal(gone.ok, false);
+  if (!gone.ok) {
+    assert.match(gone.problem, /不是存在的目录/);
+    assert.equal(gone.permanent, true);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -233,6 +235,39 @@ test("a merge that would COLLIDE aborts, leaves the repo as it was, and keeps th
   assert.equal(git(repo, ["status", "--porcelain"]), "", "冲突被 abort 掉了，没有半合并的残留");
   assert.equal(readFileSync(join(repo, "README.md"), "utf8"), "main moved on\n");
   assert.equal(git(repo, ["show", `${worktree.branch}:README.md`]), "the run's version", "分支留着，人可以自己处理");
+});
+
+test("settling is a no-op when the checkout is already gone — a second settlement must not delete the branch", () => {
+  const repo = track(gitRepo());
+  const worktree = cut(repo, "run-aaaa0010");
+  commitIn(worktree, { "kept.txt": "only copy\n" });
+  // Settled once (its ledger write failed, so the tick will try again) — or a
+  // user deleted the directory. Either way the second call knows nothing about
+  // the contents, and the ONE thing it must not do is `branch -D`.
+  rmSync(worktree.path, { recursive: true, force: true });
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "precommit" });
+  assert.equal(settlement.action, "branch-kept");
+  assert.match(settlement.note, /已经不在了/);
+  assert.equal(git(repo, ["show", `${worktree.branch}:kept.txt`]), "only copy", "分支与它的内容都还在");
+  assert.equal(git(repo, ["status", "--porcelain"]), "");
+});
+
+test("the gate's own `.pi/` artifacts are not the run's output (quality round P2)", () => {
+  const repo = track(gitRepo());
+  // THE TARGET REPO HAS NO IGNORE RULES AT ALL (the fixture has no
+  // `.gitignore`): whether `.pi/` shows up in `git status` is the OTHER repo's
+  // business, and the settlement may not assume it away. What a run's session
+  // writes there (`loop-goal.md`, sidecar state) is the gate's bookkeeping, not
+  // output — counting it would keep a branch for every run and stage the gate's
+  // files into the user's repository.
+  const worktree = cut(repo, "run-aaaa0011");
+  mkdirSync(join(worktree.path, ".pi"), { recursive: true });
+  writeFileSync(join(worktree.path, ".pi", "loop-goal.md"), "# 契约\n");
+  assert.match(git(worktree.path, ["status", "--porcelain"]), /\?\? \.pi\//, "它对 git 确实是可见的");
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "precommit" });
+  assert.equal(settlement.action, "reclaimed", "只有门禁产物 ⇒ 没有产出");
+  assert.equal(git(repo, ["status", "--porcelain"]), "", "主 repo 里不会出现 .pi/loop-goal.md");
+  assert.equal(git(repo, ["branch", "--list", worktree.branch]), "", "也不留分支");
 });
 
 test("a second run of the same id replaces a leftover checkout instead of failing", () => {

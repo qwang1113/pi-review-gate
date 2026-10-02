@@ -603,6 +603,31 @@ test("a checkout that cannot be cut KEEPS the slot — the next tick tries again
   assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-started").length, 1, "仍然只跑一次");
 });
 
+test("a checkout that can NEVER be cut consumes the slot and names the reason (2026-10-03)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  dueTask(home, repo, { name: "repo-without-git" });
+  const broken = createSchedulerRaw({
+    home,
+    runTmux: fakeTmux(),
+    observer: fakeObserver([]),
+    worktrees: {
+      cut: () => ({ ok: false, problem: "repo 不是 git 仓库：/x", permanent: true }),
+      settle: () => ({ action: "reclaimed", branch: "", changes: false, note: "fake" }),
+    },
+  });
+  broken.tick();
+  const records = readScheduleRuns(home);
+  assert.equal(records.filter((record) => record.kind === "run-started").length, 0);
+  const skips = records.filter((record) => record.kind === "run-skipped");
+  assert.equal(skips.length, 1, "永久障碍写一条 run-skipped（goal 的四类之一）");
+  assert.match(skips[0]!.reason, /不是 git 仓库/);
+  // CONSUMED: waiting longer will not produce a repository, so the slot is spent
+  // — the next tick is quiet instead of trying again every 20 seconds.
+  broken.tick();
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-skipped").length, 1);
+});
+
 test("a run that outlives its own slot keeps that slot owed until it settles (2026-10-03)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
