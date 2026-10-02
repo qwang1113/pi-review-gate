@@ -318,6 +318,21 @@ test("a hook that REFUSES the leftover commit keeps the checkout for a human (20
   assert.equal(git(repo, ["status", "--porcelain"]), "", "主 repo 一点没动");
 });
 
+test("the gate's OWN untracked `.pi/` files do not block a merge (2026-10-03, quality P1)", () => {
+  const repo = track(gitRepo());
+  const worktree = cut(repo, "run-aaaa0014");
+  commitIn(worktree, { "feature.txt": "done\n" });
+  // EVERY run in a repo that does not ignore `.pi/` leaves these behind —
+  // reading them as "the run touched .pi" would keep a branch for every run and
+  // never merge anything.
+  mkdirSync(join(worktree.path, ".pi"), { recursive: true });
+  writeFileSync(join(worktree.path, ".pi", "loop-goal.md"), "# 契约\n");
+  const settlement = settleScheduleWorktree({ worktree, outcome: "passed", station: "precommit" });
+  assert.equal(settlement.action, "merged", settlement.note);
+  assert.equal(readFileSync(join(repo, "feature.txt"), "utf8"), "done\n");
+  assert.equal(git(repo, ["status", "--porcelain"]).includes(".pi"), false, "门禁自己的文件没被带进主 repo");
+});
+
 test("a second run of the same id replaces a leftover checkout instead of failing", () => {
   const repo = track(gitRepo());
   const first = cut(repo, "run-aaaa0008");

@@ -263,6 +263,12 @@ function touchesGateExcludedDir(path: string): boolean {
     .split("\n")
     .filter((line) => line.trim() !== "")
     .some((line) => {
+      // UNTRACKED entries under those dirs are the GATE's own bookkeeping (see
+      // {@link settlementStatus}): every run writes them when the target repo
+      // does not ignore `.pi/`, and reading them as "the run touched .pi" would
+      // keep a branch for every run and never merge anything (quality round P1,
+      // 2026-10-03).
+      if (line.startsWith("??")) return false;
       const entry = line.slice(3).trim();
       // `R  old -> new` names both sides; the one that matters is the new one.
       const target = entry.includes(" -> ") ? entry.slice(entry.indexOf(" -> ") + 4) : entry;

@@ -608,6 +608,36 @@ test("a checkout that cannot be cut KEEPS the slot — the next tick tries again
   assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-started").length, 1, "仍然只跑一次");
 });
 
+test("an ARMED run whose `run-started` never landed is still settled (2026-10-03, quality P2)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  const task = dueTask(home, repo, { name: "orphaned-arm" });
+  // THE STATE A CRASH BETWEEN THE TWO WRITES LEAVES: only the arming line, no
+  // `run-started` — while the session it started is real and working. Nothing
+  // else would ever settle it (the window stays open, the checkout is never
+  // reclaimed, its output has no landing), so the tick's orphan pass does.
+  appendScheduleRun(home, {
+    kind: "run-armed",
+    runId: "run-eeee7777",
+    taskId: task.id,
+    sessionId: "sess-eeee7777",
+    at: new Date(Date.now() - 60_000).toISOString(),
+    worktree: "/tmp/rg-worktrees/fake-sch",
+    branch: "rg-schedule-runeeee7777",
+    base: "0".repeat(40),
+  });
+  createScheduler({
+    home,
+    runTmux: fakeTmux(),
+    observer: fakeObserver([
+      sessionFor("sess-eeee7777", { repo, state: "done", rounds: { sent: 1, recorded: 1, lastVerdict: "READY" } }),
+    ]),
+  }).tick();
+  const settled = readScheduleRuns(home).filter((record) => record.kind === "run-settled");
+  assert.equal(settled.length, 1, "孤儿运行必须被结算，否则它永远占着 checkout");
+  assert.equal(settled[0]!.kind === "run-settled" && settled[0]!.outcome, "passed");
+});
+
 test("a task whose contract does NOT check out is never launched (2026-10-03, reviewer P1)", () => {
   const home = scratchHome();
   const repo = scratchRepo();

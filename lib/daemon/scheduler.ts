@@ -590,6 +590,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       taskId: task.id,
       sessionId,
       at: at.toISOString(),
+      // THE CHECKOUT RIDES THE ARMING TOO: if the daemon dies before the
+      // `run-started` write, this is the only line that names what the session
+      // holds — and scheduler's orphan pass settles it from here.
+      worktree: cut.worktree.path,
+      branch: cut.worktree.branch,
+      base: cut.worktree.base,
     };
     try {
       appendScheduleRun(deps.home, armed);
@@ -758,7 +764,32 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
 
     // SETTLE FIRST: a run that just ended must release its repo in THIS tick,
     // or the slot that is due right now gets blocked by its own predecessor.
-    const collection = open.length === 0 ? undefined : deps.observer.collect();
+    const collection = open.length === 0 && !records.some((record) => record.kind === "run-armed")
+      ? undefined
+      : deps.observer.collect();
+    // ORPHANED ARMINGS ARE RUNS TOO (2026-10-03, quality round P2): a daemon
+    // that died between the launch and the `run-started` write leaves only the
+    // arming line, and the session it started is REAL — it holds a checkout and
+    // it will produce output — while `openRuns` deliberately ignores `run-armed`
+    // (a launch that never happened must not look like a run). A session the
+    // observer can SEE is what tells the two apart: an arming nobody is behind
+    // stays inert forever and costs nothing.
+    const openIds = new Set(open.map((run) => run.runId));
+    const orphaned: ScheduleRunStarted[] = records
+      .filter((record): record is ScheduleRunArmed => record.kind === "run-armed")
+      .filter((armed) => !openIds.has(armed.runId))
+      .filter((armed) => (collection?.sessions ?? []).some((session) => session.sessionId === armed.sessionId))
+      .map((armed) => ({
+        kind: "run-started",
+        runId: armed.runId,
+        taskId: armed.taskId,
+        sessionId: armed.sessionId,
+        at: armed.at,
+        ...(armed.worktree === undefined ? {} : { worktree: armed.worktree }),
+        ...(armed.branch === undefined ? {} : { branch: armed.branch }),
+        ...(armed.base === undefined ? {} : { base: armed.base }),
+      }));
+    const all = [...open, ...orphaned];
     const repoOfRun = (run: ScheduleRunStarted): string | undefined =>
       repos.get(run.taskId) ??
       // Its task is gone (deleted while the run was in flight): the session it
@@ -775,7 +806,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         windows.set(record.runId, { scopeSession: record.scopeSession, windowId: record.windowId });
       }
     }
-    for (const run of open) {
+    for (const run of all) {
       // ONE RUN'S FAILURE MUST NOT TAKE THE TICK WITH IT: a home that went
       // read-only, a full disk, a store that refuses a write — the daemon is
       // resident, and the run is retried on the next tick against the same
@@ -830,7 +861,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         log(`运行 ${run.runId} 结算失败（下次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    const stillOpen = open.filter((run) => !settled.has(run.runId));
+    const stillOpen = all.filter((run) => !settled.has(run.runId));
     for (const task of table.file.tasks) {
       try {
         const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });

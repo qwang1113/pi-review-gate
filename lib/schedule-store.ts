@@ -246,6 +246,16 @@ export interface ScheduleRunArmed {
   taskId: string;
   sessionId: string;
   at: string;
+  /**
+   * THE RUN'S OWN CHECKOUT, here as well as on `run-started` (2026-10-03,
+   * quality round P2): a daemon that dies between the launch and the
+   * `run-started` write leaves ONLY this line, and a real session that holds a
+   * real checkout must still be settlable. `lib/daemon/scheduler.ts` is what
+   * turns such an orphaned arming back into a run.
+   */
+  worktree?: string;
+  branch?: string;
+  base?: string;
 }
 
 export interface ScheduleRunSkipped { kind: "run-skipped"; taskId: string; at: string; reason: string }
