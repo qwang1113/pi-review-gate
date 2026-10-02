@@ -429,8 +429,11 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    *
    * Nothing is stamped for these — the slot is OWED and the next tick tries
    * again — so this map exists only to keep one failed attempt from printing
-   * the same log line every 20 seconds. An entry is dropped the moment its slot
-   * is dealt with, and pruned by age like the other in-memory maps.
+   * the same log line every 20 seconds. An entry lives as long as the process
+   * does (pruned only by age, `UNRECORDED_TTL_MS`): a slot that fails, is
+   * stamped, and then fails again on the launch comes back under the SAME key,
+   * and dropping the entry in between is exactly what would make that retry log
+   * again (quality round P2, 2026-10-03).
    */
   const deferredSlots = new Map<string, number>();
 
