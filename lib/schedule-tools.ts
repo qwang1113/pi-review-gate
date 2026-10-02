@@ -236,7 +236,7 @@ function listReply(home: string, tasks: readonly ScheduledTask[], version: numbe
         ? (t.lastRun?.outcome === "open"
           ? "（已过期：本任务还有一次运行没结算，结算后 daemon 才会处理）"
           : t.missed
-            ? "（已错过：daemon 当时不在跑，按用户决定跳过不补跑 —— 下一次到点才跑；daemon 的下一次 tick 会记一条 run-skipped）"
+            ? "（已错过：到点时没有启动运行（daemon 当时不在跑，或本任务自己还有一次运行没结算），按用户决定跳过不补跑 —— 下一次到点才跑；daemon 的下一次 tick 会记一条 run-skipped）"
             : "（到点了：daemon 的下一次 tick 会处理；若同一 repo 还有别的运行没结算，这个 slot 会被跳过并记一条 run-skipped）")
         : "")}`,
     `  交付站点: ${t.station}`,
