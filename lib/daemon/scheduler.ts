@@ -525,10 +525,10 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           ...(current.ok ? { expectedVersion: current.file.version } : {}),
         });
         if (stamped.ok) {
-          // ONLY NOW is the de-noising entry dropped: a FAILED stamp must leave
-          // it in place, or the `deferred()` call that follows would log the same
-          // reason again every 20 seconds (reviewer P2, 2026-10-03).
-          deferredSlots.delete(slot);
+          // THE DE-NOISING ENTRY STAYS PUT (quality round P2, 2026-10-03): the
+          // same slot key comes back along the retry path (stamp OK → launch
+          // fails → `deferred`), and dropping it here made every one of those
+          // retries log again — `pruneUnrecorded` is what eventually clears it.
           return true;
         }
         problem = stamped.problem;
