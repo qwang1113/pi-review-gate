@@ -509,13 +509,17 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     return anchor === "" ? undefined : { repo: anchor, session: run.scopeSession, window: run.windowId };
   }
 
-  /** Stamp the slot as dealt with — fired, skipped or failed alike. */
-  function dealt(task: ScheduledTask, at: Date, slot: string): void {
-    // REMEMBER FIRST, FORGET AFTER: between these two writes the process can
-    // die, and the disk can refuse both — either way the slot is known to be
-    // dealt with. See `unrecordedSlots` for why that matters.
+  /**
+   * Stamp the slot as dealt with — fired, skipped or failed alike.
+   *
+   * `false` = the stamp could NOT be persisted, and the caller must then NOT
+   * start anything: a slot that is not consumed on disk would be run again after
+   * a restart, and the ledger's own record of that run is gone by then (or never
+   * existed). That duplicate is the whole reason this stamp exists (reviewer P1,
+   * 2026-10-03).
+   */
+  function dealt(task: ScheduledTask, at: Date, slot: string): boolean {
     deferredSlots.delete(slot);
-    unrecordedSlots.set(slot, at.getTime());
     let problem = "未知原因";
     // TWO ATTEMPTS, BECAUSE THE FIRST CAN LOSE A RACE: the version read here
     // can be replaced by a panel write microseconds before ours lands, and the
@@ -531,14 +535,35 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         });
         if (stamped.ok) {
           unrecordedSlots.delete(slot);
-          return;
+          return true;
         }
         problem = stamped.problem;
       } catch (error) {
         problem = error instanceof Error ? error.message : String(error);
       }
     }
-    log(`调度任务 ${task.id} 的 lastFiredAt 没写上（只记在内存里）：${problem}`);
+    unrecordedSlots.set(slot, at.getTime());
+    log(`调度任务 ${task.id} 的 lastFiredAt 没写上：${problem}`);
+    return false;
+  }
+
+  /**
+   * Put the slot back after a launch that never happened.
+   *
+   * The stamp is written BEFORE the launch (a run must never start for a slot
+   * that is still owed), so a launch that fails has to undo it — otherwise a
+   * TEMPORARY obstacle would silently consume the slot, which is exactly what
+   * "run it unless it genuinely cannot be run" forbids. A rollback that itself
+   * fails costs that one slot, and says so.
+   */
+  function rollbackStamp(task: ScheduledTask, at: Date, slot: string): void {
+    deferredSlots.delete(slot);
+    unrecordedSlots.delete(slot);
+    try {
+      updateScheduledTask(deps.home, task.id, { lastFiredAt: task.lastFiredAt }, { from: "gate" });
+    } catch (error) {
+      log(`调度任务 ${task.id} 的槽戳没能回滚（这一槽被消费）：${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   function skipped(task: ScheduledTask, at: Date, reason: string, slot: string): void {
@@ -573,6 +598,16 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
       return undefined;
     }
+    // THE SLOT IS CONSUMED BEFORE THE SESSION EXISTS (2026-10-03, reviewer P1):
+    // a launch that succeeds cannot be un-launched, so its slot must already be
+    // dealt with on disk — otherwise a crash right after would leave a real
+    // session holding a slot the table still calls owed. Both this write and the
+    // arming below are mandatory; either failing means NO launch.
+    if (!dealt(task, at, slot)) {
+      releaseCheckout(cut.worktree, task, runId);
+      deferred(task, at, slot, "这一槽的处理戳写不进去");
+      return undefined;
+    }
     // ARM FIRST, LAUNCH SECOND (2026-10-03, reviewer P1): the session adopts its
     // contract at `session_start`, and adoption asks the LEDGER FILE whether this
     // session IS this run — it runs in another process and can see nothing else.
@@ -601,8 +636,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       appendScheduleRun(deps.home, armed);
     } catch (error) {
       // A SESSION CANNOT INHERIT A CONTRACT IT CANNOT READ: with the ledger
-      // unwritable, nothing is launched, the checkout goes back, and the slot
-      // stays owed (a broken disk is not a permanent obstacle).
+      // unwritable, nothing is launched. Both the checkout and the slot go back
+      // — a broken disk is a TEMPORARY obstacle, not a reason to spend the slot.
+      rollbackStamp(task, at, slot);
       releaseCheckout(cut.worktree, task, runId);
       deferred(task, at, slot, `台账写不进去（${error instanceof Error ? error.message : String(error)}）`);
       return undefined;
@@ -622,10 +658,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     });
     if (!started.ok || started.sessionId === undefined) {
       const problem = started.problem ?? "launchTask 没给出 sessionId";
+      // THE SLOT GOES BACK (2026-10-03, reviewer P1): the stamp above consumed
+      // it for a run that never happened, and a temporary obstacle must leave the
+      // slot owed.
+      rollbackStamp(task, at, slot);
       // NOTHING IS WRITTEN FOR A LAUNCH THAT NEVER HAPPENED (reviewer P1): the
       // arming line is inert on its own (`openRuns` ignores it), so the ledger
       // keeps NO run this session never was — no `run-settled`, no ghost in the
-      // panel's history. The checkout goes back and the slot stays owed.
+      // panel's history. The checkout goes back too.
       releaseCheckout(cut.worktree, task, runId);
       if (started.permanent === true) {
         // A PERMANENT obstacle (no tmux to run at all): retrying every 20 s
@@ -637,9 +677,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
       return undefined;
     }
-    // A SESSION IS ALREADY RUNNING: from here on the slot counts as dealt with
-    // and this run holds its checkout, whatever the disk does next.
-    dealt(task, at, slot);
     const run: ScheduleRunStarted = {
       kind: "run-started",
       runId,
@@ -774,7 +811,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // (a launch that never happened must not look like a run). A session the
     // observer can SEE is what tells the two apart: an arming nobody is behind
     // stays inert forever and costs nothing.
-    const openIds = new Set(open.map((run) => run.runId));
     // AN ARMING THAT EVER BECAME A RUN IS NOT AN ORPHAN (2026-10-03, quality
     // round P1): a run whose `run-started` DID land has its own settlement, and
     // its session stays visible in the observer for hours after it finished —

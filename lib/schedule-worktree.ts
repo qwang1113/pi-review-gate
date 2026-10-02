@@ -256,9 +256,12 @@ function settlementStatus(path: string): string | undefined {
  * the review, so it may not be merged either: the run keeps it on its branch and
  * a human decides (2026-10-03, reviewer P1).
  */
+/** Is this repo-root-relative path inside a gate-owned directory? */
+function isGateExcludedPath(entry: string): boolean {
+  return GATE_EXCLUDE_DIRS.some((dir) => entry === dir || entry.startsWith(`${dir}/`));
+}
+
 function touchesGateExcludedDir(path: string, base: string): boolean {
-  const isExcluded = (target: string): boolean =>
-    GATE_EXCLUDE_DIRS.some((dir) => target === dir || target.startsWith(`${dir}/`));
   // COMMITTED FIRST (2026-10-03, quality round P2): a change already on the run's
   // branch is INVISIBLE to the working-tree status below, and it is exactly the
   // shape that must never be merged — it was never in front of a reviewer.
@@ -267,7 +270,7 @@ function touchesGateExcludedDir(path: string, base: string): boolean {
   const committed = (gitRawOrNull(path, ["diff", "--name-only", "-z", `${base}..HEAD`]) ?? "")
     .split("\0")
     .filter((entry) => entry !== "");
-  if (committed.some(isExcluded)) return true;
+  if (committed.some(isGateExcludedPath)) return true;
   const raw = gitRawOrNull(path, ["status", "--porcelain"]);
   if (raw === null) return false; // an unreadable answer is the caller's tri-state
   return raw
@@ -276,14 +279,14 @@ function touchesGateExcludedDir(path: string, base: string): boolean {
     .some((line) => {
       // UNTRACKED entries under those dirs are the GATE's own bookkeeping (see
       // {@link settlementStatus}): every run writes them when the target repo
-      // does not ignore `.pi/`, and reading them as "the run touched .pi" would
+      // does not ignore them, and reading them as "the run touched .pi" would
       // keep a branch for every run and never merge anything (quality round P1,
       // 2026-10-03).
       if (line.startsWith("??")) return false;
       const entry = line.slice(3).trim();
       // `R  old -> new` names both sides; the one that matters is the new one.
       const target = entry.includes(" -> ") ? entry.slice(entry.indexOf(" -> ") + 4) : entry;
-      return isExcluded(target);
+      return isGateExcludedPath(target);
     });
 }
 
@@ -303,7 +306,7 @@ function stageRunOutput(path: string): void {
   gitText(path, ["add", "-u"]);
   const untracked = (gitRawOrNull(path, ["ls-files", "-z", "--others", "--exclude-standard"]) ?? "")
     .split("\0")
-    .filter((entry) => entry !== "" && !entry.startsWith(".pi/"));
+    .filter((entry) => entry !== "" && !isGateExcludedPath(entry));
   if (untracked.length > 0) gitText(path, ["add", "--", ...untracked]);
 }
 
