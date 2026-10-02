@@ -31,9 +31,6 @@ import { scratchHome } from "./daemon-helpers.ts";
 const OK = (argv: readonly string[]): LaunchctlResult => ({ ok: true, code: 0, stdout: `ran ${argv.join(" ")}`, stderr: "" });
 const FAIL = (stderr: string) => (): LaunchctlResult => ({ ok: false, code: 1, stdout: "", stderr });
 
-/** The escaping the plist generator must apply, restated so a test can ask for it. */
-const xmlEscape = (raw: string): string => raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
 test("the plist says: run at login, restart a CRASH, and let a clean stop stay stopped", () => {
   const home = "/Users/me";
   const plist = buildLaunchdPlist({
@@ -72,15 +69,25 @@ test("the daemon gets the installing shell's PATH — launchd's own one has no t
 });
 
 test("with no explicit path, the installing process's own PATH is what gets written", () => {
-  const own = process.env.PATH ?? "";
-  assert.notEqual(own, "", "this test means nothing without a PATH of its own");
-  const plist = buildLaunchdPlist({ home: "/Users/me", reexec: [] });
-  assert.ok(plist.includes(xmlEscape(own)), `expected the process's own PATH in:\n${plist}`);
+  const previous = process.env.PATH;
+  process.env.PATH = "/opt/homebrew/bin:/usr/bin:/bin";
+  try {
+    const plist = buildLaunchdPlist({ home: "/Users/me", reexec: [] });
+    assert.match(plist, /<key>PATH<\/key>\s*<string>\/opt\/homebrew\/bin:\/usr\/bin:\/bin<\/string>/);
+  } finally {
+    if (previous === undefined) delete process.env.PATH;
+    else process.env.PATH = previous;
+  }
+});
+
+test("no PATH to copy ⇒ no PATH key — launchd's own default beats an empty one", () => {
+  const plist = buildLaunchdPlist({ home: "/Users/me", reexec: [], path: "" });
+  assert.ok(!plist.includes("<key>PATH</key>"), "an empty PATH would leave the daemon unable to spawn anything, tmux included");
 });
 
 test("a PATH with XML metacharacters is escaped too", () => {
-  const plist = buildLaunchdPlist({ home: "/Users/me", reexec: [], path: "/tmp/a&b/<weird>/bin:/usr/bin" });
-  assert.match(plist, /<string>\/tmp\/a&amp;b\/&lt;weird&gt;\/bin:\/usr\/bin<\/string>/);
+  const plist = buildLaunchdPlist({ home: "/Users/me", reexec: [], path: '/tmp/a&b/<weird>/"q"/bin:/usr/bin' });
+  assert.match(plist, /<string>\/tmp\/a&amp;b\/&lt;weird&gt;\/&quot;q&quot;\/bin:\/usr\/bin<\/string>/);
   assert.ok(!plist.includes("<weird>"), "the raw PATH must never appear as markup");
 });
 

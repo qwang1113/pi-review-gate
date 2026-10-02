@@ -51,7 +51,8 @@ pi-gate daemon uninstall  # bootout 并删除 plist
   daemon 起一个定时会话的第一步是 `execFileSync("tmux", …)`，找不到可执行文件就断在最前面，
   每次到点只记一条 `run-skipped`（理由：「读不到 tmux server（list-sessions 失败）」，实测 2026-10-02）。
   写进去的是**装它那个 shell 的 PATH**（`buildLaunchdPlist` 的 `deps.path`，缺省 `process.env.PATH`），
-  不是猜出来的 Homebrew 前缀 —— nix / macports / 自定义安装都跟着走。
+  不是猜出来的 Homebrew 前缀 —— nix / macports / 自定义安装都跟着走；真没有 PATH 可抄时就**不写这个键**，
+  让 launchd 的默认（`/usr/bin:/bin:/usr/sbin:/sbin`）站着 —— 空的 PATH 比不写更糟，daemon 会连 `tmux` 都 spawn 不了。
   **已经装过登录项的机器要重跑一次 `pi-gate daemon install` 才会拿到这条 PATH。**
 - **`RunAtLoad` + `KeepAlive.SuccessfulExit = false`**：登录起来；进程**崩溃**（非 0 退出）会被重起；
   而 `pi-gate daemon stop` 的干净退出（0）**不会**被拉回来 —— 否则这个命令就永远停不下来。

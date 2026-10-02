@@ -126,6 +126,11 @@ export function buildLaunchdPlist(deps: LaunchdDeps): string {
   const port = deps.port ?? DAEMON_DEFAULT_PORT;
   const roots = deps.workspaceRoots ?? [];
   const path = deps.path ?? process.env.PATH ?? "";
+  // AN EMPTY PATH IS WORSE THAN NO PATH KEY AT ALL: launchd's own default at
+  // least contains /bin and /usr/bin, while an empty `<string></string>` would
+  // leave the daemon unable to spawn anything — including tmux. No PATH to copy
+  // ⇒ the key is omitted and launchd's default stands.
+  const pathEntry = path === "" ? "" : `    <key>PATH</key>\n    <string>${xmlEscape(path)}</string>\n`;
   const log = daemonLogPath(home);
   const args = [...deps.reexec, "daemon", "run", "--port", String(port), ...roots.flatMap((root) => ["--workspace-root", root])];
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -142,9 +147,7 @@ ${args.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join("\n")}
   <dict>
     <key>RG_DAEMON_HOME</key>
     <string>${xmlEscape(home)}</string>
-    <key>PATH</key>
-    <string>${xmlEscape(path)}</string>
-  </dict>
+${pathEntry}  </dict>
   <key>RunAtLoad</key>
   <true/>
   <!-- restart a CRASH only: a graceful "pi-gate daemon stop" exits 0 -->
