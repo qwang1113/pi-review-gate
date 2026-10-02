@@ -506,7 +506,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * 2026-10-03).
    */
   function dealt(task: ScheduledTask, at: Date, slot: string): boolean {
-    deferredSlots.delete(slot);
     let problem = "未知原因";
     // TWO ATTEMPTS, BECAUSE THE FIRST CAN LOSE A RACE: the version read here
     // can be replaced by a panel write microseconds before ours lands, and the
@@ -521,6 +520,10 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           ...(current.ok ? { expectedVersion: current.file.version } : {}),
         });
         if (stamped.ok) {
+          // ONLY NOW is the de-noising entry dropped: a FAILED stamp must leave
+          // it in place, or the `deferred()` call that follows would log the same
+          // reason again every 20 seconds (reviewer P2, 2026-10-03).
+          deferredSlots.delete(slot);
           return true;
         }
         problem = stamped.problem;
@@ -548,10 +551,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       // rollback is still a write, and it must not clobber a panel edit that
       // landed while the launch was failing.
       const current = readSchedules(deps.home);
-      updateScheduledTask(deps.home, task.id, { lastFiredAt: task.lastFiredAt }, {
+      const back = updateScheduledTask(deps.home, task.id, { lastFiredAt: task.lastFiredAt }, {
         from: "gate",
         ...(current.ok ? { expectedVersion: current.file.version } : {}),
       });
+      // THE REFUSAL IS A VALUE, NOT A THROW: a version conflict comes back as
+      // `{ok:false}`, and a slot silently lost to one would be exactly the
+      // silent consumption this function exists to undo.
+      if (!back.ok) log(`调度任务 ${task.id} 的槽戳没能回滚（这一槽被消费）：${back.problem}`);
     } catch (error) {
       log(`调度任务 ${task.id} 的槽戳没能回滚（这一槽被消费）：${error instanceof Error ? error.message : String(error)}`);
     }
@@ -757,7 +764,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   function settleRunWorktree(
     run: ScheduleRunStarted,
     outcome: ScheduleRunOutcome,
-    station: DeliveryStation,
+    station: DeliveryStation | undefined,
     repo: string | undefined,
   ): ScheduleSettlement | undefined {
     if (run.worktree === undefined || run.branch === undefined || run.base === undefined) return undefined;
@@ -829,7 +836,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         ...(armed.branch === undefined ? {} : { branch: armed.branch }),
         ...(armed.base === undefined ? {} : { base: armed.base }),
       }));
-    const all = [...open, ...orphaned];
+    const all = [...new Map([...open, ...orphaned].map((run) => [run.runId, run])).values()];
     const repoOfRun = (run: ScheduleRunStarted): string | undefined =>
       repos.get(run.taskId) ??
       // Its task is gone (deleted while the run was in flight): the session it
@@ -847,6 +854,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
     }
     for (const run of all) {
+      // ONE RUN IS SETTLED ONCE, even if the same run id reached this list twice
+      // (an in-memory run whose `run-started` write failed is ALSO visible as an
+      // orphaned arming): a second settlement would append a contradictory
+      // `run-settled` and try to land the same checkout again (reviewer P1,
+      // 2026-10-03).
+      if (settled.has(run.runId)) continue;
       // ONE RUN'S FAILURE MUST NOT TAKE THE TICK WITH IT: a home that went
       // read-only, a full disk, a store that refuses a write — the daemon is
       // resident, and the run is retried on the next tick against the same
@@ -863,7 +876,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // `pr` station, kept as a branch otherwise. The note goes into the
         // ledger so the panel and `schedule_task({action:"list"})` can say which
         // branch holds it.
-        const settlement = settleRunWorktree(run, decision.outcome ?? "failed", stations.get(run.taskId) ?? "precommit", repo);
+        const settlement = settleRunWorktree(run, decision.outcome ?? "failed", stations.get(run.taskId), repo);
         appendScheduleRun(deps.home, {
           kind: "run-settled",
           runId: run.runId,

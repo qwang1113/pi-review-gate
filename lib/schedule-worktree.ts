@@ -376,7 +376,12 @@ function discardCheckout(repo: string, path: string, branch: string | undefined)
 export function settleScheduleWorktree(input: {
   worktree: ScheduleWorktreeOwner;
   outcome: ScheduleRunOutcome;
-  station: DeliveryStation;
+  /**
+   * The task's station — or `undefined` when the task is GONE from the table.
+   * Nobody can then say where the user wanted this landed, so nothing is merged
+   * (reviewer P2, 2026-10-03).
+   */
+  station: DeliveryStation | undefined;
 }): ScheduleSettlement {
   const { repo, path, branch, base, runId } = input.worktree;
   if (!existsSync(path)) {
@@ -425,6 +430,19 @@ export function settleScheduleWorktree(input: {
   if (!changes) {
     discardCheckout(repo, path, branch);
     return { action: "reclaimed", branch, changes: false, note: "本次运行没有产生任何改动" };
+  }
+  if (input.station === undefined) {
+    // THE TASK IS GONE (deleted while its run was in flight): the store no
+    // longer knows what station it was authored for, so "precommit" would be a
+    // guess — and a guess that merges into the user's repository. The output is
+    // kept on its branch instead.
+    discardCheckout(repo, path, undefined);
+    return {
+      action: "branch-kept",
+      branch,
+      changes: true,
+      note: `任务已不在调度表里（站点无从得知）：改动留在分支 ${branch} 上，没有合并`,
+    };
   }
   if (input.station === "pr") {
     // The run ships its own branch (it pushed and opened the PR while it ran):
