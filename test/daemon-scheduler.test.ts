@@ -567,6 +567,62 @@ test("a week offline SKIPS the missed slot — and the next real slot still fire
   );
 });
 
+test("a run that outlives its own slot is missed for the RIGHT reason (itself, not a stopped daemon)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  const added = addScheduledTask(home, scheduleTaskInput(repo, { cron: "0 * * * *" }));
+  if (!added.ok) assert.fail(added.problem);
+  const stamped = updateScheduledTask(
+    home,
+    added.value.id,
+    { lastFiredAt: new Date(2026, 8, 30, 9, 0, 5).toISOString() },
+    { from: "gate" },
+  );
+  if (!stamped.ok) assert.fail(stamped.problem);
+  appendScheduleRun(home, {
+    kind: "run-started",
+    runId: "run-cccc7777",
+    taskId: added.value.id,
+    sessionId: "sess-cccc7777",
+    at: new Date(2026, 8, 30, 9, 0, 5).toISOString(),
+  });
+  let at = new Date(2026, 8, 30, 10, 10, 30);
+  let sessions: DaemonSession[] = [sessionFor("sess-cccc7777", { repo, state: "working" })];
+  const observer: SessionObserver = {
+    collect: () => ({ now: at.toISOString(), tmuxReadable: true, sessions, problems: [] }),
+    transcriptFor: () => undefined,
+    outputFor: () => [],
+  };
+  const tmux = fakeTmux();
+  const scheduler = createScheduler({ home, runTmux: tmux, observer, now: () => at.getTime() });
+
+  // The 10:00 slot arrived while THIS TASK'S OWN run was still going: nothing
+  // starts, and that is `open-run` — not a missed slot.
+  scheduler.tick();
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-skipped").length, 0, "运行还在跑：那是 open-run");
+  assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0);
+
+  // IT SETTLES AT 11:30 — and the tick that finds it settled is where the base
+  // finally moves. The slot is missed, but the daemon was NEVER away, and the
+  // ledger has to say so.
+  at = new Date(2026, 8, 30, 11, 30);
+  sessions = [sessionFor("sess-cccc7777", { repo, state: "done", rounds: { sent: 1, recorded: 1, lastVerdict: "READY" } })];
+  scheduler.tick();
+  assert.equal(readScheduleRuns(home).filter((record) => record.kind === "run-settled").length, 1, "运行在本 tick 结算");
+  const skips = readScheduleRuns(home).filter((record) => record.kind === "run-skipped");
+  assert.equal(skips.length, 1, "结算之后，这一槽才被判错过");
+  assert.ok(
+    skips[0]!.reason.includes(new Date(2026, 8, 30, 10, 0).toISOString()),
+    `reason 点名被错过的那个槽：${skips[0]!.reason}`,
+  );
+  assert.match(
+    skips[0]!.reason,
+    /本任务自己还有一次运行没结算/,
+    "成因不能只说「daemon 不在跑」——它一直在跑",
+  );
+  assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0, "这一轮也不重新发车");
+});
+
 test("a run is not fired into a checkout another LIVE SESSION holds (quality round P1)", () => {
   const home = scratchHome();
   const repo = scratchRepo();

@@ -708,9 +708,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // once": that rule reads `lastFiredAt`, and the tick that stamps a slot
         // is the only one that ever judges it.
         if (decision.reason === "missed" && decision.missedAt !== null) {
+          // TWO WAYS A SLOT IS MISSED, AND THE LEDGER NAMES BOTH: the daemon was
+          // not running at all, or the task's OWN run was still open when the
+          // slot arrived and settled later (that settlement is what finally
+          // moves this base — `open-run` only says "nothing starts at THIS
+          // instant", not "nothing was running at that one"). A reason that
+          // named only the first would be wrong for the second.
           const reason =
-            `错过时点 ${decision.missedAt.toISOString()}：daemon 当时不在跑，` +
-            "按用户决定跳过不补跑 —— 下一个到点照常跑";
+            `错过时点 ${decision.missedAt.toISOString()}：那一槽到达时没有启动运行（daemon 当时不在跑，` +
+            "或本任务自己还有一次运行没结算），按用户决定跳过不补跑 —— 下一个到点照常跑";
           const stale = slotKey(task.id, decision.missedAt);
           // ONE LEDGER LINE PER SLOT EVEN WHEN THE STAMP CANNOT BE WRITTEN: a
           // failed stamp leaves the slot in `unrecordedSlots`, and the retry
