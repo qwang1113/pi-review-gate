@@ -150,8 +150,17 @@ interface TaskView {
   describe: string;
   enabled: boolean;
   nextRunAt: string | null;
-  /** The slot is already in the past — a missed slot the daemon still owes a decision on. */
+  /**
+   * The slot this task is counting towards has already arrived — one the daemon
+   * still owes a decision on. `missed` says what that decision will be.
+   */
   overdue: boolean;
+  /**
+   * The slot was missed while no daemon was there to run it: it will be SKIPPED
+   * (recorded as one `run-skipped`), not replayed — `nextRunAt` is already the
+   * slot after it.
+   */
+  missed: boolean;
   station: DeliveryStation;
   /** The newest run of this task, or null when it never ran. */
   lastRun: { at: string; outcome: string; verdict: string | null; runId: string } | null;
@@ -174,7 +183,13 @@ function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], n
   // diverge. `run-skipped` lines carry no run, so they are not part of the answer.
   const lastRun = runs.filter((r) => r.kind !== "run-skipped").at(-1);
   const openRun = lastRun?.kind === "run-started";
-  const slot = dueDecision({ task, now, openRun }).scheduledAt;
+  const decision = dueDecision({ task, now, openRun });
+  const slot = decision.scheduledAt;
+  // `missed` is the one case where the slot is already past — and therefore
+  // overdue — while `nextRunAt` is NOT: the missed slot is skipped, so the
+  // field that says "what is next" slides to the slot after it instead of
+  // naming a time that will never be run.
+  const missed = decision.reason === "missed";
   return {
     id: task.id,
     name: task.name,
@@ -183,7 +198,8 @@ function describeTask(task: ScheduledTask, runs: readonly ScheduleRunRecord[], n
     describe: describeCron(task.cron),
     enabled: task.enabled,
     nextRunAt: slot ? slot.toISOString() : null,
-    overdue: slot !== null && slot.getTime() <= now.getTime(),
+    overdue: missed || (slot !== null && slot.getTime() <= now.getTime()),
+    missed,
     station: task.contract.restatement.station,
     lastRun: lastRun === undefined
       ? null
@@ -219,7 +235,9 @@ function listReply(home: string, tasks: readonly ScheduledTask[], version: numbe
       : t.nextRunAt + (t.overdue
         ? (t.lastRun?.outcome === "open"
           ? "（已过期：本任务还有一次运行没结算，结算后 daemon 才会处理）"
-          : "（已过期：欠着，daemon 的下一次 tick 会处理；若同一 repo 还有别的运行没结算，这个 slot 会被跳过并记一条 run-skipped）")
+          : t.missed
+            ? "（已错过：daemon 当时不在跑，按用户决定跳过不补跑 —— 下一次到点才跑；daemon 的下一次 tick 会记一条 run-skipped）"
+            : "（到点了：daemon 的下一次 tick 会处理；若同一 repo 还有别的运行没结算，这个 slot 会被跳过并记一条 run-skipped）")
         : "")}`,
     `  交付站点: ${t.station}`,
     `  最近一次运行: ${t.lastRun === null ? "从未运行" : `${t.lastRun.at} → ${t.lastRun.outcome}${t.lastRun.verdict ? `（${t.lastRun.verdict}）` : ""}`}`,

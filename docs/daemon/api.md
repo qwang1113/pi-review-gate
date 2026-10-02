@@ -675,8 +675,8 @@ pi-gate daemon uninstall
 | `contract` | object | `{restatement:{text,hash,station,at}, goal:{text,hash,at}, approvedAt}`：**用户实际批准过的东西**，两段文本各绑自己的 hash |
 | `enabled` | boolean | 关了就不触发 |
 | `createdAt` / `updatedAt` | string | ISO |
-| `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、跳过、起不来都算）—— 下一个时间点从这里数 |
-| `nextRunAt` | string \| null | **派生**：调度器正要处理的**那一个** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**落在过去有两解**：该任务确实欠着（下一个 tick 就处理），或它还有一次未结算的运行在跑（`GET /api/schedules/:id/runs` 里最后一条 `run-started` 没有对应的 `run-settled`）—— 后一种情况下它会一直停在过去，直到那次运行结算。`enabled:false`、cron 非法、或 `createdAt` 读不出时间时是 `null` |
+| `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、跳过、起不来都算）—— 下一个时间点从这里数；被错过的时点也会被它消费掉（见下一行） |
+| `nextRunAt` | string \| null | **派生**：这个任务**下一个要处理的** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**永远不会是「很久以前」**：daemon 停机跨过的时点按用户决定**跳过、不补跑**，所以宽限窗口（`SLOT_GRACE_MS`，10 分钟）之外的过去不存在 —— 要么在未来，要么就在刚过去的 10 分钟内（「刚到点」：daemon 的下一次 tick 照常跑它）；一个已经被错过的时点，这里显示的是**它之后的下一个**（被错过的那个只出现在台账的 `run-skipped` 里，§13.7）。`enabled:false`、cron 非法、或 `createdAt` 读不出时间时是 `null` |
 | `describe` | string | **派生**：`describeCron` 的一行人话，如 `每天 09:00` |
 | `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-started` 不是结果，不列） |
 
@@ -743,12 +743,16 @@ pi-gate daemon uninstall
 
 ### 13.7 调度器的行为（不在 HTTP 面上，但同属契约）
 
-- **到点才跑**：`enabled`、下一个 cron 时刻 ≤ now、且该任务没有未结算的运行。
+- **到点才跑**：`enabled`、下一个 cron 时刻已经到点且仍在宽限窗口内、且该任务没有未结算的运行。
   **同一个时间点只处理一次** —— daemon 重启、tick 抖动都不重复跑（`lastFiredAt` 落在文件里，
   那是跨进程、跨重启的那一份）。写盘失败（只读 home、磁盘满）时本次进程还会把那个 slot / 那次运行
   记在内存里（`unrecordedSlots` / `unrecordedRuns`，按龄回收）：已经起出去的会话收不回来，
-  「同一个时间点不重复起」因此在坏盘上也成立。错过的时间点**不补跑**：离线一周的任务上线后只跑一次，
-  然后按下一个时间点走。
+  「同一个时间点不重复起」因此在坏盘上也成立。
+- **错过的时点跳过，不补跑**（用户决定）：daemon 没在跑而跨过的那些 cron 时刻（距 now 超过
+  `SLOT_GRACE_MS`，10 分钟）**一律不跑**，也不会「补跑一次」（错过就是错过）；下一次真实到点照常跑。
+  跳过是**消费掉**那一槽：调度器把 `lastFiredAt` 前移到处理时刻，并写一条 `run-skipped`
+  （`reason` 点名被错过的那个时刻）—— 所以「跳过」不会变成「从此再也不跑」。宽限窗口（10 分钟，
+  是 20 s tick 间隔的好几倍）只用来吸收正常的迟到 tick（系统睡了/被占了几分钟），不是补跑。
 - **一个 repo 同时只有一个写者**：两类占用都会让本次**不启动**，各写一条 `run-skipped`、`reason` 点名占着它的那一方：
   ① 该 repo 上还有**未结算的运行**（点名它的 `runId`）；② 该 repo 上还有**别的活会话**（点名 `sessionId` 与最后心跳）——
   判据是 `<repo>/.pi/session-presence.json` 里那条 **60 s 内**的心跳，与门禁自己拒第二个会话时用的**同一个函数**

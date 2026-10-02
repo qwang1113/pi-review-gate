@@ -21,6 +21,8 @@ import {
   repoHolder,
   runTaskText,
   settlementFor,
+  SLOT_GRACE_MS,
+  type DueDecision,
   type Scheduler,
 } from "../lib/daemon/scheduler.ts";
 import {
@@ -40,8 +42,23 @@ import { scheduleRunsPath } from "../lib/daemon/paths.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import { fakeRunner, scheduleContract, scheduleTaskInput, scratchHome, scratchRepo } from "./daemon-helpers.ts";
 
-/** The 26 hours that put a daily 09:00 task's last slot safely in the past. */
-const AN_OFFLINE_DAY_MS = 26 * 60 * 60 * 1_000;
+/**
+ * The cron the tick fixtures use: every five minutes, close enough together
+ * that {@link justDueStamp} can name the slot a task is counting towards.
+ */
+const EVERY_FIVE_MINUTES = "*/5 * * * *";
+
+/**
+ * A `lastFiredAt` that puts the task's NEXT slot INSIDE `SLOT_GRACE_MS`.
+ *
+ * Five minutes and one second back lands the next five-minute boundary between
+ * one and 301 seconds in the past — always inside the ten-minute grace window,
+ * and always with the slot after it minutes away. That is what makes a task
+ * "due right now" without waiting for a real cron minute.
+ */
+function justDueStamp(at: Date = new Date()): string {
+  return new Date(at.getTime() - (5 * 60_000 + 1_000)).toISOString();
+}
 
 function task(over: Partial<ScheduledTask> = {}): ScheduledTask {
   return {
@@ -106,16 +123,11 @@ function fakeTmux(): TmuxRunner & { calls: string[][] } {
   });
 }
 
-/** Add one task to a scratch home and push its last slot into the past. */
+/** Add one task to a scratch home whose next slot is DUE right now. */
 function dueTask(home: string, repo: string, over: Partial<NewScheduledTask> = {}): ScheduledTask {
-  const added = addScheduledTask(home, scheduleTaskInput(repo, over));
+  const added = addScheduledTask(home, scheduleTaskInput(repo, { cron: EVERY_FIVE_MINUTES, ...over }));
   if (!added.ok) assert.fail(added.problem);
-  const stamped = updateScheduledTask(
-    home,
-    added.value.id,
-    { lastFiredAt: new Date(Date.now() - AN_OFFLINE_DAY_MS).toISOString() },
-    { from: "gate" },
-  );
+  const stamped = updateScheduledTask(home, added.value.id, { lastFiredAt: justDueStamp() }, { from: "gate" });
   if (!stamped.ok) assert.fail(stamped.problem);
   return stamped.value;
 }
@@ -137,16 +149,93 @@ test("due: a never-fired task counts from createdAt, and one slot is dealt with 
   assert.equal(dueDecision({ task: fired, now: new Date(2026, 8, 30, 9, 30), openRun: false }).due, false);
   assert.equal(dueDecision({ task: fired, now: new Date(2026, 9, 1, 9, 0, 30), openRun: false }).due, true);
 
-  // A task whose daemon was away for a week is due ONCE — the slot it names is
-  // the first one it missed, not seven slots to catch up on.
+  // A task whose daemon was away for a week is NOT due: the slot it names is
+  // the first one it missed, and a missed slot is skipped (the dedicated test
+  // below owns that rule and the base it consumes).
   const stale = task({ lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() });
   const late = dueDecision({ task: stale, now: new Date(2026, 8, 30, 10, 0), openRun: false });
-  assert.equal(late.due, true);
-  assert.equal(late.scheduledAt?.getTime(), new Date(2026, 8, 21, 9, 0).getTime());
+  assert.equal(late.due, false);
+  assert.equal(late.reason, "missed");
 
   // A stamp at or past the slot it is being judged against: already dealt with.
   const stamped = task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 30).toISOString() });
   assert.equal(dueDecision({ task: stamped, now: new Date(2026, 8, 30, 9, 0, 40), openRun: false }).reason, "not-yet");
+});
+
+test("due: a slot the daemon slept through is MISSED — skipped, never named in the past", () => {
+  const now = new Date(2026, 8, 30, 10, 0);
+  const stale = task({ lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() });
+  const missed = dueDecision({ task: stale, now, openRun: false });
+  assert.equal(missed.due, false);
+  assert.equal(missed.reason, "missed");
+  assert.equal(missed.missedAt?.getTime(), new Date(2026, 8, 21, 9, 0).getTime(), "被错过的就是基准之后的第一个槽");
+  assert.equal(missed.scheduledAt?.getTime(), new Date(2026, 9, 1, 9, 0).getTime(), "scheduledAt 滑到 now 之后的下一次");
+  assert.ok(missed.scheduledAt!.getTime() > now.getTime(), "…所以它不会指着一个过去的时间，说下一次在那里");
+
+  // A slot that has NOT arrived is a different word — and no missedAt.
+  const ahead = dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 5).toISOString() }), now, openRun: false });
+  assert.equal(ahead.reason, "not-yet");
+  assert.equal(ahead.missedAt, null);
+});
+
+test("due: the grace window is what separates a late tick from a missed slot", () => {
+  const fresh = task(); // the first slot after it was authored: 2026-09-30 09:00 local
+  const slot = new Date(2026, 8, 30, 9, 0);
+  const edge = new Date(slot.getTime() + SLOT_GRACE_MS);
+  assert.equal(dueDecision({ task: fresh, now: edge, openRun: false }).reason, "due", "宽限之内仍算到点");
+  const past = new Date(edge.getTime() + 1);
+  assert.equal(dueDecision({ task: fresh, now: past, openRun: false }).reason, "missed", "宽限之外就是错过");
+});
+
+test("due: scheduledAt never names a time the daemon slept through", () => {
+  // ONE RULE FOR EVERY CALLER: the API's `nextRunAt`, the panel and
+  // `schedule_task({action:"list"})` all render this field, so a time that is
+  // long past must never come out of it — only the slot that has just arrived
+  // (inside the grace window, a tick away from being dealt with) may be behind
+  // `now` at all.
+  const at = new Date(2026, 8, 30, 10, 0);
+  const cases: Array<{ label: string; now: Date; decision: DueDecision }> = [
+    { label: "disabled", now: at, decision: dueDecision({ task: task({ enabled: false }), now: at, openRun: false }) },
+    { label: "bad-time", now: at, decision: dueDecision({ task: task({ createdAt: "not a time" }), now: at, openRun: false }) },
+    { label: "bad-cron", now: at, decision: dueDecision({ task: task({ cron: "bogus" }), now: at, openRun: false }) },
+    {
+      label: "already-dealt",
+      now: at,
+      decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 30).toISOString() }), now: at, openRun: false }),
+    },
+    {
+      label: "not-yet",
+      now: at,
+      decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 5).toISOString() }), now: at, openRun: false }),
+    },
+    {
+      label: "missed",
+      now: at,
+      decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() }), now: at, openRun: false }),
+    },
+    {
+      label: "open-run",
+      now: at,
+      decision: dueDecision({ task: task({ lastFiredAt: new Date(2026, 8, 30, 9, 0, 5).toISOString() }), now: at, openRun: true }),
+    },
+    {
+      label: "due",
+      now: new Date(2026, 8, 30, 9, 1),
+      decision: dueDecision({ task: task(), now: new Date(2026, 8, 30, 9, 1), openRun: false }),
+    },
+    {
+      label: "due (never fired)",
+      now: new Date(2026, 8, 30, 9, 0, 1),
+      decision: dueDecision({ task: task(), now: new Date(2026, 8, 30, 9, 0, 1), openRun: false }),
+    },
+  ];
+  for (const { label, now: moment, decision } of cases) {
+    if (decision.scheduledAt === null) continue;
+    assert.ok(
+      decision.scheduledAt.getTime() > moment.getTime() - SLOT_GRACE_MS,
+      `${label}: ${decision.scheduledAt.toISOString()} 落在宽限之外（now ${moment.toISOString()}）`,
+    );
+  }
 });
 
 test("due: a disabled task, an open run and an unreadable schedule all refuse", () => {
@@ -391,6 +480,57 @@ test("a tick fires a due task once, and a restart does not fire it again", () =>
   assert.match(opening, /declare_done/);
 });
 
+test("a week offline SKIPS the missed slot — and the next real slot still fires (no dead stop)", () => {
+  const home = scratchHome();
+  const repo = scratchRepo();
+  // A daily 09:00 task whose base is a week old: the slot it is counting
+  // towards arrived while no daemon was running.
+  const added = addScheduledTask(home, scheduleTaskInput(repo, { cron: "0 9 * * *" }));
+  if (!added.ok) assert.fail(added.problem);
+  const stamped = updateScheduledTask(
+    home,
+    added.value.id,
+    { lastFiredAt: new Date(2026, 8, 20, 9, 0, 5).toISOString() },
+    { from: "gate" },
+  );
+  if (!stamped.ok) assert.fail(stamped.problem);
+  // THE TICK'S OWN CLOCK, moved by hand: the daemon "comes back up" here, and
+  // the next real slot is an assignment away.
+  let at = new Date(2026, 8, 30, 10, 0);
+  const tmux = fakeTmux();
+  const scheduler = createScheduler({ home, runTmux: tmux, observer: fakeObserver([]), now: () => at.getTime() });
+
+  // THREE TICKS IN A ROW: nothing starts, and the skipped slot is recorded ONCE
+  // — the base moved forward, so ticks 2 and 3 are no longer looking at it.
+  scheduler.tick();
+  scheduler.tick();
+  scheduler.tick();
+  assert.equal(tmux.calls.filter((argv) => argv[0] === "new-session").length, 0, "停机跨过的时点不补跑");
+  const skips = readScheduleRuns(home).filter((record) => record.kind === "run-skipped");
+  assert.equal(skips.length, 1, "一槽只记一条 run-skipped");
+  assert.match(skips[0]!.reason, /跳过不补跑/);
+  assert.ok(
+    skips[0]!.reason.includes(new Date(2026, 8, 21, 9, 0).toISOString()),
+    `reason 点名被错过的那个时刻：${skips[0]!.reason}`,
+  );
+  const table = readSchedules(home);
+  assert.ok(table.ok, table.ok ? "" : table.problem);
+  assert.equal(
+    table.ok && table.file.tasks[0]!.lastFiredAt,
+    at.toISOString(),
+    "被错过的槽被消费掉：基准前移，任务不会永远停在旧槽上",
+  );
+
+  // AND THE NEXT REAL SLOT STILL FIRES: ten hours later its own 09:00 arrives.
+  at = new Date(2026, 9, 1, 9, 0, 30);
+  scheduler.tick();
+  assert.equal(
+    readScheduleRuns(home).filter((record) => record.kind === "run-started").length,
+    1,
+    "跳过一个时点不等于停死：下一次到点照常跑",
+  );
+});
+
 test("a run is not fired into a checkout another LIVE SESSION holds (quality round P1)", () => {
   const home = scratchHome();
   const repo = scratchRepo();
@@ -420,12 +560,7 @@ test("a run is not fired into a checkout another LIVE SESSION holds (quality rou
   // A LAPSED heartbeat is nobody (the exclusivity rule's own fail-open
   // direction): with the slot put back in the past, the run goes out.
   writePresence(new Date(Date.now() - 5 * 60_000).toISOString());
-  const rewound = updateScheduledTask(
-    home,
-    task.id,
-    { lastFiredAt: new Date(Date.now() - AN_OFFLINE_DAY_MS).toISOString() },
-    { from: "gate" },
-  );
+  const rewound = updateScheduledTask(home, task.id, { lastFiredAt: justDueStamp() }, { from: "gate" });
   assert.equal(rewound.ok, true);
   scheduler.tick();
   records = readScheduleRuns(home);
@@ -592,7 +727,7 @@ test("a settled run whose pane lost its @rg_sid is still closed by its launch re
     anchorRepo: repo,
   }));
   assert.ok(scopeName !== undefined);
-  const added = addScheduledTask(home, scheduleTaskInput(repo, { name: "sidelined" }));
+  const added = addScheduledTask(home, scheduleTaskInput(repo, { name: "sidelined", cron: EVERY_FIVE_MINUTES }));
   if (!added.ok) assert.fail(added.problem);
   // THE LAUNCH RECEIPT IS ON THE LEDGER LINE (t7): once the pane has lost
   // `@rg_sid`, the window id cannot be read back from anywhere else.
@@ -643,12 +778,7 @@ test("a settled run whose pane lost its @rg_sid is still closed by its launch re
   // tmux killed nothing, so the checkout heartbeat is still fresh: the next due
   // slot finds the occupant through it and closes the window from the receipt,
   // instead of only skipping this repo forever.
-  const stamped = updateScheduledTask(
-    home,
-    added.value.id,
-    { lastFiredAt: new Date(Date.now() - AN_OFFLINE_DAY_MS).toISOString() },
-    { from: "gate" },
-  );
+  const stamped = updateScheduledTask(home, added.value.id, { lastFiredAt: justDueStamp() }, { from: "gate" });
   if (!stamped.ok) assert.fail(stamped.problem);
   scheduler().tick();
   assert.ok(logs.some((message) => message.includes("已补关")), logs.join("\n"));

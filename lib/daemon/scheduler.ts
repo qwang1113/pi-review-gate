@@ -18,10 +18,17 @@
  * task's first slot would always be one period away, so a task that never ran
  * would never run. The schedule counts from `lastFiredAt ?? createdAt`, so the
  * first slot is the first cron minute after the task was AUTHORED (authored
- * 08:59 for `0 9 * * *` ⇒ fires at 09:00), and a task whose daemon was away
- * for a week fires ONCE on the next tick rather than seven times — a missed
- * slot is not replayed, the schedule simply moves on: the slot due is
- * `lastFiredAt`'s next one, and dealing with it stamps `lastFiredAt = now`.
+ * 08:59 for `0 9 * * *` ⇒ fires at 09:00).
+ *
+ * A SLOT THE DAEMON SLEPT THROUGH IS SKIPPED, NOT REPLAYED (user decision):
+ * the slot due is `lastFiredAt`'s next one, and it is judged against `now`.
+ * Still ahead ⇒ `not-yet`; just passed, inside {@link SLOT_GRACE_MS} ⇒ `due`
+ * (that window is what absorbs a late tick); further behind than that ⇒
+ * `missed` — nothing starts, and `scheduledAt` becomes the NEXT slot instead of
+ * the one that was lost, so no surface ever names a slot the daemon slept
+ * through. The missed slot is consumed by the tick that judged it (it stamps
+ * the base forward and records a `run-skipped`), which is what keeps "skip this
+ * one" from turning into "never run again".
  *
  * ONE SOURCE FOR "WHAT IS NEXT": the API's `nextRunAt` (daemon/server.ts) and
  * `schedule_task({action:"list"})` both read `dueDecision`'s `scheduledAt`, so
@@ -104,6 +111,24 @@ import type { TmuxRunner } from "../orchestrator-tmux.ts";
 export const SCHEDULE_TICK_MS = 20_000;
 
 /**
+ * How late a slot may be and still be RUN rather than skipped.
+ *
+ * The daemon ticks every 20 s, so "the tick landed a few seconds into the cron
+ * minute" is the NORMAL case, not a delay — zero tolerance would mean a task
+ * only ever fires when a tick happens to land exactly on its minute. This
+ * window also absorbs the tick that arrived late for an ordinary reason: a
+ * laptop lid closed for a few minutes, a tick held up by a full precommit.
+ *
+ * WHY IT IS NOT LARGER: past this window the slot is MISSED, and the user's
+ * decision is that a missed slot is SKIPPED rather than replayed (a machine
+ * that was off for a week must not fire the tasks it slept through). A window
+ * of hours would quietly restore the catch-up run this rule removes. Ten
+ * minutes is several tick intervals and still well below any cron period a
+ * schedule is likely to use.
+ */
+export const SLOT_GRACE_MS = 10 * 60 * 1_000;
+
+/**
  * How long a slot / a run that could NOT be written to disk is remembered in
  * memory (see `unrecordedSlots`). One day is far longer than any real repair
  * takes, and short enough that a permanently broken home cannot grow the set
@@ -130,12 +155,20 @@ export const LAST_RUNS_SHOWN = 5;
 // The due decision
 // ---------------------------------------------------------------------------
 
-export type DueReason = "due" | "disabled" | "not-yet" | "already-dealt" | "open-run" | "bad-time" | "bad-cron";
+export type DueReason = "due" | "disabled" | "not-yet" | "already-dealt" | "open-run" | "bad-time" | "bad-cron" | "missed";
 
 export interface DueDecision {
   due: boolean;
-  /** The slot this decision is about; `null` when the schedule cannot name one. */
+  /**
+   * The slot this decision is about; `null` when the schedule cannot name one.
+   * NEVER A TIME THE DAEMON SLEPT THROUGH: for `missed` it is the NEXT slot,
+   * not the one that was lost (that one rides in {@link missedAt}). A `due`
+   * slot is one that just arrived, and the slot an `open-run` task is holding is
+   * the one its running session was started for — neither is a stale promise.
+   */
   scheduledAt: Date | null;
+  /** Set only for `missed`: the slot the daemon slept through, which the tick consumes. */
+  missedAt: Date | null;
   reason: DueReason;
 }
 
@@ -145,26 +178,46 @@ export interface DueDecision {
  * `openRun` is the caller's answer to "does this task have a run that has not
  * settled" — a second run of the SAME task would mean two sessions racing on
  * one goal.
+ *
+ * THE FOUR WORDS A SLOT CAN HAVE (see the module docblock for why): `not-yet`
+ * (still ahead), `due` (just arrived, or arrived within {@link SLOT_GRACE_MS}),
+ * `missed` (the daemon was not there when it arrived — skipped, and
+ * `scheduledAt` slides to the next one), and `open-run` (the task's own run has
+ * not settled; it is not this slot's turn yet). A task still running keeps
+ * `open-run` even for a slot that is long past — consuming that slot belongs to
+ * the tick that finds the run settled, which is the next time the base is
+ * allowed to move.
  */
 export function dueDecision(input: { task: ScheduledTask; now: Date; openRun: boolean }): DueDecision {
   const task = input.task;
-  if (task?.enabled !== true) return { due: false, scheduledAt: null, reason: "disabled" };
+  if (task?.enabled !== true) return { due: false, scheduledAt: null, missedAt: null, reason: "disabled" };
   const base = task.lastFiredAt ?? task.createdAt;
   if (!Number.isFinite(Date.parse(base))) {
-    return { due: false, scheduledAt: null, reason: "bad-time" };
+    return { due: false, scheduledAt: null, missedAt: null, reason: "bad-time" };
   }
   const scheduledAt = nextRunAfter(task.cron, new Date(base));
-  if (scheduledAt === null) return { due: false, scheduledAt: null, reason: "bad-cron" };
+  if (scheduledAt === null) return { due: false, scheduledAt: null, missedAt: null, reason: "bad-cron" };
   const dealtAt = task.lastFiredAt === null ? undefined : Date.parse(task.lastFiredAt);
   // REDUNDANT ON PURPOSE: `nextRunAfter` is strictly later than its base, so
   // the slot is always past `lastFiredAt` — except when a hand-edited file
   // carries a stamp inside the slot being judged. One slot, dealt with once.
   if (dealtAt !== undefined && dealtAt >= scheduledAt.getTime()) {
-    return { due: false, scheduledAt, reason: "already-dealt" };
+    return { due: false, scheduledAt, missedAt: null, reason: "already-dealt" };
   }
-  if (scheduledAt.getTime() > input.now.getTime()) return { due: false, scheduledAt, reason: "not-yet" };
-  if (input.openRun) return { due: false, scheduledAt, reason: "open-run" };
-  return { due: true, scheduledAt, reason: "due" };
+  const nowMs = input.now.getTime();
+  if (scheduledAt.getTime() > nowMs) return { due: false, scheduledAt, missedAt: null, reason: "not-yet" };
+  if (input.openRun) return { due: false, scheduledAt, missedAt: null, reason: "open-run" };
+  if (nowMs - scheduledAt.getTime() > SLOT_GRACE_MS) {
+    // MISSED: the daemon was not there when this slot arrived, and the user's
+    // decision is that it is skipped rather than replayed. `scheduledAt` must
+    // not keep naming a time in the past — every surface (the API's
+    // `nextRunAt`, the panel, `schedule_task({action:"list"})`) renders this
+    // field, and "一次性欠着" is exactly the reading this rule removes. The
+    // slot the daemon slept through rides along as `missedAt`, because the
+    // tick's `run-skipped` line names WHAT was skipped.
+    return { due: false, scheduledAt: nextRunAfter(task.cron, input.now), missedAt: scheduledAt, reason: "missed" };
+  }
+  return { due: true, scheduledAt, missedAt: null, reason: "due" };
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +682,33 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     for (const task of table.file.tasks) {
       try {
         const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
+        // A SLOT THE DAEMON SLEPT THROUGH IS CONSUMED, NOT ABANDONED: judging it
+        // `missed` and moving on would leave `lastFiredAt` on the OLD base, so
+        // every 20-second tick would judge the same stale slot missed again —
+        // and the task would never run again. Consuming it is two writes: the
+        // base moves forward (the same `dealt` stamp a fired slot gets) and the
+        // ledger keeps WHY nothing ran.
+        //
+        // THE STAMP IS `now`, NOT THE SLOT THAT WAS LOST: the next slot is
+        // counted from the stamp, so `now` is what lines the schedule up with
+        // real time in ONE step. Stamping the lost slot instead would leave the
+        // base a period behind and the NEXT slot due at once — a skip per tick
+        // until it caught up. Neither choice breaks "one slot is dealt with
+        // once": that rule reads `lastFiredAt`, and the tick that stamps a slot
+        // is the only one that ever judges it.
+        if (decision.reason === "missed" && decision.missedAt !== null) {
+          const reason =
+            `错过时点 ${decision.missedAt.toISOString()}：daemon 当时不在跑（或本任务当时还有未结算的运行），` +
+            "按用户决定跳过不补跑 —— 下一个到点照常跑";
+          const stale = slotKey(task.id, decision.missedAt);
+          // ONE LEDGER LINE PER SLOT EVEN WHEN THE STAMP CANNOT BE WRITTEN: a
+          // failed stamp leaves the slot in `unrecordedSlots`, and the retry
+          // below keeps re-attempting the stamp (without it the task stays
+          // pinned to the old base) while the skip is not written twice.
+          if (unrecordedSlots.has(stale)) dealt(task, at, stale);
+          else skipped(task, at, reason, stale);
+          continue;
+        }
         if (!decision.due) continue;
         const slot = slotKey(task.id, decision.scheduledAt);
         // THE SAME SLOT IS NOT STARTED TWICE, even when nothing can be

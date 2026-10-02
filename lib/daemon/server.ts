@@ -311,10 +311,13 @@ export function createRuntime(opts: RuntimeOptions): Runtime {
         const tasks = read.file.tasks.map((task) => ({
           ...task,
           // THE SAME JUDGEMENT THE SCHEDULER MAKES, so the panel and the tick
-          // cannot disagree about what is coming: it is the slot this task is
+          // cannot disagree about what is coming: the slot this task is
           // COUNTING TOWARDS (`lastFiredAt`'s next one, or the first one after
-          // it was authored), which lands in the past — delayed, about to run —
-          // rather than one whole period ahead when a run was missed.
+          // it was authored), counted from the task's own base — never a time
+          // in the past. A slot the daemon slept through is SKIPPED rather than
+          // replayed, so once it is missed this field slides to the slot after
+          // it (lib/daemon/scheduler.ts's `SLOT_GRACE_MS` decides where
+          // "arrived" ends and "missed" begins).
           nextRunAt: dueDecision({ task, now: at, openRun: false }).scheduledAt?.toISOString() ?? null,
           describe: describeCron(task.cron),
           // `run-started` is not a RESULT: the panel shows what happened, not

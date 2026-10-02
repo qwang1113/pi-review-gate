@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { createRuntime, type Runtime } from "../lib/daemon/server.ts";
 import { ensureDaemonToken } from "../lib/daemon/state.ts";
 import { schedulesPath } from "../lib/daemon/paths.ts";
-import { addScheduledTask, appendScheduleRun, readSchedules, type ScheduledTask } from "../lib/schedule-store.ts";
+import { addScheduledTask, appendScheduleRun, readSchedules, updateScheduledTask, type ScheduledTask } from "../lib/schedule-store.ts";
 import type { TmuxRunner } from "../lib/orchestrator-tmux.ts";
 import { fakeRunner, scheduleTaskInput, scratchHome, scratchRepo } from "./daemon-helpers.ts";
 
@@ -134,6 +134,31 @@ test("GET /api/schedules lists an empty table, then the tasks with their derived
     const liveRow = withLive.find((row) => row.id === live.id)!;
     assert.equal(typeof liveRow.nextRunAt, "string");
     assert.ok(Date.parse(liveRow.nextRunAt as string) > Date.now(), "a never-fired enabled task is scheduled ahead");
+  } finally {
+    await h.runtime.stop();
+  }
+});
+
+test("GET /api/schedules never names a slot in the past for a daemon that was away", async () => {
+  const h = await harness();
+  try {
+    const task = addTask(h.home, h.repo, { name: "slept-through", enabled: true });
+    // THE DAEMON WAS AWAY FOR A WEEK: the slot this task was counting towards
+    // arrived while nothing was running. That slot is SKIPPED rather than
+    // replayed, so the row must not keep pointing at it — `nextRunAt` is either
+    // a future slot or nothing at all, never a time that will not be run.
+    const restored = updateScheduledTask(
+      h.home,
+      task.id,
+      { lastFiredAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1_000).toISOString() },
+      { from: "gate" },
+    );
+    if (!restored.ok) assert.fail(restored.problem);
+    const row = (await taskList(h)).find((candidate) => candidate.id === task.id)!;
+    assert.ok(
+      row.nextRunAt === null || Date.parse(String(row.nextRunAt)) >= Date.now(),
+      `nextRunAt 要么未来要么 null，得到 ${String(row.nextRunAt)}`,
+    );
   } finally {
     await h.runtime.stop();
   }
