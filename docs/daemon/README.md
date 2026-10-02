@@ -42,9 +42,17 @@ pi-gate daemon uninstall  # bootout 并删除 plist
 ### launchd 那一份的准确行为
 
 - `install` 写 `~/Library/LaunchAgents/com.pi.review-gate.daemon.plist`，内容是事实拼出来的：
-  绝对路径的 node + `scripts/pi-gate.mjs` + `daemon run --port …`，并把 `RG_DAEMON_HOME` 一起写进去。
+  绝对路径的 node + `scripts/pi-gate.mjs` + `daemon run --port …`，并把 `RG_DAEMON_HOME` 与
+  **装它那个 shell 的 `PATH`** 一起写进去。
   plist 的位置**永远是真实的 `~/Library/LaunchAgents`**（launchd 只看那里）——
   `RG_DAEMON_HOME` 改的是 daemon 自己读哪个 home，不会把登录项搬到别处。
+- **`PATH` 必须跟着走，否则定时任务一次也起不来**：launchd 给 job 的 PATH 是
+  `/usr/bin:/bin:/usr/sbin:/sbin`，里面**没有** Homebrew 的 tmux（`/opt/homebrew/bin/tmux`）。
+  daemon 起一个定时会话的第一步是 `execFileSync("tmux", …)`，找不到可执行文件就断在最前面，
+  每次到点只记一条 `run-skipped`（理由：「读不到 tmux server（list-sessions 失败）」，实测 2026-10-02）。
+  写进去的是**装它那个 shell 的 PATH**（`buildLaunchdPlist` 的 `deps.path`，缺省 `process.env.PATH`），
+  不是猜出来的 Homebrew 前缀 —— nix / macports / 自定义安装都跟着走。
+  **已经装过登录项的机器要重跑一次 `pi-gate daemon install` 才会拿到这条 PATH。**
 - **`RunAtLoad` + `KeepAlive.SuccessfulExit = false`**：登录起来；进程**崩溃**（非 0 退出）会被重起；
   而 `pi-gate daemon stop` 的干净退出（0）**不会**被拉回来 —— 否则这个命令就永远停不下来。
   实测（2026-10-01）：`launchctl kickstart -k` 后 4 秒内就起来了；`kill -9` 之后约 30 秒自动重起

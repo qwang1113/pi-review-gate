@@ -31,6 +31,9 @@ import { scratchHome } from "./daemon-helpers.ts";
 const OK = (argv: readonly string[]): LaunchctlResult => ({ ok: true, code: 0, stdout: `ran ${argv.join(" ")}`, stderr: "" });
 const FAIL = (stderr: string) => (): LaunchctlResult => ({ ok: false, code: 1, stdout: "", stderr });
 
+/** The escaping the plist generator must apply, restated so a test can ask for it. */
+const xmlEscape = (raw: string): string => raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 test("the plist says: run at login, restart a CRASH, and let a clean stop stay stopped", () => {
   const home = "/Users/me";
   const plist = buildLaunchdPlist({
@@ -53,6 +56,32 @@ test("a path with XML metacharacters is escaped, not pasted in", () => {
   assert.match(plist, /\/Users\/a&amp;b\/&lt;weird&gt;/);
   assert.match(plist, /\/tmp\/a&amp;b\/cli\.ts/);
   assert.ok(!plist.includes("<weird>"), "the raw path must never appear as markup");
+});
+
+test("the daemon gets the installing shell's PATH — launchd's own one has no tmux in it", () => {
+  const plist = buildLaunchdPlist({
+    home: "/Users/me",
+    reexec: ["/usr/bin/node", "/tmp/cli.ts"],
+    path: "/opt/homebrew/bin:/usr/bin:/bin",
+  });
+  assert.match(
+    plist,
+    /<key>PATH<\/key>\s*<string>\/opt\/homebrew\/bin:\/usr\/bin:\/bin<\/string>/,
+    "without this the daemon spawns no `tmux` at all and every scheduled run is skipped",
+  );
+});
+
+test("with no explicit path, the installing process's own PATH is what gets written", () => {
+  const own = process.env.PATH ?? "";
+  assert.notEqual(own, "", "this test means nothing without a PATH of its own");
+  const plist = buildLaunchdPlist({ home: "/Users/me", reexec: [] });
+  assert.ok(plist.includes(xmlEscape(own)), `expected the process's own PATH in:\n${plist}`);
+});
+
+test("a PATH with XML metacharacters is escaped too", () => {
+  const plist = buildLaunchdPlist({ home: "/Users/me", reexec: [], path: "/tmp/a&b/<weird>/bin:/usr/bin" });
+  assert.match(plist, /<string>\/tmp\/a&amp;b\/&lt;weird&gt;\/bin:\/usr\/bin<\/string>/);
+  assert.ok(!plist.includes("<weird>"), "the raw PATH must never appear as markup");
 });
 
 test("install writes the agent file and bootstraps it in the user's own domain", () => {

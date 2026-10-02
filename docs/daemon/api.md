@@ -758,6 +758,9 @@ pi-gate daemon uninstall
   （`lib/session-exclusivity.ts`；哪怕那个会话已经 `declare_done`，只要进程还在就算）。② 是必需的：门禁不会为运行会话启动，
   契约继承不了，发出去的会是一辆开不动的车（quality round P1，2026-10-02）。daemon 自己开的运行窗口在结算时就关掉，所以
   daemon 留下的旧窗口不会变成长期占用者。
+- **起会话失败也是 `run-skipped`**：`launchTask` 被拒（repo 不存在、会话名被占…）或 tmux 根本摸不到
+  （`list-sessions` 失败 —— 最典型的是 launchd 起的 daemon 的 `PATH` 里没有 tmux，见 `docs/daemon/README.md` §1）时，
+  这一槽同样被消费掉并写明 `reason`，下一个整点照常再试。
 - **运行就是普通 loop 会话**：`RG_GATE_MODE=loop`、`RG_STATION_CAP=<契约里的 station>`、
   `RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`（本次运行的标识）；门禁在 `session_start` 按这两个变量
   把契约**从 `schedules.json` 读回来**（两个 hash 与文本相符 + 任务 repo 就是本会话 repo +
