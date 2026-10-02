@@ -389,7 +389,12 @@ export interface SchedulerDeps {
    */
   worktrees?: {
     cut: (input: { repo: string; runId: string }) => CutScheduleWorktree;
-    settle: (input: { worktree: ScheduleWorktreeOwner; outcome: ScheduleRunOutcome; station: DeliveryStation }) => ScheduleSettlement;
+    settle: (input: {
+      worktree: ScheduleWorktreeOwner;
+      outcome: ScheduleRunOutcome;
+      /** `undefined` when the task is gone: the settlement then keeps the output. */
+      station: DeliveryStation | undefined;
+    }) => ScheduleSettlement;
   };
 }
 
@@ -545,7 +550,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * fails costs that one slot, and says so.
    */
   function rollbackStamp(task: ScheduledTask, slot: string): void {
-    deferredSlots.delete(slot);
     try {
       // WITH THE VERSION IT JUST READ, like every other write in this file: a
       // rollback is still a write, and it must not clobber a panel edit that
