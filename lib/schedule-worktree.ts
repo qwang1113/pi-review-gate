@@ -242,8 +242,13 @@ function settlementStatus(path: string): string | undefined {
   return raw
     .split("\n")
     .filter((line) => line.trim() !== "")
-    .filter((line) => !(line.startsWith("??") && line.slice(3).trimStart().startsWith(".pi/")))
+    .filter((line) => !(line.startsWith("??") && isGateExcludedPath(line.slice(3).trimStart())))
     .join("\n");
+}
+
+/** Is this repo-root-relative path inside a gate-owned directory? */
+function isGateExcludedPath(entry: string): boolean {
+  return GATE_EXCLUDE_DIRS.some((dir) => entry === dir || entry.startsWith(`${dir}/`));
 }
 
 /**
@@ -256,11 +261,6 @@ function settlementStatus(path: string): string | undefined {
  * the review, so it may not be merged either: the run keeps it on its branch and
  * a human decides (2026-10-03, reviewer P1).
  */
-/** Is this repo-root-relative path inside a gate-owned directory? */
-function isGateExcludedPath(entry: string): boolean {
-  return GATE_EXCLUDE_DIRS.some((dir) => entry === dir || entry.startsWith(`${dir}/`));
-}
-
 function touchesGateExcludedDir(path: string, base: string): boolean {
   // COMMITTED FIRST (2026-10-03, quality round P2): a change already on the run's
   // branch is INVISIBLE to the working-tree status below, and it is exactly the

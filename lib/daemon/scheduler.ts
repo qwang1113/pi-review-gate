@@ -51,11 +51,9 @@
  * THE STAMP COMES FIRST, AND A WRITE THAT FAILS IS REMEMBERED IN MEMORY. A
  * session that has been launched cannot be un-launched, so its slot counts as
  * dealt with the moment the launch returns: stamp, then append. When the stamp
- * cannot be written at all (read-only home, full disk) the slot is kept in
- * `unrecordedSlots` and the run in `unrecordedRuns` — this process only — so
- * the same slot is never started twice while the disk is broken, and the run
- * still holds its checkout and still settles. Both maps are pruned by age, which
- * is what lets a permanently broken home recover rather than grow forever.
+ * cannot be written at all (read-only home, full disk) the run is kept in
+ * `unrecordedRuns` — this process only — so the run still holds its checkout
+ * and still settles. That map is pruned by age, which is what lets a permanently broken home recover rather than grow forever.
  * The window this leaves is the one between the stamp landing and the append:
  * a process killed there leaves a RUNNING session with no `run-started` line,
  * so a restart neither settles it nor finds it in the ledger. THAT SESSION
@@ -123,7 +121,7 @@ export const SCHEDULE_TICK_MS = 20_000;
 
 /**
  * How long a slot / a run that could NOT be written to disk is remembered in
- * memory (see `unrecordedSlots`). One day is far longer than any real repair
+ * memory (see `deferredSlots`). One day is far longer than any real repair
  * takes, and short enough that a permanently broken home cannot grow the set
  * without bound.
  */
@@ -411,21 +409,13 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   let stopTimer: (() => void) | undefined;
   let running = false;
   /**
-   * The slots this process DEALT WITH but could not record on disk.
-   *
-   * `lastFiredAt` is what normally stops the same cron minute from firing
-   * twice, and it lives in a file — but a home can be read-only or full, and
-   * "the write failed" must not turn into "start another session every 20
-   * seconds, forever": the session cannot be un-started, so the slot it was
-   * started for is remembered HERE and the tick skips it (quality round P1,
-   * 2026-10-02). Entries are dropped once the stamp does land, and pruned by
-   * age so a permanently broken home cannot grow the map without bound.
-   */
-  const unrecordedSlots = new Map<string, number>();
-  /**
-   * Runs that are really running but never reached the ledger, for the same
-   * reason. They hold their repo and they settle exactly like a recorded run —
-   * `tick` folds them into its open list.
+   * Runs that are really running but never reached the ledger, because the disk
+   * refused the write. They hold their checkout and they settle exactly like a
+   * recorded run — `tick` folds them into its open list. (A SLOT whose stamp
+   * could not be written has no such memory any more: `dealt` failing means no
+   * session is started at all, so the slot is simply still owed and the next
+   * tick retries it — the stale "already started one" guard this map used to
+   * back was removed with that change, 2026-10-03.)
    */
   const unrecordedRuns = new Map<string, ScheduleRunStarted>();
   /**
@@ -435,15 +425,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * Nothing is stamped for these — the slot is OWED and the next tick tries
    * again — so this map exists only to keep one failed attempt from printing
    * the same log line every 20 seconds. An entry is dropped the moment its slot
-   * is dealt with, and pruned by age like `unrecordedSlots`.
+   * is dealt with, and pruned by age like the other in-memory maps.
    */
   const deferredSlots = new Map<string, number>();
 
   /** Drop what is too old to matter: a resident process must not grow forever. */
   function pruneUnrecorded(nowMs: number): void {
-    for (const [slot, atMs] of unrecordedSlots) {
-      if (nowMs - atMs > UNRECORDED_TTL_MS) unrecordedSlots.delete(slot);
-    }
     for (const [slot, atMs] of deferredSlots) {
       if (nowMs - atMs > UNRECORDED_TTL_MS) deferredSlots.delete(slot);
     }
@@ -534,7 +521,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           ...(current.ok ? { expectedVersion: current.file.version } : {}),
         });
         if (stamped.ok) {
-          unrecordedSlots.delete(slot);
           return true;
         }
         problem = stamped.problem;
@@ -542,7 +528,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         problem = error instanceof Error ? error.message : String(error);
       }
     }
-    unrecordedSlots.set(slot, at.getTime());
     log(`调度任务 ${task.id} 的 lastFiredAt 没写上：${problem}`);
     return false;
   }
@@ -558,7 +543,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    */
   function rollbackStamp(task: ScheduledTask, at: Date, slot: string): void {
     deferredSlots.delete(slot);
-    unrecordedSlots.delete(slot);
     try {
       updateScheduledTask(deps.home, task.id, { lastFiredAt: task.lastFiredAt }, { from: "gate" });
     } catch (error) {
@@ -922,16 +906,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         const contractProblem = scheduleContractProblem(task.contract);
         if (contractProblem !== undefined) {
           // PERMANENT: no retry repairs a corrupted contract. The slot is
-          // consumed and the ledger names it.
-          if (unrecordedSlots.has(slot)) dealt(task, at, slot);
-          else skipped(task, at, `任务契约不成立（${contractProblem}）`, slot);
-          continue;
-        }
-        // THE SAME SLOT IS NOT STARTED TWICE, even when nothing can be
-        // written: a session that was started but not recorded would otherwise
-        // be started again on every tick, forever.
-        if (unrecordedSlots.has(slot)) {
-          log(`调度任务 ${task.name} 的这个时间点已经起过会话、只是没能落盘（写不进去），本次不重复启动`);
+          // consumed and the ledger names it — a stamp that cannot be written is
+          // retried by the next tick, which just repeats this decision.
+          skipped(task, at, `任务契约不成立（${contractProblem}）`, slot);
           continue;
         }
         // NOTHING ASKS "IS SOMEBODY ELSE IN THE REPO" ANY MORE (2026-10-03): the
