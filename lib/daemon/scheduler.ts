@@ -439,13 +439,21 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   const deferredSlots = new Map<string, number>();
   /**
    * The tasks whose schedule can NEVER produce a slot, already said in the ledger
-   * (2026-10-03, reviewer P1): `enabled:false`, a cron that resolves to no
-   * instant at all (`0 0 30 2 *`), an unreadable base. There is no slot to consume
-   * for these — `dueDecision` cannot name a next cron time — so a `run-skipped`
-   * line is the only place a user can see WHY the task never runs, recorded once
-   * per task per process (the condition cannot change by itself).
+   * (2026-10-03, reviewer P1): a cron that resolves to no instant at all
+   * (`0 0 30 2 *`), an unreadable base. There is no slot to consume for these —
+   * `dueDecision` cannot name a next cron time — so a `run-skipped` line is the
+   * only place a user can see WHY the task never runs, recorded once per task per
+   * process (the condition cannot change by itself).
    */
-  const notedPermanent = new Set<string>();
+  const notedBroken = new Set<string>();
+  /**
+   * The disabled tasks already mentioned in the LOG (never in the ledger: a
+   * disabled task has no slot to skip, and `enabled:false` is its own
+   * explanation — 2026-10-03, reviewer P2). A SEPARATE set from the one above,
+   * because a task can be disabled first and then have a broken cron: sharing one
+   * set meant that second, ledger-worthy condition was silenced forever.
+   */
+  const notedDisabled = new Set<string>();
 
   /** Drop what is too old to matter: a resident process must not grow forever. */
   function pruneUnrecorded(nowMs: number): void {
@@ -1102,14 +1110,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           // nothing for the panel's `lastRuns` to explain — `enabled:false` IS
           // the explanation, and it is visible on the task row itself
           // (2026-10-03, reviewer P2). Said once per process, in the log.
-          if (!notedPermanent.has(task.id)) {
-            notedPermanent.add(task.id);
+          if (!notedDisabled.has(task.id)) {
+            notedDisabled.add(task.id);
             log(`调度任务 ${task.name} 已停用，不参与调度`);
           }
           continue;
         }
         if (decision.reason === "bad-cron" || decision.reason === "bad-time") {
-          if (!notedPermanent.has(task.id)) {
+          if (!notedBroken.has(task.id)) {
             const why = decision.reason === "bad-cron"
               ? `cron 无解（${task.cron}）`
               : "createdAt / lastFiredAt 读不出时间";
@@ -1118,7 +1126,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
               // ONLY NOW IS IT REMEMBERED: a line that could not be written must
               // be retried on the next tick, or the permanent condition would
               // never reach the ledger at all (reviewer P1, 2026-10-03).
-              notedPermanent.add(task.id);
+              notedBroken.add(task.id);
             } catch (error) {
               log(`调度任务 ${task.id} 的永久障碍记录没写进台账（下次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
             }

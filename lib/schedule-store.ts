@@ -438,6 +438,17 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
  */
 const LOCK_ABANDONED_MS = 10 * 60_000;
 
+/**
+ * How long a lock that is EMPTY (its holder died between `O_EXCL` and the token
+ * write, or the write itself failed) may block everybody else.
+ *
+ * Short on purpose: an empty lock is not "a live holder", and the long
+ * {@link LOCK_ABANDONED_MS} — which exists for pid REUSE — would mean every
+ * write in the meantime blocks for ten minutes (2026-10-03, reviewer P1).
+ * Creating one takes microseconds, so five seconds of emptiness is a crash.
+ */
+const LOCK_EMPTY_STALE_MS = 5_000;
+
 function withTableLock<T>(home: string, fn: () => T): T {
   const lock = `${schedulesPath(home)}.lock`;
   for (;;) {
@@ -468,14 +479,18 @@ function withTableLock<T>(home: string, fn: () => T): T {
       try {
         const raw = readFileSync(lock, "utf8").trim();
         const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
-        const abandonedByTime = Date.now() - statSync(lock).mtimeMs > LOCK_ABANDONED_MS;
+        const age = Date.now() - statSync(lock).mtimeMs;
+        const abandonedByTime = age > LOCK_ABANDONED_MS;
         // AN EMPTY OR HALF-WRITTEN LOCK IS BEING CREATED RIGHT NOW, not abandoned
         // (2026-10-03, reviewer P1): the holder writes its token immediately
         // after `O_EXCL` succeeds, so a reader that finds nothing must WAIT —
         // treating "cannot parse" as "take it" would hand the lock to two
-        // writers at once, which is the one thing it exists to prevent.
+        // writers at once. But waiting has a bound of its own: an empty lock
+        // older than {@link LOCK_EMPTY_STALE_MS} is a holder that died in that
+        // microsecond window, and nobody should block for the long TTL over it.
         const readable = Number.isFinite(owner);
-        if ((readable && !pidAlive(owner)) || abandonedByTime) {
+        const emptyAndStale = !readable && age > LOCK_EMPTY_STALE_MS;
+        if ((readable && !pidAlive(owner)) || abandonedByTime || emptyAndStale) {
           rmSync(lock, { force: true });
           continue;
         }
