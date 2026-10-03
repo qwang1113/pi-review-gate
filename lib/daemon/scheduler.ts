@@ -689,7 +689,23 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // be exactly the duplicate the stamp exists to prevent — the checkout is
         // kept (it is the only copy of whatever is running there), and the ledger
         // says so.
-        skipped(task, at, `起会话失败但窗口可能已经开了（${problem}）—— 这一槽视为已处理`, slot);
+        //
+        // NOT `skipped()`: that helper rolls the stamp back when the ledger line
+        // cannot be written, which is right for "definitely did not start" and
+        // exactly wrong here — an unrolled stamp would let the next tick start a
+        // SECOND run for a slot that may already be running (quality round P2,
+        // 2026-10-03).
+        dealt(task, at, slot);
+        try {
+          appendScheduleRun(deps.home, {
+            kind: "run-skipped",
+            taskId: task.id,
+            at: at.toISOString(),
+            reason: `起会话失败但窗口可能已经开了（${problem}）—— 这一槽视为已处理`,
+          });
+        } catch (error) {
+          log(`调度任务 ${task.id} 的这一槽台账没写进去（这一槽仍视为已处理：窗口可能已经开了）：${error instanceof Error ? error.message : String(error)}`);
+        }
         log(`运行 ${runId} 的窗口可能已经开了但坐标读不到 —— 保留它的 checkout ${cut.worktree.path} 不动，请人工确认`);
       } else {
         // NOTHING IS WRITTEN FOR A LAUNCH THAT NEVER HAPPENED (reviewer P1): the
