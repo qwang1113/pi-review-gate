@@ -458,7 +458,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * (2026-10-03): `enabled:false` is one of the four permanent obstacles, so its
    * history is written — once per task per process, because the condition cannot
    * change by itself and the ledger only grows. A SEPARATE set from the one
-   * below, because a task can be disabled first and then have a broken cron:
+   * ABOVE, because a task can be disabled first and then have a broken cron:
    * sharing one set meant that second, ledger-worthy condition was silenced
    * forever.
    */
