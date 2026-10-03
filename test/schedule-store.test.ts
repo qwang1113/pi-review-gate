@@ -630,7 +630,7 @@ test("the table lock: a dead holder is taken over, a live one is respected, a ha
   // …BUT ONE THAT HAS BEEN SITTING THERE IS A CRASHED CREATOR: it names no
   // process, and refusing every write over it forever would be an outage of our
   // own making. Age is what separates the two.
-  const old = new Date(Date.now() - 60_000);
+  const old = new Date(Date.now() - 5 * 60_000);
   utimesSync(lock, old, old);
   const recovered = addScheduledTask(home, taskInput(scratch(), { name: "after-stale-empty" }));
   assert.equal(recovered.ok, true, recovered.ok ? "" : recovered.problem);

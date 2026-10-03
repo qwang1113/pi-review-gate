@@ -444,9 +444,11 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
  * preferable to two writers editing the same version — the thing this lock
  * exists to prevent. A lock with NO holder named at all (an empty file, a
  * half-written token) is a different case: nobody is behind it, so it lapses on
- * the {@link LOCK_EMPTY_STALE_MS} clock.
+ * the {@link LOCK_EMPTY_STALE_MS} clock — long enough that a creator SUSPENDED
+ * between `O_EXCL` and its token write is not mistaken for a crash, short enough
+ * that a crashed one does not block writes forever.
  */
-const LOCK_EMPTY_STALE_MS = 5_000;
+const LOCK_EMPTY_STALE_MS = 60_000;
 function withTableLock<T>(home: string, fn: () => ScheduleStoreResult<T>): ScheduleStoreResult<T> {
   const lock = `${schedulesPath(home)}.lock`;
   const token = `${process.pid}-${randomBytes(4).toString("hex")}`;
