@@ -436,6 +436,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    * again (quality round P2, 2026-10-03).
    */
   const deferredSlots = new Map<string, number>();
+  /**
+   * The tasks whose schedule can NEVER produce a slot, already said in the ledger
+   * (2026-10-03, reviewer P1): `enabled:false`, a cron that resolves to no
+   * instant at all (`0 0 30 2 *`), an unreadable base. There is no slot to consume
+   * for these — `dueDecision` cannot name a next cron time — so a `run-skipped`
+   * line is the only place a user can see WHY the task never runs, recorded once
+   * per task per process (the condition cannot change by itself).
+   */
+  const notedPermanent = new Set<string>();
 
   /** Drop what is too old to matter: a resident process must not grow forever. */
   function pruneUnrecorded(nowMs: number): void {
@@ -586,10 +595,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       appendScheduleRun(deps.home, { kind: "run-skipped", taskId: task.id, at: at.toISOString(), reason });
     } catch (error) {
       // A CONSUMED SLOT WITH NO LINE LOSES ITS REASON FOREVER (reviewer P1,
-      // 2026-10-03): the stamp goes back, and the decision is made again on the
-      // next tick — which is what makes the reason durable instead of a log line.
-      rollbackStamp(task, slot);
-      log(`调度任务 ${task.name} 的跳过记录没写进台账（槽戳已回滚，下一次 tick 重判）：${error instanceof Error ? error.message : String(error)}`);
+      // 2026-10-03): the stamp goes back so the decision is made again on the
+      // next tick. When even THAT fails, the one remaining evidence is the log —
+      // and it says which slot is gone and why.
+      if (!rollbackStamp(task, slot)) {
+        log(`调度任务 ${task.name} 的这一槽被消费且台账没写进去（回滚也失败，这一槽丢失）：${reason}`);
+      } else {
+        log(`调度任务 ${task.name} 的跳过记录没写进台账（槽戳已回滚，下一次 tick 重判）：${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     log(`调度任务 ${task.name} 跳过：${reason}`);
   }
@@ -632,6 +645,8 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       worktree: cut.worktree.path,
       branch: cut.worktree.branch,
       base: cut.worktree.base,
+      slot,
+      previousFiredAt: task.lastFiredAt,
     };
     try {
       appendScheduleRun(deps.home, armed);
@@ -667,22 +682,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     });
     if (!started.ok || started.sessionId === undefined) {
       const problem = started.problem ?? "launchTask 没给出 sessionId";
-      // THE SLOT GOES BACK (2026-10-03, reviewer P1): the stamp above consumed
-      // it for a run that never happened, and a temporary obstacle must leave the
-      // slot owed. A rollback that FAILS says so in the ledger — that one slot is
-      // genuinely spent, and "which slot was lost and why" must survive the tick.
-      if (!rollbackStamp(task, slot)) {
-        try {
-          appendScheduleRun(deps.home, {
-            kind: "run-skipped",
-            taskId: task.id,
-            at: at.toISOString(),
-            reason: `起会话失败（${problem}），且槽戳回滚失败 —— 这一槽被消费`,
-          });
-        } catch (error) {
-          log(`调度任务 ${task.id} 的这一槽丢失记录没写进台账：${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
       // NOTHING IS WRITTEN FOR A LAUNCH THAT NEVER HAPPENED (reviewer P1): the
       // arming line is inert on its own (`openRuns` ignores it), so the ledger
       // keeps NO run this session never was — no `run-settled`, no ghost in the
@@ -690,10 +689,25 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       releaseCheckout(cut.worktree, task, runId);
       if (started.permanent === true) {
         // A PERMANENT obstacle (no tmux to run at all): retrying every 20 s
-        // would burn the schedule on something no retry can repair. The slot is
-        // consumed and the ledger names the reason.
+        // would burn the schedule on something no retry can repair, so the slot
+        // is SPENT here — no rollback — and the ledger names the reason.
         skipped(task, at, `起会话失败（永久障碍）：${problem}`, slot);
       } else {
+        // A TEMPORARY obstacle: the stamp goes back, so this slot is still owed.
+        // A rollback that itself fails costs that one slot — recorded as a skip
+        // so the reason survives instead of only living in a log line.
+        if (!rollbackStamp(task, slot)) {
+          try {
+            appendScheduleRun(deps.home, {
+              kind: "run-skipped",
+              taskId: task.id,
+              at: at.toISOString(),
+              reason: `起会话失败（${problem}），且槽戳回滚失败 —— 这一槽被消费`,
+            });
+          } catch (error) {
+            log(`调度任务 ${task.id} 的这一槽丢失记录没写进台账：${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         deferred(task, at, slot, `起会话失败：${problem}`);
       }
       return undefined;
@@ -853,6 +867,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         taskId: armed.taskId,
         sessionId: armed.sessionId,
         at: armed.at,
+        ...(armed.repo === undefined ? {} : { repo: armed.repo }),
         ...(armed.worktree === undefined ? {} : { worktree: armed.worktree }),
         ...(armed.branch === undefined ? {} : { branch: armed.branch }),
         ...(armed.base === undefined ? {} : { base: armed.base }),
@@ -873,20 +888,52 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       const armedAt = Date.parse(record.at);
       if (!Number.isFinite(armedAt) || at.getTime() - armedAt < SETTLE_GRACE_MS) continue; // it may still be cold-starting
       if (record.repo === undefined || record.worktree === undefined || record.branch === undefined || record.base === undefined) continue;
+      // THE LISTING IS NOT THE ONLY EVIDENCE OF LIFE (2026-10-03, reviewer P1):
+      // a session the observer cannot place may still be a live process — the
+      // checkout's own heartbeat and its transcript say so, which is exactly what
+      // `runEvidence` answers for a run.
+      const asRun: ScheduleRunStarted = {
+        kind: "run-started",
+        runId: record.runId,
+        taskId: record.taskId,
+        sessionId: record.sessionId,
+        at: record.at,
+        ...(record.worktree === undefined ? {} : { worktree: record.worktree }),
+        ...(record.repo === undefined ? {} : { repo: record.repo }),
+      };
+      const evidence = runEvidence(asRun, record.repo, at);
+      if (evidence.holdsCheckout) continue;
+      const transcriptAt = evidence.transcriptAt === null ? Number.NaN : Date.parse(evidence.transcriptAt);
+      if (Number.isFinite(transcriptAt) && at.getTime() - transcriptAt < TRANSCRIPT_ACTIVE_MS) continue;
       if (!existsSync(record.worktree)) {
         cleanedArms.add(record.runId); // already recycled, or never created
-        continue;
+      } else {
+        cleanedArms.add(record.runId);
+        try {
+          worktrees.settle({
+            worktree: { repo: record.repo, runId: record.runId, branch: record.branch, base: record.base, path: record.worktree },
+            outcome: "failed",
+            station: stations.get(record.taskId),
+          });
+          log(`运行 ${record.runId} 的 arming 没有对应的会话（daemon 当时死了？）—— 它的隔离 checkout 已回收`);
+        } catch (error) {
+          log(`运行 ${record.runId} 的残留 checkout 没能回收：${error instanceof Error ? error.message : String(error)}`);
+        }
       }
-      cleanedArms.add(record.runId);
-      try {
-        worktrees.settle({
-          worktree: { repo: record.repo, runId: record.runId, branch: record.branch, base: record.base, path: record.worktree },
-          outcome: "failed",
-          station: stations.get(record.taskId),
-        });
-        log(`运行 ${record.runId} 的 arming 没有对应的会话（daemon 当时死了？）—— 它的隔离 checkout 已回收`);
-      } catch (error) {
-        log(`运行 ${record.runId} 的残留 checkout 没能回收：${error instanceof Error ? error.message : String(error)}`);
+      // AND THE SLOT IT CONSUMED GOES BACK (2026-10-03, reviewer P1): a stamp
+      // written for a run that never happened must not cost the schedule a slot —
+      // but only while the table still shows THAT stamp (a later tick has since
+      // dealt with newer slots; putting an old base back would re-run them).
+      if (record.slot !== undefined && record.previousFiredAt !== undefined) {
+        const current = readSchedules(deps.home);
+        const task = current.ok ? current.file.tasks.find((entry) => entry.id === record.taskId) : undefined;
+        if (task !== undefined && task.lastFiredAt === record.at) {
+          try {
+            updateScheduledTask(deps.home, record.taskId, { lastFiredAt: record.previousFiredAt }, { from: "gate" });
+          } catch (error) {
+            log(`调度任务 ${record.taskId} 的槽戳没能回滚：${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
       }
     }
     const repoOfRun = (run: ScheduleRunStarted): string | undefined =>
@@ -967,23 +1014,20 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       }
     }
     const stillOpen = all.filter((run) => !settled.has(run.runId));
-    // CLOSE WHAT A SETTLEMENT COULD NOT (2026-10-03, reviewer P1): closing a
-    // run's window is best-effort INSIDE the settlement (it must never depend on
-    // tmux), and `openRuns` stops returning a settled run — so a transient tmux
-    // failure there would leave the daemon's own window, with a live process in
-    // it, unaddressed forever. The `run-window` line is the durable address; this
-    // pass retries it for the runs that just settled.
-    const settledRecently = new Set(
-      records
-        .filter((record) => record.kind === "run-settled")
-        .filter((record) => {
-          const when = Date.parse(record.at);
-          return Number.isFinite(when) && at.getTime() - when < SETTLE_GRACE_MS * 15;
-        })
-        .map((record) => record.runId),
-    );
+    // …AND RETRIED UNTIL THE WINDOW IS REALLY GONE (2026-10-03, reviewer P1): the
+    // retry used to expire with a time window, which only delays the same
+    // permanent loss when tmux stays broken longer. What is bounded here is the
+    // WORK, not the retry — one `list-windows` per scope session says which
+    // recorded windows still exist, and only those are closed.
+    const settledIds = new Set(records.filter((record) => record.kind === "run-settled").map((record) => record.runId));
+    const liveWindows = new Map<string, Set<string>>();
+    for (const coords of windows.values()) {
+      if (liveWindows.has(coords.scopeSession)) continue;
+      liveWindows.set(coords.scopeSession, listWindowIds(deps.runTmux, coords.scopeSession));
+    }
     for (const [runId, coords] of windows) {
-      if (!settledRecently.has(runId)) continue;
+      if (!settledIds.has(runId)) continue;
+      if (!(liveWindows.get(coords.scopeSession)?.has(coords.windowId) ?? false)) continue;
       const anchorRecord = records.find(
         (record): record is ScheduleRunArmed | ScheduleRunStarted =>
           (record.kind === "run-armed" || record.kind === "run-started") && record.runId === runId,
@@ -995,6 +1039,22 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     for (const task of table.file.tasks) {
       try {
         const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
+        if (decision.reason === "disabled" || decision.reason === "bad-cron" || decision.reason === "bad-time") {
+          if (!notedPermanent.has(task.id)) {
+            notedPermanent.add(task.id);
+            const why = decision.reason === "disabled"
+              ? "任务已停用（enabled:false）"
+              : decision.reason === "bad-cron"
+                ? `cron 无解（${task.cron}）`
+                : "createdAt / lastFiredAt 读不出时间";
+            try {
+              appendScheduleRun(deps.home, { kind: "run-skipped", taskId: task.id, at: at.toISOString(), reason: `永久障碍：${why}` });
+            } catch (error) {
+              log(`调度任务 ${task.id} 的永久障碍记录没写进台账：${error instanceof Error ? error.message : String(error)}`);
+            }
+          }
+          continue;
+        }
         // (A slot the daemon slept through is no longer CONSUMED here: it stays
         // owed and the `due` branch below runs it — see `dueDecision`.)
         if (!decision.due) continue;
@@ -1059,6 +1119,22 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     } finally {
       running = false;
     }
+  }
+}
+
+/**
+ * The window ids a tmux session currently holds — the cheap question the
+ * window-close retry asks before trying to close anything (2026-10-03). An
+ * unreadable answer is an EMPTY set, which reads as "nothing to close": tmux
+ * being unreachable must not turn into an error of its own.
+ */
+function listWindowIds(run: TmuxRunner, session: string): Set<string> {
+  try {
+    const result = run(["list-windows", "-t", session, "-F", "#{window_id}"]);
+    if (!result.ok) return new Set();
+    return new Set(result.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== ""));
+  } catch {
+    return new Set();
   }
 }
 

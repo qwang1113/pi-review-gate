@@ -246,6 +246,25 @@ export function sanitizeScopeRecord(raw: unknown): TmuxScopeRecord | undefined {
   return { name, owner, createdAt };
 }
 
+/**
+ * The coordinates of the LAST window in a session, when the creation's own stdout
+ * could not be parsed (2026-10-03, reviewer P1): the window exists — its id is
+ * just not something we managed to read — and tmux numbers windows in creation
+ * order, so the final line is the one that was just opened. Undefined when tmux
+ * cannot answer.
+ */
+function lastWindowCoords(run: TmuxRunner, session: string): SessionWindowCoords | undefined {
+  try {
+    const listed = run(["list-windows", "-t", session, "-F", "#{window_id} #{pane_id}"]);
+    if (!listed.ok) return undefined;
+    const lines = listed.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+    const last = lines.at(-1);
+    return last === undefined ? undefined : parseSpawnedWindow(last);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Every session on the server, or undefined when tmux could not be read. */
 export function readSessionNames(run: TmuxRunner): string[] | undefined {
   const listing = readSessionList(run);
