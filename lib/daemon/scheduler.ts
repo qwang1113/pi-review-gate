@@ -733,11 +733,23 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // panel's history. The checkout goes back too.
         releaseCheckout(cut.worktree, task, runId);
         if (started.permanent === true) {
-          // A PERMANENT obstacle (no tmux to run at all): retrying every 20 s
-          // would burn the schedule on something no retry can repair, so the slot
-          // is SPENT here — no rollback — and the ledger names the reason. The
-          // runId rides along so the arming cleanup does NOT undo that (P0).
-          skipped(task, at, `起会话失败（永久障碍）：${problem}`, slot, runId);
+          // A PERMANENT obstacle (no tmux to run at all): the slot was ALREADY
+          // spent before the launch, so there is no second stamp and no rollback
+          // — the ledger records the reason, and the `runId` it carries is what
+          // the arming cleanup reads to know the consumption is explained
+          // (reviewer P0/P2, 2026-10-03). A ledger write that fails leaves the
+          // slot spent, which is the correct outcome for a permanent obstacle.
+          try {
+            appendScheduleRun(deps.home, {
+              kind: "run-skipped",
+              taskId: task.id,
+              at: at.toISOString(),
+              reason: `起会话失败（永久障碍）：${problem}`,
+              runId,
+            });
+          } catch (error) {
+            log(`调度任务 ${task.id} 的永久障碍记录没写进台账（这一槽仍已消费）：${error instanceof Error ? error.message : String(error)}`);
+          }
         } else {
           // A TEMPORARY obstacle: the stamp goes back, so this slot is still owed.
           // A rollback that itself fails costs that one slot — recorded as a skip
@@ -969,6 +981,25 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         } catch (error) {
           log(`运行 ${record.runId} 的残留 checkout 没能回收：${error instanceof Error ? error.message : String(error)}`);
         }
+      }
+      // AND THE ARMED RUN IS CLOSED OUT IN THE LEDGER (reviewer P2, 2026-10-03):
+      // without this line every later tick would re-probe this arming forever
+      // (the ledger only grows), and `everStarted` above only looks at started
+      // and settled records. `gone` is the honest outcome: an arming that never
+      // became a run had no session to conclude anything.
+      try {
+        appendScheduleRun(deps.home, {
+          kind: "run-settled",
+          runId: record.runId,
+          taskId: record.taskId,
+          at: at.toISOString(),
+          outcome: "gone",
+          verdict: null,
+          unmet: [],
+          landing: "这次运行没有对应的会话（daemon 当时可能死了）—— 隔离 checkout 已回收",
+        });
+      } catch (error) {
+        log(`运行 ${record.runId} 的收尾记录没写进台账（下次 tick 会再试）：${error instanceof Error ? error.message : String(error)}`);
       }
       // AND THE SLOT IT CONSUMED GOES BACK — BUT ONLY WHEN NOBODY EXPLAINED THAT
       // CONSUMPTION (2026-10-03, reviewer P0): a permanent obstacle spends the
