@@ -454,11 +454,13 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
    */
   const notedBroken = new Set<string>();
   /**
-   * The disabled tasks already mentioned in the LOG (never in the ledger: a
-   * disabled task has no slot to skip, and `enabled:false` is its own
-   * explanation — 2026-10-03, reviewer P2). A SEPARATE set from the one above,
-   * because a task can be disabled first and then have a broken cron: sharing one
-   * set meant that second, ledger-worthy condition was silenced forever.
+   * The disabled tasks whose `run-skipped` line is already in the ledger
+   * (2026-10-03): `enabled:false` is one of the four permanent obstacles, so its
+   * history is written — once per task per process, because the condition cannot
+   * change by itself and the ledger only grows. A SEPARATE set from the one
+   * below, because a task can be disabled first and then have a broken cron:
+   * sharing one set meant that second, ledger-worthy condition was silenced
+   * forever.
    */
   const notedDisabled = new Set<string>();
 
