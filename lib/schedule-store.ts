@@ -478,6 +478,11 @@ function withTableLock<T>(home: string, fn: () => T): T {
       if ((error as { code?: string }).code !== "EEXIST") throw error;
       try {
         const raw = readFileSync(lock, "utf8").trim();
+        // A FULL TOKEN OR NOTHING: a half-written one (`1234` without its suffix)
+        // parses as a pid and would be read as a complete lock, so the reader
+        // would wait on a holder that may be nobody (reviewer P2, 2026-10-03).
+        // Only the exact shape counts; anything else falls into the short
+        // empty-lock bound above.
         const readable = /^\d+-[0-9a-f]+$/.test(raw);
         const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
         const age = Date.now() - statSync(lock).mtimeMs;
