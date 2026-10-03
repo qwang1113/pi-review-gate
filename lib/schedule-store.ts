@@ -40,6 +40,7 @@ import { isDeliveryStation, type DeliveryStation } from "./delivery-station.ts";
 import { goalTextHash, normalizeGoalText } from "./loop-goal.ts";
 import { buildRejection } from "./rejection-copy.ts";
 import { restatementHash } from "./restatement.ts";
+import { pidAlive } from "./session-registry.ts";
 
 /** Shape version of `schedules.json`. */
 export const SCHEDULES_SCHEMA = 1;
@@ -437,16 +438,6 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
  */
 const LOCK_ABANDONED_MS = 10 * 60_000;
 
-/** Is this process still around? EPERM means it exists but is not ours. */
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as { code?: string }).code === "EPERM";
-  }
-}
-
 function withTableLock<T>(home: string, fn: () => T): T {
   const lock = `${schedulesPath(home)}.lock`;
   for (;;) {
@@ -478,7 +469,13 @@ function withTableLock<T>(home: string, fn: () => T): T {
         const raw = readFileSync(lock, "utf8").trim();
         const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
         const abandonedByTime = Date.now() - statSync(lock).mtimeMs > LOCK_ABANDONED_MS;
-        if (!Number.isFinite(owner) || !pidAlive(owner) || abandonedByTime) {
+        // AN EMPTY OR HALF-WRITTEN LOCK IS BEING CREATED RIGHT NOW, not abandoned
+        // (2026-10-03, reviewer P1): the holder writes its token immediately
+        // after `O_EXCL` succeeds, so a reader that finds nothing must WAIT —
+        // treating "cannot parse" as "take it" would hand the lock to two
+        // writers at once, which is the one thing it exists to prevent.
+        const readable = Number.isFinite(owner);
+        if ((readable && !pidAlive(owner)) || abandonedByTime) {
           rmSync(lock, { force: true });
           continue;
         }

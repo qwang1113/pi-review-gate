@@ -695,13 +695,19 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // exactly wrong here — an unrolled stamp would let the next tick start a
         // SECOND run for a slot that may already be running (quality round P2,
         // 2026-10-03).
-        dealt(task, at, slot);
+        const spent = dealt(task, at, slot);
+        if (!spent) {
+          // THE SLOT IS NOT ACTUALLY SPENT, and saying so is the only honest
+          // thing left: the window may be open AND the slot is still owed, so a
+          // later tick can start a second run (2026-10-03, reviewer P2).
+          log(`调度任务 ${task.id} 的这一槽没能标记为已处理（表写不进去）—— 窗口可能已经开着，而这一槽仍算欠着，请人工确认`);
+        }
         try {
           appendScheduleRun(deps.home, {
             kind: "run-skipped",
             taskId: task.id,
             at: at.toISOString(),
-            reason: `起会话失败但窗口可能已经开了（${problem}）—— 这一槽视为已处理`,
+            reason: `起会话失败但窗口可能已经开了（${problem}）—— ${spent ? "这一槽视为已处理" : "注意：槽戳没写上，这一槽仍是欠着的"}`,
           });
         } catch (error) {
           log(`调度任务 ${task.id} 的这一槽台账没写进去（这一槽仍视为已处理：窗口可能已经开了）：${error instanceof Error ? error.message : String(error)}`);
@@ -1091,13 +1097,22 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     for (const task of table.file.tasks) {
       try {
         const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
-        if (decision.reason === "disabled" || decision.reason === "bad-cron" || decision.reason === "bad-time") {
+        if (decision.reason === "disabled") {
+          // A DISABLED TASK HAS NO SLOT AT ALL, so there is nothing to skip and
+          // nothing for the panel's `lastRuns` to explain — `enabled:false` IS
+          // the explanation, and it is visible on the task row itself
+          // (2026-10-03, reviewer P2). Said once per process, in the log.
           if (!notedPermanent.has(task.id)) {
-            const why = decision.reason === "disabled"
-              ? "任务已停用（enabled:false）"
-              : decision.reason === "bad-cron"
-                ? `cron 无解（${task.cron}）`
-                : "createdAt / lastFiredAt 读不出时间";
+            notedPermanent.add(task.id);
+            log(`调度任务 ${task.name} 已停用，不参与调度`);
+          }
+          continue;
+        }
+        if (decision.reason === "bad-cron" || decision.reason === "bad-time") {
+          if (!notedPermanent.has(task.id)) {
+            const why = decision.reason === "bad-cron"
+              ? `cron 无解（${task.cron}）`
+              : "createdAt / lastFiredAt 读不出时间";
             try {
               appendScheduleRun(deps.home, { kind: "run-skipped", taskId: task.id, at: at.toISOString(), reason: `永久障碍：${why}` });
               // ONLY NOW IS IT REMEMBERED: a line that could not be written must
