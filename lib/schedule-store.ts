@@ -216,6 +216,15 @@ export interface ScheduleRunWindow {
   scopeSession: string;
   /** The tmux window id (`@N`) `launchTask` created for this run. */
   windowId: string;
+  /**
+   * WHICH SERVER MINTED THAT ID (`<socket>,<pid>`, the registry's own spelling).
+   * A window id means something only on the server that handed it out, and after
+   * a `kill-server` or a reboot the next server reuses the same small numbers —
+   * so a close aimed by a stale id could take a stranger's window with it
+   * (reviewer P1, 2026-10-03). Undefined for records written before this field
+   * existed: those are simply not retried.
+   */
+  server?: string;
 }
 export interface ScheduleRunSettled {
   kind: "run-settled"; runId: string; taskId: string; at: string;

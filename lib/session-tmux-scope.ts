@@ -640,6 +640,13 @@ export type OpenScopeWindowResult =
        * consumes it for this one (lib/daemon/scheduler.ts).
        */
       permanent?: boolean;
+      /**
+       * THE COMMAND RAN AND A WINDOW MAY EXIST — we just cannot address it
+       * (2026-10-03, reviewer P1). The caller must then NOT delete the checkout
+       * the session may already be working in: the directory is the only copy of
+       * whatever it is doing.
+       */
+      mayHaveStarted?: boolean;
     };
 
 /**
@@ -732,7 +739,7 @@ export function openScopeWindow(
       try { run(buildKillSessionArgv(name)); } catch { /* best effort */ }
       return { ok: false, error: "tmux 没有返回新 session 的坐标 —— 已就地回收" };
     }
-    return { ok: false, error: "tmux 没有返回新 window 的坐标（那个 window 无法寻址）" };
+    return { ok: false, error: "tmux 没有返回新 window 的坐标（那个 window 无法寻址）", mayHaveStarted: true };
   }
   if (!exists) {
     // THE MARKER IS WRITTEN BEFORE THE RECORD, and a failure to write it UNDOES

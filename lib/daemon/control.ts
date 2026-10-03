@@ -217,6 +217,12 @@ export interface LaunchTaskOutcome {
    * coming up, a directory that is mid-rebuild).
    */
   permanent?: boolean;
+  /**
+   * A WINDOW MAY HAVE BEEN OPENED (the command ran, its coordinates could not be
+   * read): the caller keeps the checkout instead of recycling it — the session
+   * might be working in there right now (2026-10-03, reviewer P1).
+   */
+  mayHaveStarted?: boolean;
   sessionId?: string;
   /** The pi session id the window runs with — deterministic, so it can be resumed. */
   scopeSession?: string;
@@ -368,7 +374,12 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
     ...(name === "" ? {} : { windowName: safeWindowName(name) }),
   });
   if (!opened.ok) {
-    return { ok: false, problem: opened.error, ...(opened.permanent === true ? { permanent: true } : {}) };
+    return {
+      ok: false,
+      problem: opened.error,
+      ...(opened.permanent === true ? { permanent: true } : {}),
+      ...(opened.mayHaveStarted === true ? { mayHaveStarted: true } : {}),
+    };
   }
   return {
     ok: true,

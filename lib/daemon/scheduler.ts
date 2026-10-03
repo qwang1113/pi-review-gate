@@ -112,6 +112,7 @@ import {
   type ScheduleRunStarted,
 } from "../schedule-store.ts";
 import { launchTask, closeRunWindowAt, type RunWindowTarget } from "./control.ts";
+import { currentTmuxServer } from "../tmux-exec.ts";
 import type { SessionObserver, DaemonSession } from "./sessions.ts";
 import { TRANSCRIPT_ACTIVE_MS } from "./sessions.ts";
 import type { TmuxRunner } from "../orchestrator-tmux.ts";
@@ -685,8 +686,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       // NOTHING IS WRITTEN FOR A LAUNCH THAT NEVER HAPPENED (reviewer P1): the
       // arming line is inert on its own (`openRuns` ignores it), so the ledger
       // keeps NO run this session never was — no `run-settled`, no ghost in the
-      // panel's history. The checkout goes back too.
-      releaseCheckout(cut.worktree, task, runId);
+      // panel's history. The checkout goes back too — UNLESS the window may have
+      // been opened (the command ran, its coordinates could not be read): then a
+      // session may be working in that directory and the checkout is the only
+      // copy of whatever it is doing (reviewer P1, 2026-10-03).
+      if (started.mayHaveStarted !== true) {
+        releaseCheckout(cut.worktree, task, runId);
+      } else {
+        log(`运行 ${runId} 的窗口可能已经开了但坐标读不到 —— 保留它的 checkout ${cut.worktree.path} 不动，请人工确认`);
+      }
       if (started.permanent === true) {
         // A PERMANENT obstacle (no tmux to run at all): retrying every 20 s
         // would burn the schedule on something no retry can repair, so the slot
@@ -742,6 +750,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // tmux reclaims the window.
     if (started.scopeSession !== undefined && started.windowId !== undefined) {
       try {
+        const server = currentTmuxServer(deps.runTmux);
         appendScheduleRun(deps.home, {
           kind: "run-window",
           runId,
@@ -750,6 +759,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           at: at.toISOString(),
           scopeSession: started.scopeSession,
           windowId: started.windowId,
+          ...(server === undefined ? {} : { server }),
         });
       } catch (error) {
         log(`运行 ${runId} 的窗口坐标没能记进台账：${error instanceof Error ? error.message : String(error)}`);
@@ -946,10 +956,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // any more (that line must exist before the session starts), so the
     // `run-window` line written a moment later is what a settlement closes a
     // pane-less window by (2026-10-03).
-    const windows = new Map<string, { scopeSession: string; windowId: string }>();
+    const windows = new Map<string, { scopeSession: string; windowId: string; server?: string }>();
     for (const record of records) {
       if (record.kind === "run-window") {
-        windows.set(record.runId, { scopeSession: record.scopeSession, windowId: record.windowId });
+        windows.set(record.runId, {
+          scopeSession: record.scopeSession,
+          windowId: record.windowId,
+          ...(record.server === undefined ? {} : { server: record.server }),
+        });
       }
     }
     for (const run of all) {
@@ -1020,6 +1034,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // WORK, not the retry — one `list-windows` per scope session says which
     // recorded windows still exist, and only those are closed.
     const settledIds = new Set(records.filter((record) => record.kind === "run-settled").map((record) => record.runId));
+    // A WINDOW ID IS ONLY MEANINGFUL ON THE SERVER THAT MINTED IT (reviewer P1,
+    // 2026-10-03): after a `kill-server` or a reboot the next server hands out
+    // the same small numbers, so a retry aimed by a stale id would kill a window
+    // that has nothing to do with this run. Records without a server (written
+    // before this field) are simply not retried.
+    const liveServer = currentTmuxServer(deps.runTmux);
     const liveWindows = new Map<string, Set<string>>();
     for (const coords of windows.values()) {
       if (liveWindows.has(coords.scopeSession)) continue;
@@ -1027,6 +1047,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     }
     for (const [runId, coords] of windows) {
       if (!settledIds.has(runId)) continue;
+      if (coords.server === undefined || liveServer === undefined || coords.server !== liveServer) continue;
       if (!(liveWindows.get(coords.scopeSession)?.has(coords.windowId) ?? false)) continue;
       const anchorRecord = records.find(
         (record): record is ScheduleRunArmed | ScheduleRunStarted =>
