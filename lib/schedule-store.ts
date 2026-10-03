@@ -422,16 +422,17 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
  * it cannot make the window itself atomic. This lock is that missing half.
  *
  * It is a file created with `O_EXCL` beside the table: whoever creates it holds
- * it, everyone else waits (bounded) and then proceeds anyway — LOSING THE LOCK
- * MUST NOT LOSE THE WRITE, and the version check inside is still there. A lock
- * whose mtime is older than {@link LOCK_STALE_MS} belongs to a crashed writer
- * and is removed by whoever finds it.
+ * it, everyone else waits — THERE IS NO "GIVE UP AND WRITE ANYWAY" EXIT, because
+ * that exit is exactly what would make the lock decorative again (reviewer P1,
+ * 2026-10-03). Waiting is safe here: the holder is a synchronous read-and-write
+ * a few milliseconds long, and the only way it does not release the lock is a
+ * CRASH — whose lock file stops being touched and can then be taken by whoever
+ * notices, after {@link LOCK_STALE_MS}.
  */
 const LOCK_STALE_MS = 10_000;
 
 function withTableLock<T>(home: string, fn: () => T): T {
   const lock = `${schedulesPath(home)}.lock`;
-  const deadline = Date.now() + 2_000;
   for (;;) {
     try {
       // THE TABLE'S HOME MAY NOT EXIST YET (a fresh daemon home): the lock is the
@@ -453,7 +454,6 @@ function withTableLock<T>(home: string, fn: () => T): T {
           continue;
         }
       } catch { /* the holder just released it */ }
-      if (Date.now() >= deadline) return fn();
       sleepSync(20);
     }
   }
