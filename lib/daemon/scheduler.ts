@@ -974,21 +974,22 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       if (!existsSync(record.worktree)) {
         cleanedArms.add(record.runId); // already recycled, or never created
       } else {
-        // REMEMBERED ONLY AFTER IT WORKED (reviewer P1, 2026-10-03): the set now
-        // lives as long as the process, so marking a failed cleanup would skip
-        // this checkout for the rest of it — a git that refused (an index.lock,
-        // a full disk, a hook) would leave the directory stranded forever.
-        try {
-          worktrees.settle({
-            worktree: { repo: record.repo, runId: record.runId, branch: record.branch, base: record.base, path: record.worktree },
-            outcome: "failed",
-            station: stations.get(record.taskId),
-          });
-          cleanedArms.add(record.runId);
-          log(`运行 ${record.runId} 的 arming 没有对应的会话（daemon 当时死了？）—— 它的隔离 checkout 已回收`);
-        } catch (error) {
-          log(`运行 ${record.runId} 的残留 checkout 没能回收（下一次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
-        }
+        // THE SETTLEMENT REPORTS FAILURE AS A VALUE, NOT AS A THROW (reviewer P1,
+        // 2026-10-03): `settleScheduleWorktree` never throws — every refusal comes
+        // back as `branch-kept` with its own note — so a `catch` here would never
+        // run and the log would claim a recycling that did not happen. Remembered
+        // either way, because both outcomes are FINAL for this arming: the
+        // checkout was recycled, or it is deliberately kept for a human to look
+        // at (that is what `branch-kept` means).
+        const settlement = worktrees.settle({
+          worktree: { repo: record.repo, runId: record.runId, branch: record.branch, base: record.base, path: record.worktree },
+          outcome: "failed",
+          station: stations.get(record.taskId),
+        });
+        cleanedArms.add(record.runId);
+        log(settlement.action === "reclaimed"
+          ? `运行 ${record.runId} 的 arming 没有对应的会话（daemon 当时死了？）—— 它的隔离 checkout 已回收`
+          : `运行 ${record.runId} 的 arming 没有对应的会话 —— checkout 按 ${settlement.action} 处理：${settlement.note}`);
       }
       // THE SLOT STAMP IS LEFT EXACTLY WHERE IT IS (reviewer P1/P2, 2026-10-03).
       // This pass used to put it back, which was wrong in both directions: a
