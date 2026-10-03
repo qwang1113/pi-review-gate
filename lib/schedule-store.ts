@@ -435,14 +435,18 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
  * the daemon retries it on its next tick). Sleeping would make every caller's
  * failure mode "this process is stuck" instead.
  *
- * AND THAT IS WHAT MAKES IT SAFE WITHOUT A TIME-OUT: a lock left by a CRASHED
- * holder is removed on the spot — its pid is gone, which is a FACT rather than a
- * guess — while a lock whose pid is ALIVE is never touched, however old it looks,
- * because that pid may belong to a process that merely REUSED the number. The
- * price is stated plainly: a lock nobody can explain blocks writes until a human
- * deletes one visible file, which is infinitely preferable to two writers editing
- * the same version — the thing this lock exists to prevent.
+ * AND THAT IS WHAT MAKES IT SAFE WITHOUT A TIME-OUT — FOR A NAMED HOLDER: a
+ * lock left by a CRASHED holder is removed on the spot (its pid is gone, which is
+ * a FACT rather than a guess), while a lock whose pid is ALIVE is never touched,
+ * however old it looks, because that pid may belong to a process that merely
+ * REUSED the number. The price is stated plainly: a lock nobody can explain
+ * blocks writes until a human deletes one visible file, which is infinitely
+ * preferable to two writers editing the same version — the thing this lock
+ * exists to prevent. A lock with NO holder named at all (an empty file, a
+ * half-written token) is a different case: nobody is behind it, so it lapses on
+ * the {@link LOCK_EMPTY_STALE_MS} clock.
  */
+const LOCK_EMPTY_STALE_MS = 5_000;
 function withTableLock<T>(home: string, fn: () => ScheduleStoreResult<T>): ScheduleStoreResult<T> {
   const lock = `${schedulesPath(home)}.lock`;
   const token = `${process.pid}-${randomBytes(4).toString("hex")}`;
@@ -484,21 +488,39 @@ function withTableLock<T>(home: string, fn: () => ScheduleStoreResult<T>): Sched
  */
 function clearDeadLock(lock: string): boolean {
   let raw: string;
+  let age: number;
   try {
     raw = readFileSync(lock, "utf8").trim();
+    age = Date.now() - statSync(lock).mtimeMs;
   } catch {
     return false; // already gone
   }
-  if (!/^\d+-[0-9a-f]+$/.test(raw)) return false;
+  // AN EMPTY LOCK IS NOBODY'S — after the few seconds it takes to write a token
+  // and no more (reviewer P1, 2026-10-03): a holder killed between `O_EXCL` and
+  // the write leaves a file that names no process at all, and refusing every
+  // later write over it would be a self-inflicted outage.
+  if (!/^\d+-[0-9a-f]+$/.test(raw)) {
+    return age > LOCK_EMPTY_STALE_MS ? removeIfUnchanged(lock, raw) : false;
+  }
   const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
+  // A NAMED HOLDER IS DEPOSED ONLY WHEN ITS PROCESS IS GONE: a live pid means
+  // somebody's lock, reused number or not.
   if (pidAlive(owner)) return false;
+  return removeIfUnchanged(lock, raw);
+}
+
+/**
+ * Remove `lock` only if it still holds `raw` — one released and recreated in
+ * between belongs to its new holder.
+ */
+function removeIfUnchanged(lock: string, raw: string): boolean {
   try {
-    if (readFileSync(lock, "utf8").trim() === raw) {
-      rmSync(lock, { force: true });
-      return true;
-    }
-  } catch { /* gone in the meantime */ }
-  return false;
+    if (readFileSync(lock, "utf8").trim() !== raw) return false;
+    rmSync(lock, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function writeSchedules(home: string, file: SchedulesFile): void {

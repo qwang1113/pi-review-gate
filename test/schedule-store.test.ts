@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -626,5 +626,13 @@ test("the table lock: a dead holder is taken over, a live one is respected, a ha
   const half = addScheduledTask(home, taskInput(scratch(), { name: "while-half-written" }));
   assert.equal(half.ok, false);
   assert.equal(existsSync(lock), true);
+
+  // …BUT ONE THAT HAS BEEN SITTING THERE IS A CRASHED CREATOR: it names no
+  // process, and refusing every write over it forever would be an outage of our
+  // own making. Age is what separates the two.
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(lock, old, old);
+  const recovered = addScheduledTask(home, taskInput(scratch(), { name: "after-stale-empty" }));
+  assert.equal(recovered.ok, true, recovered.ok ? "" : recovered.problem);
   rmSync(lock, { force: true });
 });

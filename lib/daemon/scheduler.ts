@@ -1128,13 +1128,23 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       try {
         const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
         if (decision.reason === "disabled") {
-          // A DISABLED TASK HAS NO SLOT AT ALL, so there is nothing to skip and
-          // nothing for the panel's `lastRuns` to explain — `enabled:false` IS
-          // the explanation, and it is visible on the task row itself
-          // (2026-10-03, reviewer P2). Said once per process, in the log.
+          // A DISABLED TASK STILL GETS A LEDGER LINE (reviewer P1, 2026-10-03):
+          // it is one of the four permanent obstacles the approved goal names, and
+          // "why does this never run" has to be answerable FROM THE LEDGER —
+          // `enabled:false` on the row says what, the record says since when.
+          // Once per task per process: the condition cannot change by itself.
           if (!notedDisabled.has(task.id)) {
-            notedDisabled.add(task.id);
-            log(`调度任务 ${task.name} 已停用，不参与调度`);
+            try {
+              appendScheduleRun(deps.home, {
+                kind: "run-skipped",
+                taskId: task.id,
+                at: at.toISOString(),
+                reason: "永久障碍：任务已停用（enabled:false）",
+              });
+              notedDisabled.add(task.id);
+            } catch (error) {
+              log(`调度任务 ${task.id} 的停用记录没写进台账（下次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
+            }
           }
           continue;
         }

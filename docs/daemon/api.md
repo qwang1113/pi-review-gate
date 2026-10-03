@@ -732,11 +732,11 @@ pi-gate daemon uninstall
 
 | `kind` | 字段 |
 | --- | --- |
-| `run-armed` | `runId`, `taskId`, `sessionId`, `at`，以及 `repo` / `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 与它的仓库锚点）—— **契约继承的凭证**：在 launch **之前**写（会话在 `session_start` 就要读它）。它**不是一次运行**：`openRuns`、面板历史、`lastRuns` 都不认它，所以一次没能起会话的尝试不会在台账里留下任何像运行的东西。它还带 `slot` / `previousFiredAt`（这次占用的槽，以及它替换掉的槽戳）：daemon **崩在槽戳与 launch 之间**时，恢复时的清理会用这两个字段把那个槽**还回去** |
+| `run-armed` | `runId`, `taskId`, `sessionId`, `at`，以及 `repo` / `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 与它的仓库锚点）—— **契约继承的凭证**：在 launch **之前**写（会话在 `session_start` 就要读它）。它**不是一次运行**：`openRuns`、面板历史、`lastRuns` 都不认它，所以一次没能起会话的尝试不会在台账里留下任何像运行的东西。daemon **崩在它之后、launch 之前**时，恢复后的清理只**回收那个 checkout**，**不动槽戳**：那一槽已被消费（宁可丢一槽，也不重复执行一个已跑过的槽） |
 | `run-started` | `runId`, `taskId`, `sessionId`, `at`，以及 `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 路径、它所在的分支、切出来的 commit）。**会话真的起来了才有这条**；它不带窗口坐标（那是 `run-window`）；更旧的记录可能自带 `scopeSession` / `windowId` |
 | `run-window` | `runId`, `taskId`, `sessionId`, `at`, `scopeSession`, `windowId`，以及 `server`（那个窗口 id 是在哪台 server 上铸的，`<socket>,<pid>`，与登记里的写法一致）—— 这次运行的窗口坐标，在 `run-started` **之后**补的一条（坐标那时才存在）。**`server` 是安全阀**：window id 只在铸它的那台 server 上有意义，`kill-server` / 重启后新 server 会重新发同样的小编号，所以补关时只对「记录里的 server == 当前 server」的记录动手；旧记录没有这个字段就**不补关**（宁可留着，也不误杀） |
 | `run-settled` | `runId`, `taskId`, `at`, `outcome`, `verdict`, `unmet`，以及 `branch` / `landing`（产出留在哪条分支上、结算把它怎么处理了；没有产出 / 已合并回收时没有这两个字段） |
-| `run-skipped` | `taskId`, `at`, `reason` |
+| `run-skipped` | `taskId`, `at`, `reason`，以及 `runId`（当这次跳过是**一次运行消费了槽**时 —— 起会话遇到永久障碍、或窗口可能已经开了）：它让“这一槽为什么被消费”可追溯 |
 
 `outcome` 的四个值：`passed`（会话**记录过 READY**）/ `blocked`（BLOCKED）/ `failed`（会话结束但结论不是这两个）/`gone`（读不到门禁 state，或会话确证消失）。**没有 READY 不记 passed** —— 这是「一次定时运行要过 reviewer」
 的机械落点。`verdict` 取门禁**仍然站着的结论**（`state.review.verdict` / §5.2 的 `rounds.lastVerdict`），
