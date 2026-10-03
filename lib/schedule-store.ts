@@ -289,7 +289,21 @@ export interface ScheduleRunArmed {
   previousFiredAt?: string | null;
 }
 
-export interface ScheduleRunSkipped { kind: "run-skipped"; taskId: string; at: string; reason: string }
+export interface ScheduleRunSkipped {
+  kind: "run-skipped";
+  taskId: string;
+  at: string;
+  reason: string;
+  /**
+   * WHICH RUN'S SLOT THIS EXPLAINS, when a launch consumed one.
+   *
+   * The cleanup pass of a stale arming uses it to tell "a permanent obstacle
+   * already spent this slot" from "nobody ever explained this stamp": without
+   * that it would put the stamp back and the scheduler would retry a permanent
+   * failure forever (reviewer P0, 2026-10-03).
+   */
+  runId?: string;
+}
 
 export type ScheduleRunRecord =
   | ScheduleRunStarted

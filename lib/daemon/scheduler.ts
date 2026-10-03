@@ -594,14 +594,22 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     }
   }
 
-  function skipped(task: ScheduledTask, at: Date, reason: string, slot: string): void {
+  function skipped(task: ScheduledTask, at: Date, reason: string, slot: string, runId?: string): void {
     // THE SKIP IS RECORDED ONLY ONCE THE SLOT IS ACTUALLY SPENT (2026-10-03,
     // reviewer P1): a stamp that could not be written leaves the slot OWED, and
     // the next tick will make this same decision — recording it every 20 seconds
     // would fill the ledger with copies of one judgement.
     if (!dealt(task, at, slot)) return;
     try {
-      appendScheduleRun(deps.home, { kind: "run-skipped", taskId: task.id, at: at.toISOString(), reason });
+      appendScheduleRun(deps.home, {
+        kind: "run-skipped",
+        taskId: task.id,
+        at: at.toISOString(),
+        reason,
+        // WHICH RUN CONSUMED THE SLOT, when there was one: the arming cleanup
+        // reads this to know the stamp is already explained (reviewer P0).
+        ...(runId === undefined ? {} : { runId }),
+      });
     } catch (error) {
       // A CONSUMED SLOT WITH NO LINE LOSES ITS REASON FOREVER (reviewer P1,
       // 2026-10-03): the stamp goes back so the decision is made again on the
@@ -712,6 +720,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
             taskId: task.id,
             at: at.toISOString(),
             reason: `起会话失败但窗口可能已经开了（${problem}）—— 这一槽视为已处理`,
+            runId,
           });
         } catch (error) {
           log(`调度任务 ${task.id} 的这一槽台账没写进去（这一槽仍视为已处理：窗口可能已经开了）：${error instanceof Error ? error.message : String(error)}`);
@@ -726,8 +735,9 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         if (started.permanent === true) {
           // A PERMANENT obstacle (no tmux to run at all): retrying every 20 s
           // would burn the schedule on something no retry can repair, so the slot
-          // is SPENT here — no rollback — and the ledger names the reason.
-          skipped(task, at, `起会话失败（永久障碍）：${problem}`, slot);
+          // is SPENT here — no rollback — and the ledger names the reason. The
+          // runId rides along so the arming cleanup does NOT undo that (P0).
+          skipped(task, at, `起会话失败（永久障碍）：${problem}`, slot, runId);
         } else {
           // A TEMPORARY obstacle: the stamp goes back, so this slot is still owed.
           // A rollback that itself fails costs that one slot — recorded as a skip
@@ -739,6 +749,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
                 taskId: task.id,
                 at: at.toISOString(),
                 reason: `起会话失败（${problem}），且槽戳回滚失败 —— 这一槽被消费`,
+                runId,
               });
             } catch (error) {
               log(`调度任务 ${task.id} 的这一槽丢失记录没写进台账：${error instanceof Error ? error.message : String(error)}`);
@@ -959,11 +970,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           log(`运行 ${record.runId} 的残留 checkout 没能回收：${error instanceof Error ? error.message : String(error)}`);
         }
       }
-      // AND THE SLOT IT CONSUMED GOES BACK (2026-10-03, reviewer P1): a stamp
-      // written for a run that never happened must not cost the schedule a slot —
-      // but only while the table still shows THAT stamp (a later tick has since
-      // dealt with newer slots; putting an old base back would re-run them).
-      if (record.slot !== undefined && record.previousFiredAt !== undefined) {
+      // AND THE SLOT IT CONSUMED GOES BACK — BUT ONLY WHEN NOBODY EXPLAINED THAT
+      // CONSUMPTION (2026-10-03, reviewer P0): a permanent obstacle spends the
+      // slot on purpose and records a `run-skipped` naming this run; putting the
+      // stamp back would turn that decision into an endless retry (a git checkout
+      // and two ledger lines every couple of minutes, forever). Only while the
+      // table still shows THIS stamp, too — a later tick has since dealt with
+      // newer slots, and an old base would re-run them.
+      const explained = records.some((entry) => entry.kind === "run-skipped" && entry.runId === record.runId);
+      if (!explained && record.slot !== undefined && record.previousFiredAt !== undefined) {
         const current = readSchedules(deps.home);
         const task = current.ok ? current.file.tasks.find((entry) => entry.id === record.taskId) : undefined;
         if (task !== undefined && task.lastFiredAt === record.at) {
