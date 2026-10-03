@@ -662,8 +662,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       worktree: cut.worktree.path,
       branch: cut.worktree.branch,
       base: cut.worktree.base,
-      slot,
-      previousFiredAt: task.lastFiredAt,
     };
     try {
       appendScheduleRun(deps.home, armed);
@@ -982,44 +980,23 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           log(`运行 ${record.runId} 的残留 checkout 没能回收：${error instanceof Error ? error.message : String(error)}`);
         }
       }
-      // AND THE ARMED RUN IS CLOSED OUT IN THE LEDGER (reviewer P2, 2026-10-03):
-      // without this line every later tick would re-probe this arming forever
-      // (the ledger only grows), and `everStarted` above only looks at started
-      // and settled records. `gone` is the honest outcome: an arming that never
-      // became a run had no session to conclude anything.
-      try {
-        appendScheduleRun(deps.home, {
-          kind: "run-settled",
-          runId: record.runId,
-          taskId: record.taskId,
-          at: at.toISOString(),
-          outcome: "gone",
-          verdict: null,
-          unmet: [],
-          landing: "这次运行没有对应的会话（daemon 当时可能死了）—— 隔离 checkout 已回收",
-        });
-      } catch (error) {
-        log(`运行 ${record.runId} 的收尾记录没写进台账（下次 tick 会再试）：${error instanceof Error ? error.message : String(error)}`);
-      }
-      // AND THE SLOT IT CONSUMED GOES BACK — BUT ONLY WHEN NOBODY EXPLAINED THAT
-      // CONSUMPTION (2026-10-03, reviewer P0): a permanent obstacle spends the
-      // slot on purpose and records a `run-skipped` naming this run; putting the
-      // stamp back would turn that decision into an endless retry (a git checkout
-      // and two ledger lines every couple of minutes, forever). Only while the
-      // table still shows THIS stamp, too — a later tick has since dealt with
-      // newer slots, and an old base would re-run them.
-      const explained = records.some((entry) => entry.kind === "run-skipped" && entry.runId === record.runId);
-      if (!explained && record.slot !== undefined && record.previousFiredAt !== undefined) {
-        const current = readSchedules(deps.home);
-        const task = current.ok ? current.file.tasks.find((entry) => entry.id === record.taskId) : undefined;
-        if (task !== undefined && task.lastFiredAt === record.at) {
-          try {
-            updateScheduledTask(deps.home, record.taskId, { lastFiredAt: record.previousFiredAt }, { from: "gate" });
-          } catch (error) {
-            log(`调度任务 ${record.taskId} 的槽戳没能回滚：${error instanceof Error ? error.message : String(error)}`);
-          }
-        }
-      }
+      // THE SLOT STAMP IS LEFT EXACTLY WHERE IT IS (reviewer P1/P2, 2026-10-03).
+      // This pass used to put it back, which was wrong in both directions: a
+      // PERMANENT obstacle spends the slot on purpose (and a `run-skipped` line
+      // that failed to land would have made this pass undo that, turning one
+      // failure into a retry every couple of minutes), while a TEMPORARY one has
+      // already rolled its own stamp back in the same call that saw the failure.
+      // What is left is the crash window — the daemon died between the stamp and
+      // the launch — and losing that ONE slot is the cheap side of the trade:
+      // re-running a slot is what the whole stamp exists to prevent.
+      // THE SLOT STAMP IS LEFT EXACTLY WHERE IT IS (reviewer P1/P2, 2026-10-03).
+      // This pass used to put it back, which was wrong in both directions: a
+      // PERMANENT obstacle spends the slot on purpose (so undoing that turned one
+      // failure into a retry every couple of minutes), while a TEMPORARY one has
+      // already rolled its own stamp back in the call that saw the failure. What
+      // is left is the crash window — the daemon died between the stamp and the
+      // launch — and losing that ONE slot is the cheap side of the trade:
+      // re-running a slot is what the whole stamp exists to prevent.
     }
     const repoOfRun = (run: ScheduleRunStarted): string | undefined =>
       repos.get(run.taskId) ??

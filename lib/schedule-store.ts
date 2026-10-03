@@ -279,14 +279,6 @@ export interface ScheduleRunArmed {
    * (reviewer P1, 2026-10-03).
    */
   repo?: string;
-  /**
-   * WHICH SLOT THIS ARMING CONSUMED, and the stamp it replaced: a daemon killed
-   * after the stamp but before the launch leaves a consumed slot with no run at
-   * all, and the cleanup pass puts that stamp back from these two fields
-   * (reviewer P1, 2026-10-03).
-   */
-  slot?: string;
-  previousFiredAt?: string | null;
 }
 
 export interface ScheduleRunSkipped {
