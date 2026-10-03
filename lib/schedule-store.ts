@@ -425,11 +425,27 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
  * it, everyone else waits — THERE IS NO "GIVE UP AND WRITE ANYWAY" EXIT, because
  * that exit is exactly what would make the lock decorative again (reviewer P1,
  * 2026-10-03). Waiting is safe here: the holder is a synchronous read-and-write
- * a few milliseconds long, and the only way it does not release the lock is a
- * CRASH — whose lock file stops being touched and can then be taken by whoever
- * notices, after {@link LOCK_STALE_MS}.
+ * a few milliseconds long.
+ *
+ * AND A HOLDER IS ONLY DEPOSED WHEN ITS PROCESS IS GONE (reviewer P1,
+ * 2026-10-03): the file carries `<pid>-<random>`, and a waiter takes it over only
+ * when that pid no longer exists. Judging staleness by TIME alone meant a holder
+ * that was merely SUSPENDED (a laptop that slept, a SIGSTOP) could be preempted
+ * and then go on writing the table beside its successor. The mtime fallback is
+ * there for pid REUSE (a dead writer whose number was given to somebody else):
+ * only after {@link LOCK_ABANDONED_MS} of silence, which no live writer produces.
  */
-const LOCK_STALE_MS = 10_000;
+const LOCK_ABANDONED_MS = 10 * 60_000;
+
+/** Is this process still around? EPERM means it exists but is not ours. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as { code?: string }).code === "EPERM";
+  }
+}
 
 function withTableLock<T>(home: string, fn: () => T): T {
   const lock = `${schedulesPath(home)}.lock`;
@@ -459,7 +475,10 @@ function withTableLock<T>(home: string, fn: () => T): T {
     } catch (error) {
       if ((error as { code?: string }).code !== "EEXIST") throw error;
       try {
-        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+        const raw = readFileSync(lock, "utf8").trim();
+        const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
+        const abandonedByTime = Date.now() - statSync(lock).mtimeMs > LOCK_ABANDONED_MS;
+        if (!Number.isFinite(owner) || !pidAlive(owner) || abandonedByTime) {
           rmSync(lock, { force: true });
           continue;
         }
