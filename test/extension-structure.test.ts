@@ -215,6 +215,12 @@ const CONSENT_TOOLS = new Set(["request_scope_limit", "request_sensitive_edit", 
  */
 const GOAL_TOOLS_SRC = readFileSync(join(ROOT, "lib", "goal-tools.ts"), "utf8");
 const GOAL_TOOLS = new Set(["propose_loop_goal"]);
+/**
+ * The APPROVAL LADDER every family reads its box through (2026-10-02,
+ * quality round: it was a third copy here, so the rule "the answer is read
+ * through the one parser" follows the code into this module).
+ */
+const APPROVAL_DIALOG_SRC = readFileSync(join(ROOT, "lib", "approval-dialog.ts"), "utf8");
 const GOAL_PREREVIEW_SRC = readFileSync(join(ROOT, "lib", "goal-prereview-tools.ts"), "utf8");
 /**
  * The COMMAND layer moved the same way, split by the same rule: the commands
@@ -4052,8 +4058,8 @@ test("propose_loop_goal: the USER approves in an extension dialog, and the EXTEN
   // file, and the sidecar records the hash of exactly that text. The syscall
   // itself is the injected seam (the extension wires it to writeFileSync).
   assert.match(body, /writeGoalFile\(goalPath/);
-  assert.match(GOAL_WIRING(), /writeFileSync\(path, text, "utf8"\)/,
-    "…and the wiring really writes the file the module was handed");
+  assert.match(GOAL_WIRING(), /writeGoalFile: writeSessionGoalFile/,
+    "…and the wiring hands the module the ONE writer that really writes the file");
   assert.match(body, /(?:state|goalSt)\.loopGoal = \{\s*\n\s+hash: goalTextHash\(goalText\),/);
   // …and the record carries the station the user was shown in that same dialog
   // (2026-09-06), taken from the variable both surfaces printed — never
@@ -4074,8 +4080,9 @@ test("propose_loop_goal: a rejection may carry a user REASON — typed into the 
   // dialog, and that text is the objection the agent renegotiates against.
   const body = toolBodyOf("propose_loop_goal");
   assert.match(body, /declineRow: REVISE_ROW/, "the approval dialog offers the revise row");
-  assert.match(body, /parseChoice\(outcome\.answer, spec\)/, "the answer is read through the one parser");
-  assert.match(body, /pick\.kind === "declined" && pick\.reason/, "the typed reason becomes the rejection reason");
+  assert.match(body, /awaitApproval\(\{/, "the answer is read through the shared approval ladder");
+  assert.match(APPROVAL_DIALOG_SRC, /parseChoice\(outcome\.answer, ask\.spec\)/, "…which reads it through the one parser");
+  assert.match(APPROVAL_DIALOG_SRC, /pick\.kind === "declined" && pick\.reason/, "the typed reason becomes the rejection reason");
   assert.match(body, /did NOT approve this goal\."/, "rejection path must exist");
   assert.match(body, /Reason: \$\{reason\}/, "rejection reason must reach the agent");
   assert.doesNotMatch(body, /dialogKind: "input"/, "no second box for the reason any more");
@@ -6329,9 +6336,11 @@ test("ONE gate session per worktree: refuse, hold, release — and only ONE live
   const addAt = checkpoint.indexOf(ADD_ALL);
   assert.ok(ckRefusalAt > 0 && ckRefusalAt < addAt,
     "a refused session must be stopped BEFORE the gate's own commit sweeps the holder's work");
-  const goalWrite = codeOnly(windowOf("writeGoalFile: (path, text) => {", /\n    \},/, "goal file writer"));
+  const goalWrite = codeOnly(windowOf("const writeSessionGoalFile = (path: string, text: string): void => {", /\n  \};/, "goal file writer"));
   assert.match(goalWrite, /state\.exclusivityRefusal/,
     "…and before overwriting the holder's approved goal file");
+  assert.match(goalWrite, /writeFileSync\(path, text, "utf8"\)/,
+    "…and it is the writer that really writes the file");
 
   // The refusal must be able to LIFT on its own: its own text promises that
   // closing the other session is enough, so a re-check has to exist.

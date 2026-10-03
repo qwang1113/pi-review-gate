@@ -53,7 +53,7 @@ import { sessionInboxPath, sessionNameProblem, sessionRegistryRoot } from "../se
 import { STATION_CAP_ENV } from "../repo-pr-policy.ts";
 import type { DeliveryStation } from "../delivery-station.ts";
 import { GATE_MODE_ENV } from "../task-mode.ts";
-import { daemonHome, DAEMON_HOME_ENV } from "./paths.ts";
+import { daemonHome, DAEMON_HOME_ENV, userHome } from "./paths.ts";
 import { ensureDaemonIdentity } from "./state.ts";
 import type { SessionObserver } from "./sessions.ts";
 
@@ -80,7 +80,18 @@ export interface SendMessageOutcome {
 }
 
 export interface ControlDeps {
+  /** The daemon's OWN home: its identity, its tmux scope, its questions. */
   home: string;
+  /**
+   * THE USER HOME the GATE writes the `@名字` registry under
+   * (`lib/daemon/paths.ts` `userHome()`), NOT the daemon's home — a session
+   * launched with `RG_DAEMON_HOME` set still registers its name under `$HOME`,
+   * because `sessionRegistryRoot()` reads `homedir()` and knows nothing about
+   * the daemon. Read from the daemon's own home, an inbox was written next to a
+   * registration nobody has, and the recipient never saw the message.
+   * Defaults to `userHome()`.
+   */
+  userHome?: string;
   runTmux: TmuxRunner;
   now?: () => number;
 }
@@ -102,7 +113,7 @@ export function sendSessionMessage(
   if (nameProblem !== undefined) return { ok: false, problem: `收件人名字不合法：${nameProblem}` };
   if (body.trim() === "") return { ok: false, problem: "消息正文是空的" };
 
-  const root = sessionRegistryRoot(deps.home);
+  const root = sessionRegistryRoot(deps.userHome ?? userHome());
   // ONE probe, closed over: the server identity cannot change mid-call, and the
   // registry asks per entry.
   const server = currentTmuxServer(deps.runTmux);
@@ -165,11 +176,53 @@ export interface LaunchTaskInput {
   mode?: string;
   station?: string;
   name?: string;
+  /**
+   * The directory the session WORKS IN, when it is not the repo itself.
+   *
+   * A scheduled run passes its own isolated checkout here
+   * (lib/schedule-worktree.ts, 2026-10-03): `repo` stays the anchor the
+   * daemon's scope session is derived from, while the run's `cwd` — and
+   * therefore everything the gate binds to — is the copy. Omitted ⇒ the repo.
+   */
+  workdir?: string;
+  /**
+   * THE SESSION ID, WHEN THE CALLER HAS ALREADY DECIDED IT (2026-10-03).
+   *
+   * The scheduler writes the run's `run-started` line BEFORE it launches, so
+   * the session can adopt its contract the moment it starts — adoption asks the
+   * ledger whether this session IS this run, and writing that line afterwards
+   * left a real window (pi's cold start is seconds, the write is a line) in
+   * which a run could start with no contract at all. Omitted ⇒ a fresh uuid,
+   * which is what every other caller wants.
+   */
+  sessionId?: string;
+  /**
+   * Extra environment for the new session.
+   *
+   * The scheduler's run identity (`RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`) rides
+   * this: it is the one channel a session's own prompt cannot forge, and the
+   * two keys this module owns (`RG_GATE_MODE`, `RG_DAEMON_HOME`) are written
+   * AFTER it, so a caller cannot claim to be a mode or a home it is not.
+   */
+  env?: Record<string, string>;
 }
 
 export interface LaunchTaskOutcome {
   ok: boolean;
   problem?: string;
+  /**
+   * `true` when NOTHING a retry could do will change the answer — the tmux the
+   * daemon starts sessions with cannot run at all. The scheduler consumes the
+   * slot for these and keeps it for every other failure (a server that is
+   * coming up, a directory that is mid-rebuild).
+   */
+  permanent?: boolean;
+  /**
+   * A WINDOW MAY HAVE BEEN OPENED (the command ran, its coordinates could not be
+   * read): the caller keeps the checkout instead of recycling it — the session
+   * might be working in there right now (2026-10-03, reviewer P1).
+   */
+  mayHaveStarted?: boolean;
   sessionId?: string;
   /** The pi session id the window runs with — deterministic, so it can be resumed. */
   scopeSession?: string;
@@ -219,7 +272,11 @@ export function daemonTmuxScope(opts: {
     } catch { /* first launch */ }
     try {
       mkdirSync(daemonHome(opts.home), { recursive: true });
-      writeFileAtomic(repoPath, `${opts.anchorRepo}\n`);
+      // 0600 AT CREATION, like every other file the daemon keeps here: the
+      // contract's §11 file table says so for both of these
+      // (docs/daemon/api.md), and a mode is the one thing a later reader can
+      // check — not leaving it to the process umask.
+      writeFileAtomic(repoPath, `${opts.anchorRepo}\n`, { mode: 0o600 });
     } catch { /* best effort: a missing anchor only costs a second scope session */ }
     return opts.anchorRepo;
   };
@@ -232,7 +289,7 @@ export function daemonTmuxScope(opts: {
     write: (record) => {
       try {
         mkdirSync(daemonHome(opts.home), { recursive: true });
-        writeFileAtomic(recordPath, `${JSON.stringify(record, null, 2)}\n`);
+        writeFileAtomic(recordPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
       } catch { /* the marker in tmux is what makes reuse work; the record is a shortcut */ }
     },
     now: () => new Date().toISOString(),
@@ -271,7 +328,7 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
     const live = liveSessionNames({
       runTmux: deps.runTmux,
       now: deps.now ?? ((): number => Date.now()),
-      root: sessionRegistryRoot(deps.home),
+      root: sessionRegistryRoot(deps.userHome ?? userHome()),
       tmuxServer: () => server,
     });
     if (live.live.some((entry) => entry.name === name) || live.unknown.some((entry) => entry.name === name)) {
@@ -280,8 +337,10 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
   }
 
   const daemonId = ensureDaemonIdentity(deps.home);
+  // WHERE THE SESSION WORKS — the run's own checkout when it was given one.
+  const workdir = (input.workdir ?? repo).trim() === "" ? repo : (input.workdir ?? repo).trim();
   const scope = daemonTmuxScope({ home: deps.home, identity: daemonId, runTmux: deps.runTmux, anchorRepo: repo });
-  const sessionId = randomUUID();
+  const sessionId = (input.sessionId ?? "").trim() === "" ? randomUUID() : (input.sessionId ?? "").trim();
   const opening = [taskText];
   if (name !== "") {
     opening.push("", `本会话的名字定为 \`${name}\`：请先调用 name_session({name:"${name}"}) 把它登记上，再开始干活。`);
@@ -306,15 +365,22 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
   // this daemon looks under the override: the question would be invisible in
   // the panel, and the session's own notification-suppression probe would look
   // in the wrong home too. The daemon knows where it lives - it says so.
-  const env: Record<string, string> = { [GATE_MODE_ENV]: mode, [DAEMON_HOME_ENV]: deps.home };
+  const env: Record<string, string> = { ...input.env, [GATE_MODE_ENV]: mode, [DAEMON_HOME_ENV]: deps.home };
   if (station !== "") env[STATION_CAP_ENV] = station;
   const opened = openScopeWindow(run, scope, {
-    cwd: repo,
+    cwd: workdir,
     env,
     command,
     ...(name === "" ? {} : { windowName: safeWindowName(name) }),
   });
-  if (!opened.ok) return { ok: false, problem: opened.error };
+  if (!opened.ok) {
+    return {
+      ok: false,
+      problem: opened.error,
+      ...(opened.permanent === true ? { permanent: true } : {}),
+      ...(opened.mayHaveStarted === true ? { mayHaveStarted: true } : {}),
+    };
+  }
   return {
     ok: true,
     sessionId,
@@ -323,6 +389,59 @@ export function launchTask(deps: ControlDeps, input: LaunchTaskInput): LaunchTas
     paneId: opened.paneId,
     ...(name === "" ? {} : { windowName: safeWindowName(name) }),
   };
+}
+
+/**
+ * ONE WINDOW, ADDRESSED — which session it must sit in, and which window it is.
+ *
+ * `repo` is only the anchor the daemon's scope name is derived from; the target
+ * is not trusted, it is CHECKED against that derivation (below).
+ */
+export interface RunWindowTarget {
+  repo: string;
+  session: string;
+  window: string;
+}
+
+/**
+ * CLOSE A RUN'S WINDOW — the daemon's own window, and only that.
+ *
+ * A run is an ORDINARY loop session, and an ordinary session holds its worktree
+ * until its PROCESS exits: the presence heartbeat is released on session
+ * shutdown, NOT on `declare_done` (lib/session-lifecycle.ts releases it in
+ * `onSessionShutdown`). The daemon starts these sessions, so the daemon is what
+ * must reclaim them — a settled run whose window stays open keeps the checkout
+ * "occupied" forever, and every later run of that repo would be skipped
+ * (quality round P1, 2026-10-02).
+ *
+ * THE TARGET ARRIVES FROM ONE OF TWO PLACES, and both are needed:
+ *
+ *   - the OBSERVER's pane coordinates, for a session that is in the listing;
+ *   - the LAUNCH RECEIPT (`launchTask` returns `scopeSession` + `windowId`, and
+ *     the scheduler records them with the run), for a session whose pane lost
+ *     `@rg_sid` — the observer has no coordinates for it at all, and without
+ *     this second address that window could not be reclaimed while its process
+ *     lived, so the checkout stayed occupied until the user closed it by hand.
+ *
+ * AND IT IS CHECKED, NOT TRUSTED: it must name the daemon's OWN scope session
+ * for that repo (`ownSessionName` of the scope the daemon derives), which is
+ * also the only session the safety door lets this call address. Anything else
+ * is left alone — the user's own windows are not the daemon's to close.
+ */
+export function closeRunWindowAt(deps: ControlDeps, target: RunWindowTarget): boolean {
+  const scope = daemonTmuxScope({
+    home: deps.home,
+    identity: ensureDaemonIdentity(deps.home),
+    runTmux: deps.runTmux,
+    anchorRepo: target.repo,
+  });
+  const scopeName = ownSessionName(scope);
+  if (scopeName === undefined || target.session !== scopeName) return false;
+  const run: TmuxRunner = (argv, env, extra) =>
+    deps.runTmux(argv, env, [scopeName, ...(extra ?? [])]);
+  // `-t <session>:<@window>`: the window ID (not its index, which moves), and
+  // the session half is what the safety door compares against the declaration.
+  return run(["kill-window", "-t", `${scopeName}:${target.window}`]).ok;
 }
 
 // ---------------------------------------------------------------------------

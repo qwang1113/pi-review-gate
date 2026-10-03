@@ -24,6 +24,26 @@ export function clockTime(iso: string): string {
   return at.toLocaleTimeString("zh-CN", { hour12: false });
 }
 
+/**
+ * "10/03 09:00" — a concrete clock reading, for "when does this run next".
+ *
+ * `relativeTime` answers "how long ago"; a scheduled slot needs the actual
+ * wall-clock moment, because "in 2 hours" is not something a user can check
+ * against their own clock.
+ */
+export function dateTime(iso: string | null | undefined): string {
+  if (iso === null || iso === undefined || iso === "") return "—";
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "—";
+  return at.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
 /** "/Users/me/x/y" → "~/x/y". Only a display affordance — the daemon keeps absolute paths. */
 export function tildePath(path: string | null | undefined): string {
   if (typeof path !== "string") return "—";

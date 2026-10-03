@@ -13,7 +13,7 @@
 - 它观测本机**所有** pi 会话（三个数据源见 §5），并对外提供：会话观测、发消息、发起任务、
   配置读写、待答问题、通知去重、静态面板。
 
-启动方式：`pi-gate daemon start`（`npm run daemon:start` 等价）。CLI 见 §9。
+启动方式：`pi-gate daemon start`（`npm run daemon:start` 等价）。CLI 见 §12。
 
 ---
 
@@ -38,7 +38,7 @@ token 由 daemon 首次启动时生成，写在 **`~/.pi/agent/rg-daemon.token`�
 | --- | --- | --- |
 | 缺 token / token 错 | `401` | `{"error":"缺少或错误的 token —— Authorization: Bearer <token>（SSE 可用 ?token=）"}` |
 | 未知 endpoint | `404` | `{"error":"没有这个 endpoint：…"}` |
-| 方法不对 | `405` | `{"error":"<METHOD> 不被这个 endpoint 支持"}` |
+| 方法不对 | `405` | `{"error":"<METHOD> 不被这个 endpoint 支持"}`（SSE 那一条是 `{"error":"SSE 只支持 GET"}`） |
 | 请求体不是合法 JSON | `400` | `{"error":"请求体不是合法 JSON"}` |
 | 请求体超过 512 KiB | `400` | `{"error":"请求体超过 524288 字节"}` |
 
@@ -104,6 +104,11 @@ CLI `pi-gate daemon status` 打印同一判定的结果与理由（在线返回�
 | GET | `/api/notifications` | 通知历史（`?since=`、`?limit=`） |
 | POST | `/api/notifications/claim` | 通知去重声明 |
 | GET | `/api/events` | SSE 事件流（`?sessionId=`、`?replay=`） |
+| GET | `/api/schedules` | 定时任务表，含派生字段（§13） |
+| POST | `/api/schedules/author` | 起一个 authoring 会话谈契约（本 endpoint 不写表） |
+| PUT | `/api/schedules/:id` | 面板只改 `cron` / `enabled` / `name` |
+| DELETE | `/api/schedules/:id` | 删除一个定时任务，返回被删的那一条 |
+| GET | `/api/schedules/:id/runs` | 该任务的运行台账（`?limit=`） |
 
 ---
 
@@ -117,6 +122,12 @@ CLI `pi-gate daemon status` 打印同一判定的结果与理由（在线返回�
 | `~/.pi/agent/rg-sessions/*.json` | 名字、repo、cwd、模式、pid、心跳（`lib/session-registry.ts` 的格式与存活判定） |
 | `tmux list-panes -a` 的 `@rg_*` 用户选项 | 活着的 pane、`kind`、状态词、`@rg_session_name` |
 
+**前两个源是别人的文件，读的是别人写的那个根**：`RG_DAEMON_HOME` 只搬 daemon 自己的东西（§11）。
+pi 的转写跟着 pi 自己的 agent 目录（`PI_CODING_AGENT_DIR` / `TAU_CODING_AGENT_DIR` 或 `$HOME/.pi/agent`，
+规则出自 `lib/session-dir.ts` 的 `piSessionsRoot`），`rg-sessions` 登记跟着 `sessionRegistryRoot()` 的 `$HOME`
+—— 观测侧（与发消息时的名字寻址）读的就是这两个根，即 `lib/daemon/paths.ts` 的 `userHome()`。
+待答问题（§7）不一样：它的写者是门禁会话，从 `RG_DAEMON_HOME` 拿到 daemon 的 home，所以那个两侧都读 daemon home。
+
 **状态词表复用 `CHILD_STATES`**（`lib/orchestrator-child-state.ts`）：
 `working | waiting-input | waiting-judge | done | idle | mode-changed | dead | stalled`。
 
@@ -125,7 +136,11 @@ CLI `pi-gate daemon status` 打印同一判定的结果与理由（在线返回�
 1. pane 上的 `@rg_state` 且 `@rg_state_at` 距今 < 90 s（`PANE_STATE_STALE_S`）⇒ 该词，`stateSource: "pane"`；
 2. pane 上有状态词但已过期 ⇒ `stalled`，`stateSource: "pane"`；
 3. 没有 pane 状态词 ⇒ 用注册表里的 `state`（心跳新鲜时），`stateSource: "registry"`；
-4. 没有注册表信息 ⇒ 转写文件 120 s 内有更新为 `working`，否则 `idle`，`stateSource: "transcript"`。
+4. 没有注册表信息 ⇒ 转写文件 120 s（`TRANSCRIPT_ACTIVE_MS`）内有更新为 `working`，否则 `idle`，`stateSource: "transcript"`。
+
+**只出现在「最近跑过」里的会话**（没有 pane、没有名字，靠转写 mtime 进列表）用的是同一条 120 s 判据，
+只是停下之后那个词是 `dead` 而不是 `idle`：`working` / `dead` 都由**文件自己的新旧**决定 ——
+正在被写的转写背后一定有一个活着的写者，把它读成 `dead` 会让调度器把还在跑的运行结算掉（§13.7）。
 
 **tmux 读不到是「信息缺失」，不是「没有会话」**：`tmuxReadable: false` 出现在列表里，
 pane 判定整体跳过，注册表与转写照常上报。
@@ -160,7 +175,8 @@ pane 判定整体跳过，注册表与转写照常上报。
 | `pid` | number \| null | 注册表里的 pid |
 | `transcript` | string \| null | 转写文件绝对路径 |
 | `lastActivityAt` | string \| null | 转写 mtime 与心跳取较晚者（ISO） |
-| `rounds` | `{sent,recorded,lastVerdict}` | 轮次：`sent` 读会话写下的 `sentReviewRounds`（本轮**发出**的）、`recorded` 是已落库条数、`lastVerdict` 是最后一条裁决 |
+| `rounds` | `{sent,recorded,lastVerdict}` | 轮次：`sent` 读会话写下的 `sentReviewRounds`（本轮**发出**的）、`recorded` 是已落库条数、`lastVerdict` 是门禁**仍然站着**的结论（`state.review.verdict`；`PENDING` 不算结论，读作 `null`） |
+| `completedAt` | string \| null | 会话自己记下的完成时刻（`state.completion.at`，即 `declare_done` 被接受）；`null` = 没完成过 |
 | `gateStateFound` | boolean | 转写尾部是否读到了门禁 state。**false ⇒ `rounds`/`unmet` 是占位值，不是结论**（面板必须显示「未知」而不是「无未满足项」） |
 | `unmet` | string[] | 该会话门禁自己算的未满足项（`unmetRequirements`，基于会话写进转写的 state） |
 | `registeredAt` / `heartbeatAt` | string \| null | 注册时间 / 最近心跳（ISO） |
@@ -235,7 +251,7 @@ peer 消息」，要回答用户就去问用户（`ask_user`）或在会话里�
 （`mode` 默认 `loop`，`station`/`name` 可省。）
 
 成功 `200`：`{ "ok": true, "sessionId": "<pi session id>", "scopeSession": "rg-…",
-"windowId": "@3", "paneId": "%9", "windowName": "kebab-name" }`
+"windowId": "@3", "paneId": "%9" }` —— 请求带了 `name` 时**多一个** `windowName`；没带 `name` 时这个键不存在
 
 实现：在自己**专属的 tmux session**（`rg-<slug>-daemon-<id尾>`，复用
 `lib/session-tmux-scope.ts` 的派生与归属标记）里 `tmux new-window` 起交互式 `pi`：
@@ -246,7 +262,7 @@ pi --session-id <uuid> [--name <name>] -- <任务描述> [+ 起名提示]
 
 环境变量：`RG_GATE_MODE=<mode>`、`RG_STATION_CAP=<station>`（交付站点上限）。
 
-**`mode` 只对 `loop` / `orchestrator` 真的生效（2026-10-01 实测）**：`RG_GATE_MODE` 是**spawner 交底**的通道，门禁只接受更**严**的起点（`lib/task-mode.ts` 的 `requestedModeFromEnv` 只认 enforced 模式；`explore` 只对一个 worker pane 生效）。所以用 `mode: "normal"` 起出来的会话**不是** normal：它起步时是 undecided（行为等于 loop，fail-closed），要降级得由会话里的 agent 自己走确认框问用户（或用户 `/gate-mode`）。daemon 不自行加限制，也不假称已经生效；面板对这两个值如实标注。
+**`mode` 只对 `loop` / `orchestrator` 真的生效（2026-10-01 实测）**：`RG_GATE_MODE` 是**spawner 交底**的通道，门禁只接受更**严**的起点（`lib/task-mode.ts` 的 `requestedModeFromEnv` 只把变量归一成四种模式之一，「非 enforced 不生效」的过滤在会话起步处 `lib/session-lifecycle.ts`；`explore` 只对一个 worker pane 生效）。所以用 `mode: "normal"` 起出来的会话**不是** normal：它起步时是 undecided（行为等于 loop，fail-closed），要降级得由会话里的 agent 自己走确认框问用户（或用户 `/gate-mode`）。daemon 不自行加限制，也不假称已经生效；面板对这两个值如实标注。
 
 拒绝（`400`，附具体原因）：repo 不是存在的目录 / 任务描述为空 / mode 或 station 不认识 /
 名字不合法（kebab-case，2–32）/ 名字已被活会话或生死不明者占用 / tmux 读不到。
@@ -365,11 +381,11 @@ daemon 据此不再列出它。
 | `schema` | ✅ | 必须是 `1` |
 | `requestId` / `sessionId` | ✅ | 与路径一致，且能定位到一次询问 |
 | `sessionName` | ✖ | 展示用；没有名字时 `null` |
-| `topic` | ✖ | 默认 `other`；与门禁渠道的 topic 词表一致（`ask-user`/`goal-approval`/…） |
+| `topic` | ✖ | 默认 `other`；生产方知道时给门禁自己的 topic 词（如 `ask-user`）。**不是每个门禁对话框都带**：需求反述与 goal 批准这两个目前落在默认值 `other` 上，消费方别拿它区分对话框 |
 | `title` | ✅ | 非空；对话框正文 |
 | `options` | ✖ | 选项文本（**不带** `A. ` 前缀；门禁自己渲染编号）。空数组 = 自由文本题 |
 | `multiple` | ✖ | 默认 `false`；`true` 时是复选框题 |
-| `recommended` | ✅(单选) | 单选必填且必须**逐字**等于 `options` 之一；多选可省 |
+| `recommended` | ✅(单选) | 单选**且 `options` 非空**时必填，且必须**逐字**等于 `options` 之一；多选可省（`options: []` 是自由文本题，没有可推荐的项） |
 | `defaultChecked` | ✖ | 多选默认勾选项（必须是 `options` 的子集） |
 | `payload` / `payloadRef` | ✖ | 长正文；超长时用 `payloadRef` 指向旁文件 |
 | `batchId`/`batchIndex`/`batchTotal` | ✖ | 一次采访的分组信息（与渠道的批量字段同义） |
@@ -474,12 +490,14 @@ daemon 在会话状态**发生迁移**时推出 `notification` 事件（不是�
 }
 ```
 
-`title`/`body`/`key` 由门禁自己的 `buildUserNotifyMessage` + `notifyKey` 生成 ——
-**与终端侧 `terminal-notifier` 对同一条事实算出的 key 完全相同**（这正是去重能跨两个发送方生效的原因）。
+`title`/`body`/`key` 由门禁自己的 `buildUserNotifyMessage` + `notifyKey` 生成（拼法两边同源），但
+**两边对同一条事实算出的 key 并不相同** —— 正文那一句一边是「@名字 正在等你回答。」、一边是「对话框标题 · 正文」。
+因此**跨发送方不去重**：两个发送方不会各发一条，靠的是 §8.1 的在场选举（app 在跑且发得出来时终端侧整体抑制）；
+这份台账只管**app 自己**的重复（终端侧用会话 sidecar 里自己的历史）。
 
 ### 8.3 去重存储
 
-`~/.pi/agent/rg-daemon/notifications/`（0600）：一目录，每 key 一个 claim 文件 + 一份追加式历史（形状见下）。
+`~/.pi/agent/rg-daemon/notifications/`（0700 —— 目录要 x 位才进得去；里面的文件才是 0600）：一目录，每 key 一个 claim 文件 + 一份追加式历史（形状见下）。
 去重窗口与频率上限**用门禁自己的规则**：`decideNotify`（`lib/user-notify.ts`）——本模块只把那条规则要读的 history
 现读出来（该 key 上次 claim 的时间 + 速率窗口内最近几次发送），不重写判定；`NOTIFY_DEDUP_MS` = 10 分钟、
 `NOTIFY_RATE_MAX` = 5 / 5 分钟。历史保留 **24 小时**（按龄清理，没有条数上限）。
@@ -513,8 +531,9 @@ claims/<sha256(key) 前 32 位>.json   每个 key 一个文件：谁声明的、
 history.jsonl                        只追加：每个已发的 claim 一行
 ```
 
-每个 key 的决定是**那个文件自己的 `link(2)`**（原子且互斥，不需要锁）；历史是追加写，两个进程的
-claim 不会互相覆盖。去重窗口与频率上限仍用门禁自己的 `NOTIFY_DEDUP_MS` / `NOTIFY_RATE_MAX`。
+每个 key 的决定就是**那个文件**：该 key 还没有记录时用 `link(2)` 建（原子且互斥，不需要锁），
+已有记录时用 `rename(2)` **原子替换**（去重窗口过后这条事实必须还能发出去，而 `link` 会永远撞在自己的旧文件上）；
+历史是追加写，两个进程的 claim 不会互相覆盖。去重窗口与频率上限仍用门禁自己的 `NOTIFY_DEDUP_MS` / `NOTIFY_RATE_MAX`。
 24 小时以前的 claim 与速率窗口以外的历史行在每次 claim 时清理。
 
 #### `GET /api/notifications?since=<ISO>&limit=<n>`
@@ -595,10 +614,13 @@ data: <JSON>
 | `~/.pi/agent/rg-daemon/questions/…` | — | 待答问题协议（§7） |
 | `~/.pi/agent/rg-daemon/notifications/claims/<hash>.json` | 0600 | 每个通知 key 的 claim 记录（§8.3） |
 | `~/.pi/agent/rg-daemon/notifications/history.jsonl` | 0600 | 速率限制用的追加式历史（§8.3） |
+| `~/.pi/agent/rg-daemon/schedules.json` | 0600 | 定时任务表（§13） |
+| `~/.pi/agent/rg-daemon/schedule-runs.jsonl` | 0600 | 定时运行的台账（§13） |
 | `~/.pi/agent/rg-daemon/start.lock` | 0600 | `daemon start` 期间持有、结束即删；超过 30 s 可被接管（§12） |
 
 默认端口 **4597**（`--port` 可改）。`RG_DAEMON_HOME` 可覆盖 agent home（默认 `$HOME`），
-后台子进程靠它继承同一个 home。
+后台子进程靠它继承同一个 home。**它只搬 daemon 自己名下这些文件**：pi 的转写与
+`rg-sessions` 登记属于别的进程，按 `$HOME` 读（§5.1），观测侧不会跟着覆盖走。
 
 ## 12. CLI
 
@@ -624,3 +646,153 @@ pi-gate daemon uninstall
   两者都只在 macOS 上有意义，其他平台会直接拒绝并说明。
 - `run` 是 launchd 与 `start` 共同用的前台进程；它**绑端口前先探测**：已有一份在答就以 0 退出，
   而不是报「地址被占用」以 1 退出 —— 后者在 launchd 的 `SuccessfulExit=false` 下会变成每 30 s 重起一次的失败循环。
+
+---
+
+## 13. 定时任务（scheduled tasks）
+
+调度器是 daemon 自己的一部分（`lib/daemon/scheduler.ts`，纯判定 + IO 在 seam 后面）：
+每 **20 s** 一次 tick，到点就起一个**普通 loop 会话**去干活，并把这一次运行记进台账。
+契约（需求反述 + goal 批准）**只由用户在与 authoring 会话的对话框里**定，
+面板永远不直接写契约 —— 那是 `schedule_task`（门禁工具）存在的理由。
+
+**两个文件，两种真相**（§11 也列了）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `~/.pi/agent/rg-daemon/schedules.json` | `{schema, version, tasks[]}`：**该跑什么**。原子写、0600、每次写入 version +1 |
+| `~/.pi/agent/rg-daemon/schedule-runs.jsonl` | 追加式台账：**实际跑过什么**。0600，只追加、没人重写（写入方只有 daemon 的调度 tick；会话与面板只读它）；末尾的半行会被跳过 |
+
+### 13.1 `ScheduledTask`（`GET /api/schedules` 里每个任务的字段）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | string | `sch-<8 位 hex>`，由 store 生成；**写入端点寻址用的就是它** |
+| `name` | string | kebab-case 2–32；与 `id` **共用一个命名空间**（重名 = 歧义） |
+| `repo` | string | 绝对路径，创建时必须存在 |
+| `cron` | string | 5 段 `分 时 日 月 周`，本地时间 |
+| `requirement` | string | 用户写的那句需求（原始描述） |
+| `contract` | object | `{restatement:{text,hash,station,at}, goal:{text,hash,at}, approvedAt}`：**用户实际批准过的东西**，两段文本各绑自己的 hash |
+| `enabled` | boolean | 关了就不触发 |
+| `createdAt` / `updatedAt` | string | ISO |
+| `lastFiredAt` | string \| null | 调度器**上一次处理这个任务**的时间（跑了、因永久障碍跳过、起不来都算）—— 下一个时间点从这里数。**暂时起不来的那一次不写它**：那一槽留着，下次 tick 再试（§13.7） |
+| `nextRunAt` | string \| null | **派生**：这个任务**按时间表下一个要处理的** cron 时刻 —— 以 `lastFiredAt`（从未处理过则以 `createdAt`）为基准的下一个。**它可能落在过去**（2026-10-03 起）：到点了但还没跑成（daemon 当时不在跑，或本任务自己还有一次运行没结算）时，这里就是**那一槽**，daemon 的下一次 tick 会跑它 —— 「迟到」不再是跳过的理由，也不再有 10 分钟的宽限窗口。**这是按时间表算的，不看「这个任务是不是还有一次运行没结算」**（§13.6）：那种情况下这个槽会被推迟，原因写在 `GET /api/schedules/:id/runs` 里 —— 最后一条 `run-started` 没有对应的 `run-settled`。`enabled:false`、cron 非法、或 `createdAt` 读不出时间时是 `null` |
+| `describe` | string | **派生**：`describeCron` 的一行人话，如 `每天 09:00` |
+| `lastRuns` | array | **派生**：该任务最近 **5** 条**结果**（`run-settled` / `run-skipped`，旧→新；`run-armed` / `run-started` / `run-window` 都不是结果，不列） |
+
+### 13.2 `GET /api/schedules`
+
+`200`：`{ schema: 1, now, tasks: [{ …ScheduledTask, nextRunAt, describe, lastRuns }] }`。
+
+`500`：调度表读不了（损坏、权限、形状不对）。**不当作「没有任务」** —— 那会让一次人工修复
+变成一次静默停摆（`readSchedules` 是同一条规则；给「有哪些任务」用的 `listScheduledTasks` /
+`findScheduledTask` 是另一回事 —— 它们把读不出来的表折成空表/未命中，调用方各自 fail-closed）。
+
+### 13.3 `POST /api/schedules/author`
+
+请求：`{ "action": "create" | "update", "id"?, "name", "repo", "cron", "requirement" }`
+
+成功 `200`：`{ ok: true, sessionId, scopeSession, windowId, paneId }`（§5.7 那四个字段；author 不带 `name`，
+所以不会有 `windowName`）。
+
+**这个 endpoint 自己不写调度表**：它按 §5.7 的同一套 tmux 机制起一个 loop 会话，首条消息要求它用
+`schedule_task({action:"create", …})` 把契约谈定 —— 那个工具会先弹需求反述、跑 goal 审计、
+再请用户批准 goal，批准之后才把契约写进 `schedules.json`。**契约只在用户批准之后才存在**，
+所以 `create` 与 `update` 走的是同一条路。
+
+`400`：`action` 不是 `create`/`update`；`name` 不是 kebab-case 2–32、或（`create` 时）已被占用；
+`repo` 不是存在的绝对目录；`cron` 解析失败；`requirement` 为空；`update` 缺 `id`。
+`404`：`update` 的 `id` 不存在（`id` 精确匹配，不按 `name` 别名）。
+
+### 13.4 `PUT /api/schedules/:id`
+
+请求：**只接受 `cron` / `enabled` / `name`** 的任意子集。成功 `200`：`{ ok: true, task, version }`。
+
+- body 里出现 `requirement` / `repo` / `contract` ⇒ **`400`**，文案指向 `POST /api/schedules/author`
+  （这一条由 store 的 `applyScheduleEdit({from:"panel"})` 判）。
+- 其它字段（含 `lastFiredAt`）⇒ **`400`**，文案列出面板能改的三个字段。这份白名单**只有一处**：
+  `lib/schedule-store.ts` 导出的 `PANEL_EDITABLE_FIELDS`（name / cron / enabled）—— `PUT` 把整个 body
+  交给 store 的 `applyScheduleEdit({ from: "panel" })` 判（gate 仍可盖 `lastFiredAt` 的槽位戳记）。
+- 未知 `id` ⇒ `404`；值不合法（cron 解析失败、name 形状或重名）⇒ `400`。
+- **`version` 冲突 ⇒ `400`**（「version 不匹配……有人同时改过，请重读」）：这次写入带走 handler 刚读到的 `version`（乐观锁）。PUT handler 从读到写是同步的，所以真正的窗口只有一个 —— **另一个进程**（会话里的 `schedule_task`、或另一个 daemon）在中间写过：那时 store 拒绝这次写入，而不是把两边合并。重读后再提交即可。
+
+### 13.5 `DELETE /api/schedules/:id`
+
+成功 `200`：`{ ok: true, task, version }`（`task` 是被删的那一条）。未知 `id` ⇒ `404`；`version` 与刚读到的不符 ⇒ `400`（同 §13.4 的乐观锁）。
+删除**不动台账**：它名下未结算的运行仍会按 §13.7 结算（否则那个 repo 会被永远占着）。
+
+### 13.6 `GET /api/schedules/:id/runs?limit=`
+
+`200`：`{ schema: 1, taskId, total, nextOffset, runs: [ … ] }` —— 该任务的台账，旧→新；
+`limit` 默认 **50**、下限 1、上限 **500**；`total` 是这个任务台账里的总条数。
+分页用的是一个**对追加稳定的游标**（2026-10-03，reviewer P1）：不带 `offset` 拿最新一页，响应里的 `nextOffset`
+就是「更早那一页」要原样带回来的 `offset`（它是从**最早一条**数的索引 —— 台账只追加、不删，所以翻页期间新起的运行
+不会让遍历重复或漏掉）；`nextOffset` 为 `0` 表示已经到最早一条。`offset` 超过总数（陈旧游标）⇒ 一个空页，不是错误。
+未知 `id` ⇒ `404`。
+
+| `kind` | 字段 |
+| --- | --- |
+| `run-armed` | `runId`, `taskId`, `sessionId`, `at`，以及 `repo` / `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 与它的仓库锚点）—— **契约继承的凭证**：在 launch **之前**写（会话在 `session_start` 就要读它）。它**不是一次运行**：`openRuns`、面板历史、`lastRuns` 都不认它，所以一次没能起会话的尝试不会在台账里留下任何像运行的东西。daemon **崩在它之后、launch 之前**时，恢复后的清理只**回收那个 checkout**，**不动槽戳**：那一槽已被消费（宁可丢一槽，也不重复执行一个已跑过的槽） |
+| `run-started` | `runId`, `taskId`, `sessionId`, `at`，以及 `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 路径、它所在的分支、切出来的 commit）。**会话真的起来了才有这条**；它不带窗口坐标（那是 `run-window`）；更旧的记录可能自带 `scopeSession` / `windowId` |
+| `run-window` | `runId`, `taskId`, `sessionId`, `at`, `scopeSession`, `windowId`，以及 `server`（那个窗口 id 是在哪台 server 上铸的，`<socket>,<pid>`，与登记里的写法一致）—— 这次运行的窗口坐标，在 `run-started` **之后**补的一条（坐标那时才存在）。**`server` 是安全阀**：window id 只在铸它的那台 server 上有意义，`kill-server` / 重启后新 server 会重新发同样的小编号，所以补关时只对「记录里的 server == 当前 server」的记录动手；旧记录没有这个字段就**不补关**（宁可留着，也不误杀） |
+| `run-settled` | `runId`, `taskId`, `at`, `outcome`, `verdict`, `unmet`，以及 `branch` / `landing`（产出留在哪条分支上、结算把它怎么处理了；没有产出 / 已合并回收时没有这两个字段） |
+| `run-skipped` | `taskId`, `at`, `reason`，以及 `runId`（当这次跳过是**一次运行消费了槽**时 —— 起会话遇到永久障碍、或窗口可能已经开了）：它让“这一槽为什么被消费”可追溯 |
+
+`outcome` 的四个值：`passed`（会话**记录过 READY**）/ `blocked`（BLOCKED）/ `failed`（会话结束但结论不是这两个）/`gone`（读不到门禁 state，或会话确证消失）。**没有 READY 不记 passed** —— 这是「一次定时运行要过 reviewer」
+的机械落点。`verdict` 取门禁**仍然站着的结论**（`state.review.verdict` / §5.2 的 `rounds.lastVerdict`），
+不是 `state.rounds` 那段历史：`declare_done` 会清空 `rounds` 而清不掉 `review`，所以正常结束
+（READY → `declare_done`）的运行记 `passed`，被撤回的判决（`PENDING`）不给 `passed`。`unmet` 原样带上。
+
+`run-window` 里的 `scopeSession` / `windowId` 是 `launchTask` 的回执，**记下来是因为事后读不回来**：
+会话的窗口平时是从它的 pane 上读的，而 pane 丢了 `@rg_sid` 就什么都没有了 —— 结算时正是靠这两个坐标
+把那次运行的窗口关掉（§13.7）。既没有这条记录、pane 又丢了坐标的运行，只能等它的进程退出（tmux 自己会回收窗口）。
+
+### 13.7 调度器的行为（不在 HTTP 面上，但同属契约）
+
+- **到点就尽力跑；LATE IS NOT LOST**（2026-10-03，用户决定）：`enabled`、下一个 cron 时刻已经到点、且该任务没有未结算的运行 ⇒ 跑。
+  **没有宽限窗口，也没有「错过」这个概念**：槽是 `lastFiredAt` 之后的**那一个**，它到达之后一直是这一槽 —— daemon 当时不在跑
+  （关机 / 休眠 / 重启）也照样是它，恢复后的第一次 tick 就跑。**一次只有一个槽**（`nextRunAfter` 只给一个），
+  所以停机一周回来也是跑一次，不是七次。**同一个时间点只处理一次** —— daemon 重启、tick 抖动都不重复跑（`lastFiredAt`
+  落在文件里，那是跨进程、跨重启的那一份）。写盘失败（只读 home、磁盘满）时本次进程还会把那个 slot / 那次运行
+  记在内存里（`unrecordedSlots` / `unrecordedRuns`，按龄回收）：已经起出去的会话收不回来，
+  「同一个时间点不重复起」因此在坏盘上也成立。
+- **只有永久障碍才写 `run-skipped` 并消费掉那一槽**（2026-10-03，用户决定）。四类：任务停用、cron 非法、
+  repo 路径不存在或不是 git 仓库、tmux 可执行文件找不到（`spawnSync … ENOENT`）。
+  **其它失败什么都不写**：隔离 checkout 建不出来、会话起不来、tmux server 暂时摸不到 —— 槽留着，
+  20 秒后的下一次 tick 再试，条件一好就把它跑掉（还是只跑一次：槽只有一个）。上一次运行没结算也是
+  `open-run` 而不是跳过：它一结算，下一次 tick 就处理那一槽。
+- **每次运行都在自己的隔离 checkout 里**（2026-10-03，用户决定）：从主 repo 的 `HEAD` 在
+  `/tmp/rg-worktrees/<repo>-sch-<runId>` 切一条 `rg-schedule-<runId>` 分支（按 `lib/worktree-seed.ts` 播种
+  `.pi` 配置 / `.env` / `node_modules`），运行在它里面干活。**主 repo 里的会话、或同一 repo 上别的未结算运行，都不再是跳过的理由**
+  —— 「一个 checkout 一个写者」照样成立，只是在各自的 checkout 里；发车到会话 `session_start` 之间那个「几秒里被人占住」的窗口也随之消失。
+  旧记录（没有 `worktree` 字段）仍按老规矩结算：没什么可收的。
+- **结算按结论落地，站点只决定落地方式**（2026-10-03，用户决定）：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒
+  写 `run-settled`、关掉这次运行的窗口（`closeRunWindowAt`，只关 daemon 自己那个 scope session 里的窗口，坐标优先取 pane、
+  pane 丢了 `@rg_sid` 就取台账 `run-window` 里记下的发起回执），**并结算它的 checkout**：
+  ① 没有改动 ⇒ 目录与分支一并回收，主 repo 的 `git status --porcelain` 逐字节不变；
+  ② 有改动**且 `outcome === "passed"`（记录过 READY）** —— 站点 `precommit`/`commit` ⇒ 把分支 `merge` 回主 repo
+  （staged、**不提交**：用户自己提交）；站点 `pr` ⇒ 留在隔离分支上（那次运行自己 push / 开 PR），**不 merge**；
+  ③ 有改动但不是 `passed` ⇒ 分支保留、主 repo 一动不动（未通过 READY 的产出绝不落地）；
+  ④ 主 repo 工作区不干净、或 merge 冲突 ⇒ 主 repo 不动（冲突会 `merge --abort`）、分支保留。
+  结算前会把 checkout 里还没提交的改动 **commit 到那条分支上**（`precommit` 站点的运行本来就该停在这里），
+  否则删目录就把它们删掉了。分支名与结算说明写进 `run-settled` 的 `branch` / `landing`，面板与
+  `schedule_task({action:"list"})` 都显示它们。
+- **运行就是普通 loop 会话**：`RG_GATE_MODE=loop`、`RG_STATION_CAP=<契约里的 station>`、
+  `RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`（本次运行的标识），cwd 是这次运行自己的隔离 checkout；门禁在 `session_start` 按这两个变量
+  把契约**从 `schedules.json` 读回来**（两个 hash 与文本相符 + 本会话的 repo 就是任务 repo **或从它切出来的隔离 checkout**
+  —— 归属记录 `lib/schedule-worktree.ts` 证明后者 + 台账里有本 runId 且 `sessionId` 就是本会话的 `run-armed` / `run-started` 记录，四道闸全过才生效），再**写出**
+  `.pi/loop-goal.md` 与 sidecar 的 `restatement` / `loopGoal`（`lib/schedule-run-contract.ts`）；
+  任一道闸不过就什么都不写、只记一条日志（fail-closed）；那种情况下它没有契约可用（hash 不符、repo 不符、台账里没有本 runId 都会走到这里），
+  它要么自己重新谈一份 goal，要么停在那里等人。
+- **结算**：会话 `done` / `dead`、或 `idle` 且记录过轮次 ⇒ 写 `run-settled`，**并把这次运行的窗口关掉**（`lib/daemon/control.ts` 的 `closeRunWindowAt`，只关 daemon 自己那个 scope session 里的窗口）：
+  普通会话要等**进程退出**才释放 worktree 占用（`declare_done` 不释放），留着的窗口会让这个 repo 永远“被占”，以后每次运行都被跳过。
+  **每一个 `outcome` 都会走这一步**，用两个地址里能用的那一个：会话还在列表里、pane 坐标读得到就用它；
+  pane 丢了 `@rg_sid`（观测不到那个窗口）而 checkout 心跳还新鲜（进程确实还在）就用 `run-window` 里记下的发起回执坐标（§13.6）。
+  两个地址都没有的结算（进程已经退了）本来就没什么可关的，tmux 自己会收回那个窗口。
+- **「观测不到」不是「已经结束」**：列表里没有这个会话时，先问它自己的记录 —— **它自己那个 checkout 里**
+  `<worktree>/.pi/session-presence.json` 的心跳还新鲜且 `sessionId` 就是它（旧记录没有 checkout，就回退到主 repo）、
+  或它的转写还在动（`TRANSCRIPT_ACTIVE_MS`），就继续等；
+  刚起的会话在观测里要过一会儿才出现，这段宽限期（120 s）内「没看见」不算消失。
+  反过来，一个还占着自己 checkout 的活进程也不是「已结束」：`dead` / `idle` 的会话只有在它**没有**完成记录
+  （`state.completion`，即 `declare_done` 被接受）时才会被这条证据挡住 —— 跑着的运行不会被误结算，
+  而已经交卷的运行也不会因为窗口还开着就永远结算不了（t6 验收：一条活着的运行曾被提前 21 分钟结算成 `gone`）。

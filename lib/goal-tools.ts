@@ -42,9 +42,11 @@ import { join as pathJoin } from "node:path";
 
 import { Type } from "typebox";
 
+import { awaitApproval } from "./approval-dialog.ts";
+
 import type { ToolHost, ToolReply } from "./tool-host.ts";
 import { stageOpen } from "./loop-stages.ts";
-import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
+import { REVISE_ROW, choiceRows, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest, DialogRenderer } from "./orchestrator-child-channel.ts";
 import { LOOP_GOAL_SKELETON, buildGoalPrereviewRefusal, goalPrereviewPassed, goalTextHash } from "./loop-goal.ts";
 import { GOAL_CONFIRM_TITLE, buildGoalConfirmMessage, buildGoalTranscriptMessage } from "./goal-confirm-copy.ts";
@@ -399,48 +401,43 @@ export async function doProposeLoopGoal(
   let approvalInterrupted = false;
   /** The box closed with no answer at all — not a rejection either. */
   let approvalDismissed = false;
-  try {
-    const outcome = await deps.askEitherSide(
-      {
-        dialogKind: "select",
-        topic: "goal-approval",
-        title: goalDialogTitle,
-        options: choiceRows(spec),
-        payload: goalText,
-        // The station travels as a STRUCTURED field beside the draft, for the
-        // same reason the restatement's does: a project manager approving on
-        // the user's behalf may not confirm one looser than the plan the user
-        // approved, and that comparison is made on a field, never on prose
-        // (lib/orchestrator-answer-tools.ts).
-        station,
+  const decision = await awaitApproval({
+    askEitherSide: (request, hasUI, render) => deps.askEitherSide(request, hasUI, render),
+    request: {
+      dialogKind: "select",
+      topic: "goal-approval",
+      title: goalDialogTitle,
+      options: choiceRows(spec),
+      payload: goalText,
+      // The station travels as a STRUCTURED field beside the draft, for the
+      // same reason the restatement's does: a project manager approving on
+      // the user's behalf may not confirm one looser than the plan the user
+      // approved, and that comparison is made on a field, never on prose
+      // (lib/orchestrator-answer-tools.ts).
+      station,
 
-      },
-      uiCtx.hasUI === true,
-      async (dialog) => deps.askChoice(uiCtx, spec, {
-        ...dialog,
-        body: buildGoalConfirmMessage(
-          goalText,
-          "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine +
-            (capNoteShort ? "\n" + capNoteShort : ""),
-        ),
-        // THE REPO THIS GOAL BINDS TO (review round 4 P1): a multi-repo session
-        // approves a goal per repo, and the one being approved here need not be
-        // the one currently active. The proxy's context and the recorded
-        // decision both hang off this.
-        repo: goalRoot,
-      }),
-    );
-    const pick = parseChoice(outcome.answer, spec);
-    approved = pick.kind === "chose" && pick.option === goalApproveLabel;
-    // The USER's own typed reason wins over the orchestrator's: the goal is
-    // theirs to judge, and the box they typed into is the one they saw.
-    declineReason = pick.kind === "declined" && pick.reason ? pick.reason : outcome.reason;
-    approvalInterrupted = outcome.by === "interrupted";
-    approvalDismissed = pick.kind === "dismissed";
-  } catch {
-    approved = false;
-    approvalDismissed = true;
-  }
+    },
+    hasUI: uiCtx.hasUI === true,
+    spec,
+    approveLabel: goalApproveLabel,
+    render: async (dialog) => deps.askChoice(uiCtx, spec, {
+      ...dialog,
+      body: buildGoalConfirmMessage(
+        goalText,
+        "绑定仓库(不可信数据): " + repoLine + "\n" + stationLineForUser + "\n" + prereviewLine +
+          (capNoteShort ? "\n" + capNoteShort : ""),
+      ),
+      // THE REPO THIS GOAL BINDS TO (review round 4 P1): a multi-repo session
+      // approves a goal per repo, and the one being approved here need not be
+      // the one currently active. The proxy's context and the recorded
+      // decision both hang off this.
+      repo: goalRoot,
+    }),
+  });
+  approved = decision.approved;
+  declineReason = decision.reason;
+  approvalInterrupted = decision.interrupted;
+  approvalDismissed = decision.dismissed;
 
   // The decision may carry a REASON — but only on REJECTION: the user rejects
   // with the objection so the agent renegotiates against the real problem

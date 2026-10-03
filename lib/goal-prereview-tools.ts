@@ -79,9 +79,12 @@ export type GoalDraftCheck =
  * non-empty draft, a draft under the write cap, and a repo the goal can
  * actually bind to.
  *
- * ONE caller shape, deliberately: `propose_loop_goal` is the only goal tool
- * there is, and the audit recorder behind it (`recordGoalPrereview`) runs the
- * same three checks on the same draft, so both speak with its voice.
+ * ONE caller shaped like the other: `propose_loop_goal` submits a session's exit
+ * contract through it and the audit recorder behind it (`recordGoalPrereview`)
+ * runs the same three checks on the same draft, so both speak with its voice —
+ * and since 2026-10-02 `schedule_task` (lib/schedule-tools.ts) submits the
+ * contract of a SCHEDULED task through exactly the same checks (the `tool`
+ * field is what names the submitter in the refusals).
  *
  * The repo resolution is deliberately NOT `resolveToolRepo`: that helper
  * requires a repo the session already EDITED, but a goal (and therefore its
@@ -93,7 +96,8 @@ export type GoalDraftCheck =
  * `gitRootOfDir`.
  */
 export function checkGoalDraft(input: {
-  tool: "propose_loop_goal";
+  /** Which tool is submitting — it names itself in the refusals. */
+  tool: "propose_loop_goal" | "schedule_task";
   rawGoal: unknown;
   rawRepo: unknown;
   cwd: string;
@@ -110,7 +114,7 @@ export function checkGoalDraft(input: {
   if (goalText.length > LOOP_GOAL_MAX_WRITE_CHARS) {
     return {
       ok: false,
-      text: `review-gate: propose_loop_goal rejected — the goal is ${goalText.length} chars, over the ` +
+      text: `review-gate: ${input.tool} rejected — the goal is ${goalText.length} chars, over the ` +
         `${LOOP_GOAL_MAX_WRITE_CHARS} limit. An exit contract is 3–7 checkable criteria, not a design doc.`,
     };
   }

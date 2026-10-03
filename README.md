@@ -1012,8 +1012,11 @@ this machine over loopback HTTP + SSE, and it is the one backend the web panel a
 bar app talk to. Its HTTP contract is frozen in `docs/daemon/api.md`; the user-facing guide is
 `docs/daemon/README.md`.
 
-**Three ways to start it, and they never fight** — all three go through the same `start.lock` and the
-same spawn (one implementation), so there is never a second daemon:
+**Three ways to start it, and they never fight** — the manual `start` and the session auto-start
+share one implementation (probe → `~/.pi/agent/rg-daemon/start.lock` → spawn `daemon run`), and the
+launchd job runs that same `daemon run`, which probes before binding and exits 0 when a daemon
+already answers (a bind that loses the port race exits 1, which `KeepAlive.SuccessfulExit=false`
+would otherwise turn into a restart loop) — so there is never a second daemon:
 
 | Way | How | What it is for |
 |---|---|---|
@@ -1047,6 +1050,14 @@ instead of showing a stale list. It writes one small file of its own — the hea
 what tells the terminal side that somebody else is there to raise the banner. Notifications are
 claimed from the daemon's ledger before they are posted, so the same fact is never announced twice;
 a denied notification permission degrades silently.
+
+**Scheduled tasks** are the daemon's own clock (`lib/daemon/scheduler.ts`): a due cron task starts a
+normal loop session, and the run is settled from what that session's gate recorded — only a recorded
+READY counts as `passed`. The contract behind every task is the one the USER approved through an
+authoring session, so the panel may only rename a task, re-time it or switch it off; changing what it
+DOES goes back through the approval flow. A missed slot is never replayed, and one repository runs
+one scheduled session at a time. Guide: `docs/daemon/README.md` §3; contract:
+`docs/daemon/api.md` §13.
 
 ## Usage
 
