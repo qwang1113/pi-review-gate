@@ -30,7 +30,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -439,12 +439,22 @@ function withTableLock<T>(home: string, fn: () => T): T {
       // first thing to touch it, and `O_EXCL` on a missing directory is ENOENT,
       // not "somebody holds it".
       mkdirSync(dirname(lock), { recursive: true });
+      // WHO HOLDS IT IS WRITTEN INSIDE IT: a holder that was SUSPENDED (a laptop
+      // that slept, a SIGSTOP) can wake up after its lock was taken for stale and
+      // rebuilt — and an unconditional `rmSync` in `finally` would then delete
+      // the NEW holder's lock, letting a third writer in on the same version.
+      const token = `${process.pid}-${randomBytes(4).toString("hex")}`;
       const fd = openSync(lock, "wx");
       try {
+        writeSync(fd, token);
         return fn();
       } finally {
         closeSync(fd);
-        try { rmSync(lock, { force: true }); } catch { /* the stale sweep gets it */ }
+        try {
+          // ONLY OUR OWN LOCK IS RELEASED: if the token is not ours, somebody
+          // else owns this file now and it is theirs to remove.
+          if (readFileSync(lock, "utf8").trim() === token) rmSync(lock, { force: true });
+        } catch { /* already gone */ }
       }
     } catch (error) {
       if ((error as { code?: string }).code !== "EEXIST") throw error;
