@@ -30,7 +30,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, linkSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
