@@ -30,7 +30,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -411,6 +411,59 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
   return listScheduledTasks(home).find((task) => task.id === wanted || task.name === wanted);
 }
 
+/**
+ * THE TABLE'S WRITE LOCK — what makes read-check-write ATOMIC (2026-10-03,
+ * reviewer P1).
+ *
+ * `updateScheduledTask` reads the table, compares `expectedVersion` and writes.
+ * Two writers that read the SAME version both pass that comparison and both
+ * `writeFileAtomic`, so the later one silently replaces the earlier one's edit —
+ * the version check refuses a writer that reads AFTER somebody else wrote, but
+ * it cannot make the window itself atomic. This lock is that missing half.
+ *
+ * It is a file created with `O_EXCL` beside the table: whoever creates it holds
+ * it, everyone else waits (bounded) and then proceeds anyway — LOSING THE LOCK
+ * MUST NOT LOSE THE WRITE, and the version check inside is still there. A lock
+ * whose mtime is older than {@link LOCK_STALE_MS} belongs to a crashed writer
+ * and is removed by whoever finds it.
+ */
+const LOCK_STALE_MS = 10_000;
+
+function withTableLock<T>(home: string, fn: () => T): T {
+  const lock = `${schedulesPath(home)}.lock`;
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    try {
+      // THE TABLE'S HOME MAY NOT EXIST YET (a fresh daemon home): the lock is the
+      // first thing to touch it, and `O_EXCL` on a missing directory is ENOENT,
+      // not "somebody holds it".
+      mkdirSync(dirname(lock), { recursive: true });
+      const fd = openSync(lock, "wx");
+      try {
+        return fn();
+      } finally {
+        closeSync(fd);
+        try { rmSync(lock, { force: true }); } catch { /* the stale sweep gets it */ }
+      }
+    } catch (error) {
+      if ((error as { code?: string }).code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          rmSync(lock, { force: true });
+          continue;
+        }
+      } catch { /* the holder just released it */ }
+      if (Date.now() >= deadline) return fn();
+      sleepSync(20);
+    }
+  }
+}
+
+/** A synchronous sleep: every caller of this module is synchronous. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function writeSchedules(home: string, file: SchedulesFile): void {
   // 0600 + atomic: the same private-file rule the daemon's own state and token
   // follow, and a reader never sees a half-written document.
@@ -659,43 +712,45 @@ function newScheduleId(taken: ReadonlySet<string>): string {
  * with the authoring path named.
  */
 export function addScheduledTask(home: string, input: NewScheduledTask): ScheduleStoreResult<ScheduledTask> {
-  const read = readSchedules(home);
-  if (!read.ok) return read;
-  const file = read.file;
-  const conflict = versionProblem(input.expectedVersion, file.version);
-  if (conflict) return { ok: false, problem: conflict };
-  const patch: ScheduleEditPatch = {
-    name: input.name,
-    repo: input.repo,
-    cron: input.cron,
-    requirement: input.requirement,
-    contract: input.contract,
-    // `enabled` is in the patch EVEN when the caller left it out: value
-    // validation only looks at keys that are present, and a non-boolean one
-    // reaching the table is exactly what makes the whole file unreadable on
-    // the next load (round-1 reviewer P2).
-    enabled: input.enabled ?? true,
-  };
-  const qualification = applyScheduleEdit({ from: input.from ?? "panel", patch });
-  if (!qualification.ok) return qualification;
-  const problem = patchProblem(file, patch);
-  if (problem) return { ok: false, problem: problem };
-  const now = new Date().toISOString();
-  const task: ScheduledTask = {
-    id: newScheduleId(namespaceOf(file.tasks)),
-    name: input.name,
-    repo: input.repo,
-    cron: input.cron,
-    requirement: input.requirement,
-    contract: input.contract,
-    enabled: patch.enabled ?? true,
-    createdAt: now,
-    updatedAt: now,
-    lastFiredAt: null,
-  };
-  const next: SchedulesFile = { schema: SCHEDULES_SCHEMA, version: file.version + 1, tasks: [...file.tasks, task] };
-  writeSchedules(home, next);
-  return { ok: true, value: task, version: next.version };
+  return withTableLock(home, () => {
+    const read = readSchedules(home);
+    if (!read.ok) return read;
+    const file = read.file;
+    const conflict = versionProblem(input.expectedVersion, file.version);
+    if (conflict) return { ok: false, problem: conflict };
+    const patch: ScheduleEditPatch = {
+      name: input.name,
+      repo: input.repo,
+      cron: input.cron,
+      requirement: input.requirement,
+      contract: input.contract,
+      // `enabled` is in the patch EVEN when the caller left it out: value
+      // validation only looks at keys that are present, and a non-boolean one
+      // reaching the table is exactly what makes the whole file unreadable on
+      // the next load (round-1 reviewer P2).
+      enabled: input.enabled ?? true,
+    };
+    const qualification = applyScheduleEdit({ from: input.from ?? "panel", patch });
+    if (!qualification.ok) return qualification;
+    const problem = patchProblem(file, patch);
+    if (problem) return { ok: false, problem: problem };
+    const now = new Date().toISOString();
+    const task: ScheduledTask = {
+      id: newScheduleId(namespaceOf(file.tasks)),
+      name: input.name,
+      repo: input.repo,
+      cron: input.cron,
+      requirement: input.requirement,
+      contract: input.contract,
+      enabled: patch.enabled ?? true,
+      createdAt: now,
+      updatedAt: now,
+      lastFiredAt: null,
+    };
+    const next: SchedulesFile = { schema: SCHEDULES_SCHEMA, version: file.version + 1, tasks: [...file.tasks, task] };
+    writeSchedules(home, next);
+    return { ok: true, value: task, version: next.version };
+  });
 }
 
 /**
@@ -709,24 +764,26 @@ export function updateScheduledTask(
   patch: ScheduleEditPatch,
   options: { expectedVersion?: number; from?: ScheduleEditOrigin } = {},
 ): ScheduleStoreResult<ScheduledTask> {
-  const read = readSchedules(home);
-  if (!read.ok) return read;
-  const file = read.file;
-  const conflict = versionProblem(options.expectedVersion, file.version);
-  if (conflict) return { ok: false, problem: conflict };
-  const qualification = applyScheduleEdit({ from: options.from ?? "panel", patch });
-  if (!qualification.ok) return qualification;
-  const index = file.tasks.findIndex((task) => task.id === id);
-  if (index < 0) return { ok: false, problem: `找不到调度任务 ${id}（id 不会被改写；按名字找请用 findScheduledTask）` };
-  const current = file.tasks[index]!;
-  const problem = patchProblem(file, patch, current);
-  if (problem) return { ok: false, problem: problem };
-  const updated: ScheduledTask = { ...current, ...patch, id: current.id, updatedAt: new Date().toISOString() };
-  const tasks = [...file.tasks];
-  tasks[index] = updated;
-  const next: SchedulesFile = { schema: SCHEDULES_SCHEMA, version: file.version + 1, tasks };
-  writeSchedules(home, next);
-  return { ok: true, value: updated, version: next.version };
+  return withTableLock(home, () => {
+    const read = readSchedules(home);
+    if (!read.ok) return read;
+    const file = read.file;
+    const conflict = versionProblem(options.expectedVersion, file.version);
+    if (conflict) return { ok: false, problem: conflict };
+    const qualification = applyScheduleEdit({ from: options.from ?? "panel", patch });
+    if (!qualification.ok) return qualification;
+    const index = file.tasks.findIndex((task) => task.id === id);
+    if (index < 0) return { ok: false, problem: `找不到调度任务 ${id}（id 不会被改写；按名字找请用 findScheduledTask）` };
+    const current = file.tasks[index]!;
+    const problem = patchProblem(file, patch, current);
+    if (problem) return { ok: false, problem: problem };
+    const updated: ScheduledTask = { ...current, ...patch, id: current.id, updatedAt: new Date().toISOString() };
+    const tasks = [...file.tasks];
+    tasks[index] = updated;
+    const next: SchedulesFile = { schema: SCHEDULES_SCHEMA, version: file.version + 1, tasks };
+    writeSchedules(home, next);
+    return { ok: true, value: updated, version: next.version };
+  });
 }
 
 /**
@@ -738,21 +795,23 @@ export function removeScheduledTask(
   id: string,
   options: { expectedVersion?: number } = {},
 ): ScheduleStoreResult<ScheduledTask> {
-  const read = readSchedules(home);
-  if (!read.ok) return read;
-  const file = read.file;
-  const conflict = versionProblem(options.expectedVersion, file.version);
-  if (conflict) return { ok: false, problem: conflict };
-  const index = file.tasks.findIndex((task) => task.id === id);
-  if (index < 0) return { ok: false, problem: `找不到调度任务 ${id}` };
-  const removed = file.tasks[index]!;
-  const next: SchedulesFile = {
-    schema: SCHEDULES_SCHEMA,
-    version: file.version + 1,
-    tasks: file.tasks.filter((task) => task.id !== id),
-  };
-  writeSchedules(home, next);
-  return { ok: true, value: removed, version: next.version };
+  return withTableLock(home, () => {
+    const read = readSchedules(home);
+    if (!read.ok) return read;
+    const file = read.file;
+    const conflict = versionProblem(options.expectedVersion, file.version);
+    if (conflict) return { ok: false, problem: conflict };
+    const index = file.tasks.findIndex((task) => task.id === id);
+    if (index < 0) return { ok: false, problem: `找不到调度任务 ${id}` };
+    const removed = file.tasks[index]!;
+    const next: SchedulesFile = {
+      schema: SCHEDULES_SCHEMA,
+      version: file.version + 1,
+      tasks: file.tasks.filter((task) => task.id !== id),
+    };
+    writeSchedules(home, next);
+    return { ok: true, value: removed, version: next.version };
+  });
 }
 
 // ---------------------------------------------------------------------------

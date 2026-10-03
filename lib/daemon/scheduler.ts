@@ -683,40 +683,43 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     });
     if (!started.ok || started.sessionId === undefined) {
       const problem = started.problem ?? "launchTask 没给出 sessionId";
-      // NOTHING IS WRITTEN FOR A LAUNCH THAT NEVER HAPPENED (reviewer P1): the
-      // arming line is inert on its own (`openRuns` ignores it), so the ledger
-      // keeps NO run this session never was — no `run-settled`, no ghost in the
-      // panel's history. The checkout goes back too — UNLESS the window may have
-      // been opened (the command ran, its coordinates could not be read): then a
-      // session may be working in that directory and the checkout is the only
-      // copy of whatever it is doing (reviewer P1, 2026-10-03).
-      if (started.mayHaveStarted !== true) {
-        releaseCheckout(cut.worktree, task, runId);
-      } else {
+      if (started.mayHaveStarted === true) {
+        // THE WINDOW MAY BE OPEN AND A SESSION MAY BE WORKING IN IT (reviewer
+        // P1, 2026-10-03): the slot is SPENT — starting a second run for it would
+        // be exactly the duplicate the stamp exists to prevent — the checkout is
+        // kept (it is the only copy of whatever is running there), and the ledger
+        // says so.
+        skipped(task, at, `起会话失败但窗口可能已经开了（${problem}）—— 这一槽视为已处理`, slot);
         log(`运行 ${runId} 的窗口可能已经开了但坐标读不到 —— 保留它的 checkout ${cut.worktree.path} 不动，请人工确认`);
-      }
-      if (started.permanent === true) {
-        // A PERMANENT obstacle (no tmux to run at all): retrying every 20 s
-        // would burn the schedule on something no retry can repair, so the slot
-        // is SPENT here — no rollback — and the ledger names the reason.
-        skipped(task, at, `起会话失败（永久障碍）：${problem}`, slot);
       } else {
-        // A TEMPORARY obstacle: the stamp goes back, so this slot is still owed.
-        // A rollback that itself fails costs that one slot — recorded as a skip
-        // so the reason survives instead of only living in a log line.
-        if (!rollbackStamp(task, slot)) {
-          try {
-            appendScheduleRun(deps.home, {
-              kind: "run-skipped",
-              taskId: task.id,
-              at: at.toISOString(),
-              reason: `起会话失败（${problem}），且槽戳回滚失败 —— 这一槽被消费`,
-            });
-          } catch (error) {
-            log(`调度任务 ${task.id} 的这一槽丢失记录没写进台账：${error instanceof Error ? error.message : String(error)}`);
+        // NOTHING IS WRITTEN FOR A LAUNCH THAT NEVER HAPPENED (reviewer P1): the
+        // arming line is inert on its own (`openRuns` ignores it), so the ledger
+        // keeps NO run this session never was — no `run-settled`, no ghost in the
+        // panel's history. The checkout goes back too.
+        releaseCheckout(cut.worktree, task, runId);
+        if (started.permanent === true) {
+          // A PERMANENT obstacle (no tmux to run at all): retrying every 20 s
+          // would burn the schedule on something no retry can repair, so the slot
+          // is SPENT here — no rollback — and the ledger names the reason.
+          skipped(task, at, `起会话失败（永久障碍）：${problem}`, slot);
+        } else {
+          // A TEMPORARY obstacle: the stamp goes back, so this slot is still owed.
+          // A rollback that itself fails costs that one slot — recorded as a skip
+          // so the reason survives instead of only living in a log line.
+          if (!rollbackStamp(task, slot)) {
+            try {
+              appendScheduleRun(deps.home, {
+                kind: "run-skipped",
+                taskId: task.id,
+                at: at.toISOString(),
+                reason: `起会话失败（${problem}），且槽戳回滚失败 —— 这一槽被消费`,
+              });
+            } catch (error) {
+              log(`调度任务 ${task.id} 的这一槽丢失记录没写进台账：${error instanceof Error ? error.message : String(error)}`);
+            }
           }
+          deferred(task, at, slot, `起会话失败：${problem}`);
         }
-        deferred(task, at, slot, `起会话失败：${problem}`);
       }
       return undefined;
     }
@@ -1029,7 +1032,13 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // whichever server was up at launch time — aiming a close at a reused
         // window id would take a stranger's window with it.
         const recordedServer = windows.get(run.runId)?.server;
-        const addressTrustworthy = (session !== undefined && session.tmux !== null) ||
+        // …AND THE LISTING'S OWN ADDRESS IS ONLY AS FRESH AS THE LISTING: the
+        // server can be replaced between `collect()` and this close, and the
+        // pane's `@N` would then name a window on the NEW server. Asking again
+        // narrows that to the few microseconds between the two reads (reviewer
+        // P1, 2026-10-03).
+        const sameServerNow = currentTmuxServer(deps.runTmux) === liveServer;
+        const addressTrustworthy = (session !== undefined && session.tmux !== null && sameServerNow) ||
           (recordedServer !== undefined && liveServer !== undefined && recordedServer === liveServer);
         const target = addressTrustworthy ? closeTargetFor(withWindow, session, evidence, repo) : undefined;
         if (target !== undefined && !closeRunWindowAt(deps, target)) {
@@ -1068,7 +1077,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         const decision = dueDecision({ task, now: at, openRun: stillOpen.some((run) => run.taskId === task.id) });
         if (decision.reason === "disabled" || decision.reason === "bad-cron" || decision.reason === "bad-time") {
           if (!notedPermanent.has(task.id)) {
-            notedPermanent.add(task.id);
             const why = decision.reason === "disabled"
               ? "任务已停用（enabled:false）"
               : decision.reason === "bad-cron"
@@ -1076,8 +1084,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
                 : "createdAt / lastFiredAt 读不出时间";
             try {
               appendScheduleRun(deps.home, { kind: "run-skipped", taskId: task.id, at: at.toISOString(), reason: `永久障碍：${why}` });
+              // ONLY NOW IS IT REMEMBERED: a line that could not be written must
+              // be retried on the next tick, or the permanent condition would
+              // never reach the ledger at all (reviewer P1, 2026-10-03).
+              notedPermanent.add(task.id);
             } catch (error) {
-              log(`调度任务 ${task.id} 的永久障碍记录没写进台账：${error instanceof Error ? error.message : String(error)}`);
+              log(`调度任务 ${task.id} 的永久障碍记录没写进台账（下次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
             }
           }
           continue;

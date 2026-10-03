@@ -717,8 +717,16 @@ export function openScopeWindow(
     // whole; a window added to an existing session cannot be addressed without
     // the id we failed to parse, so that case is reported instead.
     if (!exists) {
-      try { run(buildKillSessionArgv(name)); } catch { /* best effort */ }
-      return { ok: false, error: "tmux 没有返回新 session 的坐标 —— 已就地回收" };
+      // A SESSION THIS CALL CREATED IS RECLAIMED WHOLE — and if even THAT fails,
+      // the failure is reported as "a window may exist", because the caller must
+      // not delete the checkout the session could be starting in (reviewer P1,
+      // 2026-10-03).
+      const killed = ((): boolean => {
+        try { return run(buildKillSessionArgv(name)).ok; } catch { return false; }
+      })();
+      return killed
+        ? { ok: false, error: "tmux 没有返回新 session 的坐标 —— 已就地回收" }
+        : { ok: false, error: "tmux 没有返回新 session 的坐标，且就地回收失败", mayHaveStarted: true };
     }
     return { ok: false, error: "tmux 没有返回新 window 的坐标（那个 window 无法寻址）", mayHaveStarted: true };
   }

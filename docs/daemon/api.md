@@ -734,7 +734,7 @@ pi-gate daemon uninstall
 | --- | --- |
 | `run-armed` | `runId`, `taskId`, `sessionId`, `at`，以及 `worktree` / `branch` / `base` —— **契约继承的凭证**：在 launch **之前**写（会话在 `session_start` 就要读它）。它**不是一次运行**：`openRuns`、面板历史、`lastRuns` 都不认它，所以一次没能起会话的尝试不会在台账里留下任何像运行的东西。它带 checkout 三件套是为了另一种情况：daemon **崩在 launch 与 `run-started` 之间**时，磁盘上只剩这一行，而那个会话是真的在跑 —— daemon 靠这三个字段把那次运行结算掉 |
 | `run-started` | `runId`, `taskId`, `sessionId`, `at`，以及 `worktree` / `branch` / `base`（这次运行自己的隔离 checkout 路径、它所在的分支、切出来的 commit）。**会话真的起来了才有这条**；它不带窗口坐标（那是 `run-window`）；更旧的记录可能自带 `scopeSession` / `windowId` |
-| `run-window` | `runId`, `taskId`, `sessionId`, `at`, `scopeSession`, `windowId` —— 这次运行的窗口坐标，在 `run-started` **之后**补的一条（坐标那时才存在） |
+| `run-window` | `runId`, `taskId`, `sessionId`, `at`, `scopeSession`, `windowId`，以及 `server`（那个窗口 id 是在哪台 server 上铸的，`<socket>,<pid>`，与登记里的写法一致）—— 这次运行的窗口坐标，在 `run-started` **之后**补的一条（坐标那时才存在）。**`server` 是安全阀**：window id 只在铸它的那台 server 上有意义，`kill-server` / 重启后新 server 会重新发同样的小编号，所以补关时只对「记录里的 server == 当前 server」的记录动手；旧记录没有这个字段就**不补关**（宁可留着，也不误杀） |
 | `run-settled` | `runId`, `taskId`, `at`, `outcome`, `verdict`, `unmet`，以及 `branch` / `landing`（产出留在哪条分支上、结算把它怎么处理了；没有产出 / 已合并回收时没有这两个字段） |
 | `run-skipped` | `taskId`, `at`, `reason` |
 
