@@ -428,14 +428,20 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
  * 2026-10-03). Waiting is safe here: the holder is a synchronous read-and-write
  * a few milliseconds long.
  *
- * AND A HOLDER IS DEPOSED ONLY WHEN ITS PROCESS IS GONE (reviewer P1,
- * 2026-10-03): the file carries `<pid>-<random>`, and a waiter takes it over only
- * when that pid no longer exists — an unrelated process that REUSED the number
- * therefore keeps its lock rather than losing it to a stranger. An EMPTY lock
- * (the holder died between creating it and writing the token, or the write
- * failed) has its own short bound, {@link LOCK_EMPTY_STALE_MS}, because waiting
- * on nothing for minutes is not a trade anybody wants either.
+ * AND A HOLDER IS DEPOSED IN TWO CASES (reviewer P1, 2026-10-03). The first is
+ * certain: the file carries `<pid>-<random>`, and a process that no longer
+ * exists cannot be holding anything. The second is the UNAVOIDABLE TRADE this
+ * mechanism cannot escape: a lock that is complete, whose pid IS alive, and that
+ * has not been touched for {@link LOCK_ABANDONED_MS}. Its pid was either reused
+ * by an innocent process (taking the lock lets two writers in) or belongs to a
+ * holder that is wedged somewhere inside a millisecond-long critical section (not
+ * taking it hangs every write in the process FOREVER — the caller is synchronous,
+ * the daemon's tick never returns). Both outcomes are bad; a silent five minutes
+ * is the point where "wrong twice for a moment" is less bad than "dead until
+ * somebody notices", and this is the worst case a lock on a FILE SYSTEM can
+ * deliver — a real fix is a lock the kernel owns, not one this module invents.
  */
+const LOCK_ABANDONED_MS = 5 * 60_000;
 
 /**
  * How long a lock that is EMPTY (its holder died between `O_EXCL` and the token
@@ -485,15 +491,12 @@ function withTableLock<T>(home: string, fn: () => T): T {
         const readable = /^\d+-[0-9a-f]+$/.test(raw);
         const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
         const age = Date.now() - statSync(lock).mtimeMs;
-        // A READABLE TOKEN IS TAKEN ONLY FROM A DEAD PROCESS (reviewer P1,
-        // 2026-10-03): a live pid means a live holder — and if that pid was
-        // REUSED by an unrelated process, taking its lock would let two writers
-        // into the same version, which is the one thing this lock exists to
-        // prevent. Waiting forever is the lesser evil, and it needs a human
-        // anyway (a lock nobody can explain is visible as one file on disk).
-        // The time-based bound below therefore belongs to EMPTY locks only.
+        // SEE THE CONSTANT: a dead holder is certain, and a SILENT one is the
+        // trade this mechanism has to make — the alternative is a synchronous
+        // write that never returns.
+        const silenceIsTooLong = age > LOCK_ABANDONED_MS;
         const emptyAndStale = !readable && age > LOCK_EMPTY_STALE_MS;
-        if ((readable && !pidAlive(owner)) || emptyAndStale) {
+        if ((readable && !pidAlive(owner)) || silenceIsTooLong || emptyAndStale) {
           // AND ONLY IF IT IS STILL THE SAME FILE: it may have been released and
           // recreated between the read above and this line, and removing a new
           // holder's lock is exactly what the token exists to prevent.
