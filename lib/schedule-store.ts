@@ -478,6 +478,12 @@ function withTableLock<T>(home: string, fn: () => T): T {
       if ((error as { code?: string }).code !== "EEXIST") throw error;
       try {
         const raw = readFileSync(lock, "utf8").trim();
+        // A FULL TOKEN OR NOTHING: a half-written one (`1234` without its suffix)
+        // parses as a pid and would be read as a complete lock — the reader would
+        // then be waiting on a holder that may be nobody (reviewer P2,
+        // 2026-10-03). Only the exact shape counts; anything else falls into the
+        // short empty-lock bound above.
+        const readable = /^\d+-[0-9a-f]+$/.test(raw);
         const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
         const age = Date.now() - statSync(lock).mtimeMs;
         const abandonedByTime = age > LOCK_ABANDONED_MS;
@@ -488,7 +494,6 @@ function withTableLock<T>(home: string, fn: () => T): T {
         // writers at once. But waiting has a bound of its own: an empty lock
         // older than {@link LOCK_EMPTY_STALE_MS} is a holder that died in that
         // microsecond window, and nobody should block for the long TTL over it.
-        const readable = Number.isFinite(owner);
         const emptyAndStale = !readable && age > LOCK_EMPTY_STALE_MS;
         if ((readable && !pidAlive(owner)) || abandonedByTime || emptyAndStale) {
           rmSync(lock, { force: true });
