@@ -727,7 +727,11 @@ export function openScopeWindow(
   if (!result.ok) {
     return { ok: false, error: result.stderr || `tmux ${exists ? "new-window" : "new-session"} 失败` };
   }
-  const coords = parseSpawnedWindow(result.stdout);
+  // THE COMMAND DID RUN — a window (or a whole session) exists, we just could not
+  // read its id. Before giving up, ask the session which windows it has and take
+  // the LAST one: tmux numbers windows in creation order, so the one this call
+  // just made is the final line (2026-10-03, reviewer P1).
+  const coords = parseSpawnedWindow(result.stdout) ?? lastWindowCoords(run, name);
   if (!coords) {
     // THE COMMAND DID RUN — a window (or a whole session) exists, we just cannot
     // address it. Leaving it behind is worse than the failure: the caller reads

@@ -51,6 +51,18 @@ import { fakeRunner, scheduleContract, scheduleTaskInput, scratchHome, scratchRe
 const EVERY_FIVE_MINUTES = "*/5 * * * *";
 
 /**
+ * The tmux server the fake runner reports (`<socket>,<pid>`, the registry's own
+ * spelling) — and the one the fixtures record with a run's window, because a
+ * recorded window id is only meaningful on the server that minted it.
+ */
+const TEST_TMUX_SERVER = "/tmp/tmux-501/default,4242";
+
+// `currentTmuxServer` prefers `$TMUX`, and this suite may well be running INSIDE
+// tmux: the fake server id above is what these tests mean, so the ambient one is
+// removed for the whole file.
+delete process.env.TMUX;
+
+/**
  * THE CHECKOUT SEAM, FAKED (2026-10-03).
  *
  * A tick test has no git repository on disk and does not need one: what it
@@ -148,6 +160,7 @@ function fakeObserver(sessions: DaemonSession[], transcripts: Record<string, str
 /** The tmux the gate's own control tests use: enough to open one window. */
 function fakeTmux(): TmuxRunner & { calls: string[][] } {
   return fakeRunner((argv) => {
+    if (argv[0] === "display-message") return { ok: true, stdout: `${TEST_TMUX_SERVER}\n`, stderr: "" };
     if (argv[0] === "list-sessions") return { ok: true, stdout: "", stderr: "" };
     if (argv[0] === "new-session" || argv[0] === "new-window") return { ok: true, stdout: "@3 %9\n", stderr: "" };
     if (argv[0] === "list-panes") return { ok: true, stdout: "", stderr: "" };
@@ -1028,6 +1041,7 @@ test("coordinates recorded in a LATER line still close a pane-less window (2026-
     at: new Date(Date.now() - 59_000).toISOString(),
     scopeSession: scopeName!,
     windowId: "@12",
+    server: TEST_TMUX_SERVER,
   });
   mkdirSync(join(repo, ".pi"), { recursive: true });
   writeFileSync(
@@ -1067,16 +1081,25 @@ test("a settled run whose pane lost its @rg_sid is still closed by its launch re
   assert.ok(scopeName !== undefined);
   const added = addScheduledTask(home, scheduleTaskInput(repo, { name: "sidelined", cron: EVERY_FIVE_MINUTES }));
   if (!added.ok) assert.fail(added.problem);
-  // THE LAUNCH RECEIPT IS ON THE LEDGER LINE (t7): once the pane has lost
-  // `@rg_sid`, the window id cannot be read back from anywhere else.
+  // THE LAUNCH RECEIPT IS ITS OWN LINE (t7 + 2026-10-03): once the pane has lost
+  // `@rg_sid` the window id cannot be read back from anywhere else, and the
+  // server that minted it is what makes the id safe to act on.
   appendScheduleRun(home, {
     kind: "run-started",
     runId: "run-aaaa9999",
     taskId: added.value.id,
     sessionId: "sess-aaaa9999",
     at: new Date(Date.now() - 60_000).toISOString(),
+  });
+  appendScheduleRun(home, {
+    kind: "run-window",
+    runId: "run-aaaa9999",
+    taskId: added.value.id,
+    sessionId: "sess-aaaa9999",
+    at: new Date(Date.now() - 60_000).toISOString(),
     scopeSession: scopeName,
     windowId: "@9",
+    server: TEST_TMUX_SERVER,
   });
   // The run concluded (`declare_done`), and its checkout heartbeat is fresh: the
   // process — and therefore the window — is still there. The OBSERVER has no

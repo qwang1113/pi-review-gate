@@ -966,6 +966,10 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         });
       }
     }
+    // WHICH SERVER IS UP RIGHT NOW — asked ONCE per tick, because both the
+    // settlement and the closing retry need it and a recorded window id is only
+    // meaningful on the server that minted it (2026-10-03, reviewer P1).
+    const liveServer = currentTmuxServer(deps.runTmux);
     for (const run of all) {
       // ONE RUN IS SETTLED ONCE, even if the same run id reached this list twice
       // (an in-memory run whose `run-started` write failed is ALSO visible as an
@@ -1019,7 +1023,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         const withWindow: ScheduleRunStarted = run.scopeSession !== undefined || recorded === undefined
           ? run
           : { ...run, ...recorded };
-        const target = closeTargetFor(withWindow, session, evidence, repo);
+        // A RECORDED ADDRESS IS ONLY MEANINGFUL ON THE SERVER THAT MINTED IT
+        // (2026-10-03, reviewer P1): pane coordinates come from the listing and
+        // are therefore current, but the `run-window` fallback was written by
+        // whichever server was up at launch time — aiming a close at a reused
+        // window id would take a stranger's window with it.
+        const recordedServer = windows.get(run.runId)?.server;
+        const addressTrustworthy = (session !== undefined && session.tmux !== null) ||
+          (recordedServer !== undefined && liveServer !== undefined && recordedServer === liveServer);
+        const target = addressTrustworthy ? closeTargetFor(withWindow, session, evidence, repo) : undefined;
         if (target !== undefined && !closeRunWindowAt(deps, target)) {
           log(`运行 ${run.runId} 的窗口没能关掉（它会继续占着 ${target.repo}）`);
         }
@@ -1034,12 +1046,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // WORK, not the retry — one `list-windows` per scope session says which
     // recorded windows still exist, and only those are closed.
     const settledIds = new Set(records.filter((record) => record.kind === "run-settled").map((record) => record.runId));
-    // A WINDOW ID IS ONLY MEANINGFUL ON THE SERVER THAT MINTED IT (reviewer P1,
-    // 2026-10-03): after a `kill-server` or a reboot the next server hands out
-    // the same small numbers, so a retry aimed by a stale id would kill a window
-    // that has nothing to do with this run. Records without a server (written
-    // before this field) are simply not retried.
-    const liveServer = currentTmuxServer(deps.runTmux);
     const liveWindows = new Map<string, Set<string>>();
     for (const coords of windows.values()) {
       if (liveWindows.has(coords.scopeSession)) continue;
