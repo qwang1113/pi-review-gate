@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -599,4 +599,32 @@ test("a corrupt table is refused, never silently emptied and overwritten", () =>
   const added = addScheduledTask(home, taskInput(repo));
   assert.equal(added.ok, false, "a write onto an unreadable table is refused");
   assert.equal(readFileSync(schedulesPath(home), "utf8"), "{ not json", "the bytes are still there");
+});
+
+test("the table lock: a dead holder is taken over, a live one is respected, a half-written one is neither", () => {
+  const home = scratch();
+  const lock = `${schedulesPath(home)}.lock`;
+
+  // A DEAD HOLDER (a pid no process can own): the lock is removed and the write
+  // goes through — this is the case that needs no guesswork at all.
+  mkdirSync(join(schedulesPath(home), ".."), { recursive: true });
+  writeFileSync(lock, "999999-deadbeef");
+  const after = addScheduledTask(home, taskInput(scratch(), { name: "after-dead-holder" }));
+  assert.equal(after.ok, true, after.ok ? "" : after.problem);
+  assert.equal(existsSync(lock), false, "拿到锁的写入者会把它释放掉");
+
+  // A LIVE HOLDER (this process): the write is REFUSED as a value — never
+  // waited on, and the holder's lock is not touched.
+  writeFileSync(lock, `${process.pid}-cafebabe`);
+  const blocked = addScheduledTask(home, taskInput(scratch(), { name: "while-held" }));
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.ok ? "" : blocked.problem, /另一个写者/);
+  assert.equal(readFileSync(lock, "utf8"), `${process.pid}-cafebabe`, "活着的持有者的锁不被动");
+
+  // A HALF-WRITTEN TOKEN is a lock being CREATED right now: also not ours.
+  writeFileSync(lock, "1234");
+  const half = addScheduledTask(home, taskInput(scratch(), { name: "while-half-written" }));
+  assert.equal(half.ok, false);
+  assert.equal(existsSync(lock), true);
+  rmSync(lock, { force: true });
 });

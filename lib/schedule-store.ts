@@ -422,96 +422,77 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
  * the version check refuses a writer that reads AFTER somebody else wrote, but
  * it cannot make the window itself atomic. This lock is that missing half.
  *
- * It is a file created with `O_EXCL` beside the table: whoever creates it holds
- * it, everyone else waits — THERE IS NO "GIVE UP AND WRITE ANYWAY" EXIT, because
- * that exit is exactly what would make the lock decorative again (reviewer P1,
- * 2026-10-03). Waiting is safe here: the holder is a synchronous read-and-write
- * a few milliseconds long.
+ * IT IS NEVER WAITED ON (reviewer P1, 2026-10-03). The holders are synchronous
+ * read-and-write calls a few milliseconds long, so "somebody holds it" means
+ * exactly one thing worth doing: hand the decision back to the CALLER, as the
+ * store's own value-shaped refusal (the panel surfaces it as "please re-read",
+ * the daemon retries it on its next tick). Sleeping would make every caller's
+ * failure mode "this process is stuck" instead.
  *
- * AND A HOLDER IS DEPOSED IN TWO CASES (reviewer P1, 2026-10-03). The first is
- * certain: the file carries `<pid>-<random>`, and a process that no longer
- * exists cannot be holding anything. The second is the UNAVOIDABLE TRADE this
- * mechanism cannot escape: a lock that is complete, whose pid IS alive, and that
- * has not been touched for {@link LOCK_ABANDONED_MS}. Its pid was either reused
- * by an innocent process (taking the lock lets two writers in) or belongs to a
- * holder that is wedged somewhere inside a millisecond-long critical section (not
- * taking it hangs every write in the process FOREVER — the caller is synchronous,
- * the daemon's tick never returns). Both outcomes are bad; a silent five minutes
- * is the point where "wrong twice for a moment" is less bad than "dead until
- * somebody notices", and this is the worst case a lock on a FILE SYSTEM can
- * deliver — a real fix is a lock the kernel owns, not one this module invents.
+ * AND THAT IS WHAT MAKES IT SAFE WITHOUT A TIME-OUT: a lock left by a CRASHED
+ * holder is removed on the spot — its pid is gone, which is a FACT rather than a
+ * guess — while a lock whose pid is ALIVE is never touched, however old it looks,
+ * because that pid may belong to a process that merely REUSED the number. The
+ * price is stated plainly: a lock nobody can explain blocks writes until a human
+ * deletes one visible file, which is infinitely preferable to two writers editing
+ * the same version — the thing this lock exists to prevent.
  */
-const LOCK_ABANDONED_MS = 5 * 60_000;
-
-/**
- * How long a lock that is EMPTY (its holder died between `O_EXCL` and the token
- * write, or the write itself failed) may block everybody else.
- *
- * Short on purpose: an empty lock is not "a live holder", and any long TTL would
- * mean every write in the meantime blocks while nobody owns the file at all
- * (2026-10-03, reviewer P1). Creating one takes microseconds, so five seconds of
- * emptiness is a crash.
- */
-const LOCK_EMPTY_STALE_MS = 5_000;
-
-function withTableLock<T>(home: string, fn: () => T): T {
+function withTableLock<T>(home: string, fn: () => ScheduleStoreResult<T>): ScheduleStoreResult<T> {
   const lock = `${schedulesPath(home)}.lock`;
-  for (;;) {
+  const token = `${process.pid}-${randomBytes(4).toString("hex")}`;
+  // THE TABLE'S HOME MAY NOT EXIST YET (a fresh daemon home): the lock is the
+  // first thing to touch it, and `O_EXCL` on a missing directory is ENOENT,
+  // not "somebody holds it".
+  mkdirSync(dirname(lock), { recursive: true });
+  let fd: number;
+  try {
+    fd = openSync(lock, "wx");
+  } catch (error) {
+    if ((error as { code?: string }).code !== "EEXIST") throw error;
+    // A DEAD HOLDER'S LOCK IS CLEARED AND THE WRITE RETRIED: it is nobody's, so
+    // refusing the write over it would be a self-inflicted outage. A LIVE one is
+    // left exactly where it is, and the refusal goes back as a value.
+    if (clearDeadLock(lock)) return withTableLock(home, fn);
+    return { ok: false, problem: "调度表正被另一个写者修改，请重读（expectedVersion）后再试" };
+  }
+  try {
+    // WHO HOLDS IT IS WRITTEN INSIDE IT, and only its own holder deletes it — a
+    // holder that was suspended cannot come back and remove somebody else's.
+    writeSync(fd, token);
+    return fn();
+  } finally {
+    closeSync(fd);
     try {
-      // THE TABLE'S HOME MAY NOT EXIST YET (a fresh daemon home): the lock is the
-      // first thing to touch it, and `O_EXCL` on a missing directory is ENOENT,
-      // not "somebody holds it".
-      mkdirSync(dirname(lock), { recursive: true });
-      // WHO HOLDS IT IS WRITTEN INSIDE IT: a holder that was SUSPENDED (a laptop
-      // that slept, a SIGSTOP) can wake up after its lock was taken for stale and
-      // rebuilt — and an unconditional `rmSync` in `finally` would then delete
-      // the NEW holder's lock, letting a third writer in on the same version.
-      const token = `${process.pid}-${randomBytes(4).toString("hex")}`;
-      const fd = openSync(lock, "wx");
-      try {
-        writeSync(fd, token);
-        return fn();
-      } finally {
-        closeSync(fd);
-        try {
-          // ONLY OUR OWN LOCK IS RELEASED: if the token is not ours, somebody
-          // else owns this file now and it is theirs to remove.
-          if (readFileSync(lock, "utf8").trim() === token) rmSync(lock, { force: true });
-        } catch { /* already gone */ }
-      }
-    } catch (error) {
-      if ((error as { code?: string }).code !== "EEXIST") throw error;
-      try {
-        const raw = readFileSync(lock, "utf8").trim();
-        // A FULL TOKEN OR NOTHING: a half-written one (`1234` without its suffix)
-        // parses as a pid and would be read as a complete lock, so the reader
-        // would wait on a holder that may be nobody (reviewer P2, 2026-10-03).
-        // Only the exact shape counts; anything else falls into the short
-        // empty-lock bound above.
-        const readable = /^\d+-[0-9a-f]+$/.test(raw);
-        const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
-        const age = Date.now() - statSync(lock).mtimeMs;
-        // SEE THE CONSTANT: a dead holder is certain, and a SILENT one is the
-        // trade this mechanism has to make — the alternative is a synchronous
-        // write that never returns.
-        const silenceIsTooLong = age > LOCK_ABANDONED_MS;
-        const emptyAndStale = !readable && age > LOCK_EMPTY_STALE_MS;
-        if ((readable && !pidAlive(owner)) || silenceIsTooLong || emptyAndStale) {
-          // AND ONLY IF IT IS STILL THE SAME FILE: it may have been released and
-          // recreated between the read above and this line, and removing a new
-          // holder's lock is exactly what the token exists to prevent.
-          if (readFileSync(lock, "utf8").trim() === raw) rmSync(lock, { force: true });
-          continue;
-        }
-      } catch { /* the holder just released it */ }
-      sleepSync(20);
-    }
+      if (readFileSync(lock, "utf8").trim() === token) rmSync(lock, { force: true });
+    } catch { /* already gone */ }
   }
 }
 
-/** A synchronous sleep: every caller of this module is synchronous. */
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+/**
+ * Remove a lock whose HOLDER IS GONE — the one case that needs no guesswork.
+ *
+ * Anything else is left alone: an empty or half-written token is a lock being
+ * created right now, and a token whose pid exists is somebody's lock, reused
+ * number or not. The removal re-reads the file first, so a lock that was
+ * released and recreated in between is not taken from its new holder.
+ */
+function clearDeadLock(lock: string): boolean {
+  let raw: string;
+  try {
+    raw = readFileSync(lock, "utf8").trim();
+  } catch {
+    return false; // already gone
+  }
+  if (!/^\d+-[0-9a-f]+$/.test(raw)) return false;
+  const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
+  if (pidAlive(owner)) return false;
+  try {
+    if (readFileSync(lock, "utf8").trim() === raw) {
+      rmSync(lock, { force: true });
+      return true;
+    }
+  } catch { /* gone in the meantime */ }
+  return false;
 }
 
 function writeSchedules(home: string, file: SchedulesFile): void {
