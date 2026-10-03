@@ -48,8 +48,9 @@ pi-gate daemon uninstall  # bootout 并删除 plist
   `RG_DAEMON_HOME` 改的是 daemon 自己读哪个 home，不会把登录项搬到别处。
 - **`PATH` 必须跟着走，否则定时任务一次也起不来**：launchd 给 job 的 PATH 是
   `/usr/bin:/bin:/usr/sbin:/sbin`，里面**没有** Homebrew 的 tmux（`/opt/homebrew/bin/tmux`）。
-  daemon 起一个定时会话的第一步是 `execFileSync("tmux", …)`，找不到可执行文件就断在最前面，
-  每次到点只记一条 `run-skipped`（理由：「读不到 tmux server（list-sessions 失败）」，实测 2026-10-02）。
+  daemon 起一个定时会话的第一步是 spawn `tmux`，找不到可执行文件就断在最前面：这一槽被当成**永久障碍**消费，台账里记一条
+  `run-skipped`，理由是 `起会话失败（永久障碍）：起不来 tmux（spawnSync tmux ENOENT）`（以前两种失败共用一句「读不到 tmux server」，
+  所以 2026-10-02 那次实测的旧文案现在看起来不一样了）。
   写进去的是**装它那个 shell 的 PATH**（`buildLaunchdPlist` 的 `deps.path`，缺省 `process.env.PATH`），
   不是猜出来的 Homebrew 前缀 —— nix / macports / 自定义安装都跟着走；真没有 PATH 可抄时就**不写这个键**，
   让 launchd 的默认（`/usr/bin:/bin:/usr/sbin:/sbin`）站着 —— 空的 PATH 比不写更糟，daemon 会连 `tmux` 都 spawn 不了。
