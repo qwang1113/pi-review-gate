@@ -428,24 +428,23 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
  * 2026-10-03). Waiting is safe here: the holder is a synchronous read-and-write
  * a few milliseconds long.
  *
- * AND A HOLDER IS ONLY DEPOSED WHEN ITS PROCESS IS GONE (reviewer P1,
+ * AND A HOLDER IS DEPOSED ONLY WHEN ITS PROCESS IS GONE (reviewer P1,
  * 2026-10-03): the file carries `<pid>-<random>`, and a waiter takes it over only
- * when that pid no longer exists. Judging staleness by TIME alone meant a holder
- * that was merely SUSPENDED (a laptop that slept, a SIGSTOP) could be preempted
- * and then go on writing the table beside its successor. The mtime fallback is
- * there for pid REUSE (a dead writer whose number was given to somebody else):
- * only after {@link LOCK_ABANDONED_MS} of silence, which no live writer produces.
+ * when that pid no longer exists — an unrelated process that REUSED the number
+ * therefore keeps its lock rather than losing it to a stranger. An EMPTY lock
+ * (the holder died between creating it and writing the token, or the write
+ * failed) has its own short bound, {@link LOCK_EMPTY_STALE_MS}, because waiting
+ * on nothing for minutes is not a trade anybody wants either.
  */
-const LOCK_ABANDONED_MS = 10 * 60_000;
 
 /**
  * How long a lock that is EMPTY (its holder died between `O_EXCL` and the token
  * write, or the write itself failed) may block everybody else.
  *
- * Short on purpose: an empty lock is not "a live holder", and the long
- * {@link LOCK_ABANDONED_MS} — which exists for pid REUSE — would mean every
- * write in the meantime blocks for ten minutes (2026-10-03, reviewer P1).
- * Creating one takes microseconds, so five seconds of emptiness is a crash.
+ * Short on purpose: an empty lock is not "a live holder", and any long TTL would
+ * mean every write in the meantime blocks while nobody owns the file at all
+ * (2026-10-03, reviewer P1). Creating one takes microseconds, so five seconds of
+ * emptiness is a crash.
  */
 const LOCK_EMPTY_STALE_MS = 5_000;
 
@@ -486,20 +485,15 @@ function withTableLock<T>(home: string, fn: () => T): T {
         const readable = /^\d+-[0-9a-f]+$/.test(raw);
         const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
         const age = Date.now() - statSync(lock).mtimeMs;
-        const abandonedByTime = age > LOCK_ABANDONED_MS;
-        // AN EMPTY OR HALF-WRITTEN LOCK IS BEING CREATED RIGHT NOW, not abandoned
-        // (2026-10-03, reviewer P1): the holder writes its token immediately
-        // after `O_EXCL` succeeds, so a reader that finds nothing must WAIT —
-        // treating "cannot parse" as "take it" would hand the lock to two
-        // writers at once. But waiting has a bound of its own: an empty lock
-        // older than {@link LOCK_EMPTY_STALE_MS} is a holder that died in that
-        // microsecond window, and nobody should block for the long TTL over it.
+        // A READABLE TOKEN IS TAKEN ONLY FROM A DEAD PROCESS (reviewer P1,
+        // 2026-10-03): a live pid means a live holder — and if that pid was
+        // REUSED by an unrelated process, taking its lock would let two writers
+        // into the same version, which is the one thing this lock exists to
+        // prevent. Waiting forever is the lesser evil, and it needs a human
+        // anyway (a lock nobody can explain is visible as one file on disk).
+        // The time-based bound below therefore belongs to EMPTY locks only.
         const emptyAndStale = !readable && age > LOCK_EMPTY_STALE_MS;
-        // A LIVE PID MEANS SOMEBODY HOLDS IT — including the case where the
-        // number was REUSED by an unrelated process: that holder is alive, so the
-        // lock is not ours to take. Only a pid that no process owns (or ten
-        // minutes of silence, which pid reuse can produce) opens the door.
-        if ((readable && !pidAlive(owner)) || abandonedByTime || emptyAndStale) {
+        if ((readable && !pidAlive(owner)) || emptyAndStale) {
           // AND ONLY IF IT IS STILL THE SAME FILE: it may have been released and
           // recreated between the read above and this line, and removing a new
           // holder's lock is exactly what the token exists to prevent.
