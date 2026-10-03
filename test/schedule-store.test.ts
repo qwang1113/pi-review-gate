@@ -621,18 +621,14 @@ test("the table lock: a dead holder is taken over, a live one is respected, a ha
   assert.match(blocked.ok ? "" : blocked.problem, /另一个写者/);
   assert.equal(readFileSync(lock, "utf8"), `${process.pid}-cafebabe`, "活着的持有者的锁不被动");
 
-  // A HALF-WRITTEN TOKEN is a lock being CREATED right now: also not ours.
+  // …AND A FILE THAT NAMES NO HOLDER IS NOT OURS TO TAKE EITHER: the lock is
+  // linked into place fully written, so this shape cannot come from a creator —
+  // it is a foreign file, and a foreign file is nobody's to guess about.
   writeFileSync(lock, "1234");
+  const old = new Date(Date.now() - 5 * 60_000);
+  utimesSync(lock, old, old);
   const half = addScheduledTask(home, taskInput(scratch(), { name: "while-half-written" }));
   assert.equal(half.ok, false);
   assert.equal(existsSync(lock), true);
-
-  // …BUT ONE THAT HAS BEEN SITTING THERE IS A CRASHED CREATOR: it names no
-  // process, and refusing every write over it forever would be an outage of our
-  // own making. Age is what separates the two.
-  const old = new Date(Date.now() - 5 * 60_000);
-  utimesSync(lock, old, old);
-  const recovered = addScheduledTask(home, taskInput(scratch(), { name: "after-stale-empty" }));
-  assert.equal(recovered.ok, true, recovered.ok ? "" : recovered.problem);
   rmSync(lock, { force: true });
 });

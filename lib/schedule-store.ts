@@ -30,7 +30,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, linkSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
@@ -435,20 +435,16 @@ export function findScheduledTask(home: string, idOrName: string): ScheduledTask
  * the daemon retries it on its next tick). Sleeping would make every caller's
  * failure mode "this process is stuck" instead.
  *
- * AND THAT IS WHAT MAKES IT SAFE WITHOUT A TIME-OUT — FOR A NAMED HOLDER: a
- * lock left by a CRASHED holder is removed on the spot (its pid is gone, which is
- * a FACT rather than a guess), while a lock whose pid is ALIVE is never touched,
- * however old it looks, because that pid may belong to a process that merely
- * REUSED the number. The price is stated plainly: a lock nobody can explain
- * blocks writes until a human deletes one visible file, which is infinitely
- * preferable to two writers editing the same version — the thing this lock
- * exists to prevent. A lock with NO holder named at all (an empty file, a
- * half-written token) is a different case: nobody is behind it, so it lapses on
- * the {@link LOCK_EMPTY_STALE_MS} clock — long enough that a creator SUSPENDED
- * between `O_EXCL` and its token write is not mistaken for a crash, short enough
- * that a crashed one does not block writes forever.
+ * AND IT IS WHY NOTHING HERE NEEDS A TIME-OUT: a lock left by a CRASHED holder
+ * is removed on the spot — its pid is gone, which is a FACT rather than a guess —
+ * while a lock whose pid is ALIVE is never touched, however old it looks, because
+ * that pid may belong to a process that merely REUSED the number. A file that
+ * names no holder at all cannot come from this module at all (the lock is linked
+ * into place fully written), so there is nothing to age out. The price is stated
+ * plainly: a lock nobody can explain blocks writes until a human deletes one
+ * visible file, which is infinitely preferable to two writers editing the same
+ * version — the thing this lock exists to prevent.
  */
-const LOCK_EMPTY_STALE_MS = 60_000;
 function withTableLock<T>(home: string, fn: () => ScheduleStoreResult<T>): ScheduleStoreResult<T> {
   const lock = `${schedulesPath(home)}.lock`;
   const token = `${process.pid}-${randomBytes(4).toString("hex")}`;
@@ -456,10 +452,18 @@ function withTableLock<T>(home: string, fn: () => ScheduleStoreResult<T>): Sched
   // first thing to touch it, and `O_EXCL` on a missing directory is ENOENT,
   // not "somebody holds it".
   mkdirSync(dirname(lock), { recursive: true });
-  let fd: number;
+  // THE LOCK IS BORN COMPLETE (reviewer P1, 2026-10-03): the token is written
+  // to a private temp file and `link(2)`-ed into place, and linking is ATOMIC —
+  // so there is NO window in which the lock exists with nobody named inside it.
+  // That is what removes the "is this creator paused, or dead?" question a
+  // time-out could never answer without either freeing a live creator or
+  // blocking every write forever.
+  const temp = `${lock}.${token}.tmp`;
+  writeFileSync(temp, token, { mode: 0o600 });
   try {
-    fd = openSync(lock, "wx");
+    linkSync(temp, lock);
   } catch (error) {
+    rmQuietly(temp);
     if ((error as { code?: string }).code !== "EEXIST") throw error;
     // A DEAD HOLDER'S LOCK IS CLEARED AND THE WRITE RETRIED: it is nobody's, so
     // refusing the write over it would be a self-inflicted outage. A LIVE one is
@@ -468,13 +472,13 @@ function withTableLock<T>(home: string, fn: () => ScheduleStoreResult<T>): Sched
     return { ok: false, problem: "调度表正被另一个写者修改，请重读（expectedVersion）后再试" };
   }
   try {
-    // WHO HOLDS IT IS WRITTEN INSIDE IT, and only its own holder deletes it — a
-    // holder that was suspended cannot come back and remove somebody else's.
-    writeSync(fd, token);
+    rmQuietly(temp);
     return fn();
   } finally {
-    closeSync(fd);
+    rmQuietly(temp);
     try {
+      // ONLY OUR OWN LOCK IS RELEASED: if the token is not ours, somebody else
+      // owns this file now and it is theirs to remove.
       if (readFileSync(lock, "utf8").trim() === token) rmSync(lock, { force: true });
     } catch { /* already gone */ }
   }
@@ -483,32 +487,30 @@ function withTableLock<T>(home: string, fn: () => ScheduleStoreResult<T>): Sched
 /**
  * Remove a lock whose HOLDER IS GONE — the one case that needs no guesswork.
  *
- * Anything else is left alone: an empty or half-written token is a lock being
- * created right now, and a token whose pid exists is somebody's lock, reused
- * number or not. The removal re-reads the file first, so a lock that was
- * released and recreated in between is not taken from its new holder.
+ * Anything else is left alone: a token that does not name a process cannot come
+ * from this module (the lock is linked into place fully written), and a token
+ * whose pid exists is somebody's lock, reused number or not. The removal
+ * re-reads the file first, so one released and recreated in between is not taken
+ * from its new holder.
  */
 function clearDeadLock(lock: string): boolean {
   let raw: string;
-  let age: number;
   try {
     raw = readFileSync(lock, "utf8").trim();
-    age = Date.now() - statSync(lock).mtimeMs;
   } catch {
     return false; // already gone
   }
-  // AN EMPTY LOCK IS NOBODY'S — after the few seconds it takes to write a token
-  // and no more (reviewer P1, 2026-10-03): a holder killed between `O_EXCL` and
-  // the write leaves a file that names no process at all, and refusing every
-  // later write over it would be a self-inflicted outage.
-  if (!/^\d+-[0-9a-f]+$/.test(raw)) {
-    return age > LOCK_EMPTY_STALE_MS ? removeIfUnchanged(lock, raw) : false;
-  }
+  if (!/^\d+-[0-9a-f]+$/.test(raw)) return false;
   const owner = Number.parseInt(raw.split("-")[0] ?? "", 10);
-  // A NAMED HOLDER IS DEPOSED ONLY WHEN ITS PROCESS IS GONE: a live pid means
-  // somebody's lock, reused number or not.
   if (pidAlive(owner)) return false;
   return removeIfUnchanged(lock, raw);
+}
+
+/** Best-effort removal, for the private file written and linked above. */
+function rmQuietly(path: string): void {
+  try {
+    rmSync(path, { force: true });
+  } catch { /* nothing can be done about it here */ }
 }
 
 /**
