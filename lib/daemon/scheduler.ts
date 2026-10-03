@@ -415,6 +415,13 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   let stopTimer: (() => void) | undefined;
   let running = false;
   /**
+   * The armings this process already cleaned up. The ledger's arming lines are
+   * PERMANENT (nothing rewrites that file), so this set has to live as long as the
+   * process does: per-tick it would re-probe every historical arming every 20
+   * seconds, and the ledger only grows (reviewer P2, 2026-10-03).
+   */
+  const cleanedArms = new Set<string>();
+  /**
    * Runs that are really running but never reached the ledger, because the disk
    * refused the write. They hold their checkout and they settle exactly like a
    * recorded run — `tick` folds them into its open list. (A SLOT whose stamp
@@ -940,7 +947,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     // line is the only thing that names it, and it is inert by design, so this is
     // where its directory is closed out. The line itself STAYS (nothing is
     // rewritten); only the checkout goes.
-    const cleanedArms = new Set<string>();
     for (const record of records) {
       if (record.kind !== "run-armed") continue;
       if (everStarted.has(record.runId) || cleanedArms.has(record.runId)) continue;
@@ -988,14 +994,6 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       // already rolled its own stamp back in the same call that saw the failure.
       // What is left is the crash window — the daemon died between the stamp and
       // the launch — and losing that ONE slot is the cheap side of the trade:
-      // re-running a slot is what the whole stamp exists to prevent.
-      // THE SLOT STAMP IS LEFT EXACTLY WHERE IT IS (reviewer P1/P2, 2026-10-03).
-      // This pass used to put it back, which was wrong in both directions: a
-      // PERMANENT obstacle spends the slot on purpose (so undoing that turned one
-      // failure into a retry every couple of minutes), while a TEMPORARY one has
-      // already rolled its own stamp back in the call that saw the failure. What
-      // is left is the crash window — the daemon died between the stamp and the
-      // launch — and losing that ONE slot is the cheap side of the trade:
       // re-running a slot is what the whole stamp exists to prevent.
     }
     const repoOfRun = (run: ScheduleRunStarted): string | undefined =>
