@@ -974,16 +974,20 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       if (!existsSync(record.worktree)) {
         cleanedArms.add(record.runId); // already recycled, or never created
       } else {
-        cleanedArms.add(record.runId);
+        // REMEMBERED ONLY AFTER IT WORKED (reviewer P1, 2026-10-03): the set now
+        // lives as long as the process, so marking a failed cleanup would skip
+        // this checkout for the rest of it — a git that refused (an index.lock,
+        // a full disk, a hook) would leave the directory stranded forever.
         try {
           worktrees.settle({
             worktree: { repo: record.repo, runId: record.runId, branch: record.branch, base: record.base, path: record.worktree },
             outcome: "failed",
             station: stations.get(record.taskId),
           });
+          cleanedArms.add(record.runId);
           log(`运行 ${record.runId} 的 arming 没有对应的会话（daemon 当时死了？）—— 它的隔离 checkout 已回收`);
         } catch (error) {
-          log(`运行 ${record.runId} 的残留 checkout 没能回收：${error instanceof Error ? error.message : String(error)}`);
+          log(`运行 ${record.runId} 的残留 checkout 没能回收（下一次 tick 再试）：${error instanceof Error ? error.message : String(error)}`);
         }
       }
       // THE SLOT STAMP IS LEFT EXACTLY WHERE IT IS (reviewer P1/P2, 2026-10-03).
