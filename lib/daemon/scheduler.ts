@@ -703,19 +703,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         // exactly wrong here — an unrolled stamp would let the next tick start a
         // SECOND run for a slot that may already be running (quality round P2,
         // 2026-10-03).
-        const spent = dealt(task, at, slot);
-        if (!spent) {
-          // THE SLOT IS NOT ACTUALLY SPENT, and saying so is the only honest
-          // thing left: the window may be open AND the slot is still owed, so a
-          // later tick can start a second run (2026-10-03, reviewer P2).
-          log(`调度任务 ${task.id} 的这一槽没能标记为已处理（表写不进去）—— 窗口可能已经开着，而这一槽仍算欠着，请人工确认`);
-        }
+        // THE SLOT IS ALREADY SPENT — `dealt` ran before the launch and had to
+        // succeed for us to be here at all, so calling it AGAIN would only push
+        // another stamp onto an already-consumed slot (reviewer P1, 2026-10-03).
         try {
           appendScheduleRun(deps.home, {
             kind: "run-skipped",
             taskId: task.id,
             at: at.toISOString(),
-            reason: `起会话失败但窗口可能已经开了（${problem}）—— ${spent ? "这一槽视为已处理" : "注意：槽戳没写上，这一槽仍是欠着的"}`,
+            reason: `起会话失败但窗口可能已经开了（${problem}）—— 这一槽视为已处理`,
           });
         } catch (error) {
           log(`调度任务 ${task.id} 的这一槽台账没写进去（这一槽仍视为已处理：窗口可能已经开了）：${error instanceof Error ? error.message : String(error)}`);
