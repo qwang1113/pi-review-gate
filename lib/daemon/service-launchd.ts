@@ -77,6 +77,21 @@ export interface LaunchdDeps {
   userHome?: string;
   /** `[node, <pi-gate entry>, …]` — how launchd re-executes the CLI. */
   reexec: readonly string[];
+  /**
+   * THE PATH THE DAEMON RUNS WITH — the one the shell that RAN the install
+   * had, `process.env.PATH` by default.
+   *
+   * launchd hands a job the minimal `/usr/bin:/bin:/usr/sbin:/sbin`, and this
+   * daemon starts sessions by `execFileSync("tmux", …)` and then `tmux
+   * new-window … pi`. With Homebrew's tmux at `/opt/homebrew/bin/tmux`
+   * (measured 2026-10-02) that PATH does not contain the executable, so tmux
+   * could not be spawned at all and EVERY scheduled run was skipped with
+   * 「读不到 tmux server（list-sessions 失败）」— the daemon's PATH is the only
+   * thing that was wrong, and the shell's own PATH is the one fact that says
+   * where tmux lives on this machine. Copied, never guessed: a hardcoded
+   * Homebrew prefix would miss a nix / macports / custom install.
+   */
+  path?: string;
   port?: number;
   workspaceRoots?: readonly string[];
   /** Overridden by tests; the default runs the real `/bin/launchctl`. */
@@ -103,12 +118,19 @@ const xmlEscape = (raw: string): string =>
  * `ProgramArguments` is exactly what a human would type to run the daemon in
  * the foreground — plus `RG_DAEMON_HOME` in the environment, so an install made
  * with an overridden home starts a daemon that reads the SAME files the
- * installing CLI just wrote.
+ * installing CLI just wrote — plus `PATH`, so it can still find `tmux` (see
+ * {@link LaunchdDeps.path}).
  */
 export function buildLaunchdPlist(deps: LaunchdDeps): string {
   const home = deps.home ?? homedir();
   const port = deps.port ?? DAEMON_DEFAULT_PORT;
   const roots = deps.workspaceRoots ?? [];
+  const path = deps.path ?? process.env.PATH ?? "";
+  // AN EMPTY PATH IS WORSE THAN NO PATH KEY AT ALL: launchd's own default at
+  // least contains /bin and /usr/bin, while an empty `<string></string>` would
+  // leave the daemon unable to spawn anything — including tmux. No PATH to copy
+  // ⇒ the key is omitted and launchd's default stands.
+  const pathEntry = path === "" ? "" : `    <key>PATH</key>\n    <string>${xmlEscape(path)}</string>\n`;
   const log = daemonLogPath(home);
   const args = [...deps.reexec, "daemon", "run", "--port", String(port), ...roots.flatMap((root) => ["--workspace-root", root])];
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -125,7 +147,7 @@ ${args.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join("\n")}
   <dict>
     <key>RG_DAEMON_HOME</key>
     <string>${xmlEscape(home)}</string>
-  </dict>
+${pathEntry}  </dict>
   <key>RunAtLoad</key>
   <true/>
   <!-- restart a CRASH only: a graceful "pi-gate daemon stop" exits 0 -->

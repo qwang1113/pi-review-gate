@@ -75,12 +75,43 @@ export function sessionDirForCwd(
     process.env.PI_CODING_AGENT_SESSION_DIR ??
     process.env.TAU_CODING_AGENT_SESSION_DIR;
   if (envSessionDir) return resolve(normalizeSessionPath(envSessionDir, home));
-  const agentDir =
-    normalizeSessionPath(process.env.PI_CODING_AGENT_DIR ?? "", home) ||
-    normalizeSessionPath(process.env.TAU_CODING_AGENT_DIR ?? "", home) ||
-    join(home, ".pi", "agent");
   const enc = "--" + resolved.replace(/^[/\\\\]/, "").replace(/[/\\\\:]/g, "-") + "--";
-  return join(agentDir, "sessions", enc);
+  return join(piSessionsRoot(home), enc);
+}
+
+/**
+ * THE DIRECTORY PI KEEPS ITS PER-CWD SESSION SUBDIRECTORIES IN.
+ *
+ * A reader that starts from a session id and has no cwd to encode — the
+ * daemon's observer, which learns ids from panes, from the registry and from
+ * the run ledger — needs this root instead of one session's dir, and it has to
+ * come from the SAME rule as {@link sessionDirForCwd}: writer and reader
+ * agreeing on where a transcript lands is the whole of that rule.
+ *
+ * `home` is the USER home. pi resolves its agent dir from the environment or
+ * `$HOME`, and nothing this package adds — `RG_DAEMON_HOME` included — moves
+ * it; a reader that resolved this from the daemon's own home found no
+ * transcripts at all under the documented override (t6 acceptance).
+ *
+ * A SESSION-DIR OVERRIDE **IS** THE ROOT, NOT ITS PARENT: `PI_CODING_AGENT_SESSION_DIR`
+ * (and its `TAU_` twin — the same two variables {@link sessionDirForCwd} reads)
+ * names the directory pi lists `.jsonl` files DIRECTLY in, with no per-cwd
+ * subdirectory underneath. So it is returned verbatim, and a scanner over this
+ * root has to accept that flat layout too (daemon/sessions.ts
+ * `scanTranscripts`) — reading only `<root>/<enc>/*.jsonl` found nothing under
+ * the override, and a daemon that cannot see a run's transcript settles a real
+ * `passed` as `gone` (quality round P1, t9).
+ */
+export function piSessionsRoot(home: string = homedir(), env: NodeJS.ProcessEnv = process.env): string {
+  const override =
+    normalizeSessionPath(env.PI_CODING_AGENT_SESSION_DIR ?? "", home) ||
+    normalizeSessionPath(env.TAU_CODING_AGENT_SESSION_DIR ?? "", home);
+  if (override !== "") return override;
+  const agentDir =
+    normalizeSessionPath(env.PI_CODING_AGENT_DIR ?? "", home) ||
+    normalizeSessionPath(env.TAU_CODING_AGENT_DIR ?? "", home) ||
+    join(home, ".pi", "agent");
+  return join(agentDir, "sessions");
 }
 
 /**

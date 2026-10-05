@@ -55,6 +55,42 @@ test("a path with XML metacharacters is escaped, not pasted in", () => {
   assert.ok(!plist.includes("<weird>"), "the raw path must never appear as markup");
 });
 
+test("the daemon gets the installing shell's PATH — launchd's own one has no tmux in it", () => {
+  const plist = buildLaunchdPlist({
+    home: "/Users/me",
+    reexec: ["/usr/bin/node", "/tmp/cli.ts"],
+    path: "/opt/homebrew/bin:/usr/bin:/bin",
+  });
+  assert.match(
+    plist,
+    /<key>PATH<\/key>\s*<string>\/opt\/homebrew\/bin:\/usr\/bin:\/bin<\/string>/,
+    "without this the daemon spawns no `tmux` at all and every scheduled run is skipped",
+  );
+});
+
+test("with no explicit path, the installing process's own PATH is what gets written", () => {
+  const previous = process.env.PATH;
+  process.env.PATH = "/opt/homebrew/bin:/usr/bin:/bin";
+  try {
+    const plist = buildLaunchdPlist({ home: "/Users/me", reexec: [] });
+    assert.match(plist, /<key>PATH<\/key>\s*<string>\/opt\/homebrew\/bin:\/usr\/bin:\/bin<\/string>/);
+  } finally {
+    if (previous === undefined) delete process.env.PATH;
+    else process.env.PATH = previous;
+  }
+});
+
+test("no PATH to copy ⇒ no PATH key — launchd's own default beats an empty one", () => {
+  const plist = buildLaunchdPlist({ home: "/Users/me", reexec: [], path: "" });
+  assert.ok(!plist.includes("<key>PATH</key>"), "an empty PATH would leave the daemon unable to spawn anything, tmux included");
+});
+
+test("a PATH with XML metacharacters is escaped too", () => {
+  const plist = buildLaunchdPlist({ home: "/Users/me", reexec: [], path: '/tmp/a&b/<weird>/"q"/bin:/usr/bin' });
+  assert.match(plist, /<string>\/tmp\/a&amp;b\/&lt;weird&gt;\/&quot;q&quot;\/bin:\/usr\/bin<\/string>/);
+  assert.ok(!plist.includes("<weird>"), "the raw PATH must never appear as markup");
+});
+
 test("install writes the agent file and bootstraps it in the user's own domain", () => {
   const home = scratchHome();
   const userHome = scratchHome();

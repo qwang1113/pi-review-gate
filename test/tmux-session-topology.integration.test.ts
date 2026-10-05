@@ -272,17 +272,35 @@ test("never having opened a child means never having a session to close", { skip
   }
 });
 
-test("an unreadable tmux is 'I do not know' — never a licence to create or kill",
+test("a tmux that cannot run is 'I do not know' — never a licence to create or kill",
   { skip: SKIP }, async () => {
     const scope = labScope();
     scope.record = { name: OWN_SESSION, owner: SESSION_ID, createdAt: new Date().toISOString() };
-    const blind: TmuxRunner = () => ({ ok: false, stdout: "", stderr: "no server running on /tmp/tmux-0/default" });
+    // ENOENT is the shape a MISSING EXECUTABLE has — the failure that silently
+    // ate three scheduled runs on 2026-10-02, and the one retrying cannot fix.
+    const blind: TmuxRunner = () => ({ ok: false, stdout: "", stderr: "spawnSync tmux ENOENT" });
     const opened = await openScopeWindow(blind, scope, { cwd: "/tmp", command: ["sleep", "600"] });
-    assert.equal(opened.ok, false, "no server ⇒ no session is created");
+    assert.equal(opened.ok, false, "no tmux ⇒ no session is created");
+    assert.equal(opened.ok === false && opened.permanent, true, "永久障碍：调度器据此消费掉那一槽，而不是每 20 秒重试");
     const killed = closeOwnSession(blind, scope);
     assert.equal(killed.ok, false, "and nothing is killed on an unknown");
     // `judgePaneAlive` answers the same way: undefined, never "dead".
     assert.equal(judgePaneAlive(blind, "%1"), undefined);
+});
+
+test("a server that is merely DOWN is not 'I do not know' (2026-10-03)",
+  { skip: SKIP }, async () => {
+    // `no server running` means there is no session to find — and `new-session`
+    // is exactly what starts one. Reading it as "unreadable tmux" is what cost
+    // three slots in a row on a machine whose tmux was merely not running.
+    const scope = labScope();
+    const down: TmuxRunner = (argv) => argv[0] === "list-sessions"
+      ? { ok: false, stdout: "", stderr: "no server running on /tmp/tmux-0/default" }
+      : { ok: true, stdout: "@1 %1\n", stderr: "" };
+    const opened = await openScopeWindow(down, scope, { cwd: "/tmp", command: ["sleep", "600"] });
+    assert.equal(opened.ok, true, opened.ok ? "" : opened.error);
+    const killed = closeOwnSession(down, scope);
+    assert.deepEqual(killed, { ok: true, killed: false, note: `tmux server 不在了，专属 session ${OWN_SESSION} 也随之消失` });
 });
 
 /** A shell-free probe child: writes env[argv[2]] to argv[3], then stays alive. */

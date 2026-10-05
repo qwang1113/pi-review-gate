@@ -142,6 +142,10 @@ test("online: a real runtime on loopback answers the probe", async () => {
   const token = ensureDaemonToken(home).token;
   const runtime = createRuntime({
     home,
+    // THE SCRATCH HOME IS THE MACHINE these tests stand in for: pi's transcripts
+    // and the gate's registry are read from here, never from the daemon's home
+    // (lib/daemon/paths.ts `userHome()`).
+    userHome: home,
     port: 0,
     token,
     runTmux: paneRunner([]),

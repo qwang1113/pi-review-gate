@@ -43,6 +43,13 @@ interface DaemonValue {
   problems: string[];
   errors: string[];
   refresh: () => void;
+  /**
+   * Bumped by every {@link DaemonValue.refresh} call. It is the panel's ONE
+   * "the daemon side changed, re-read what you own" signal — pages that hold
+   * data of their own (定时任务表 has no SSE frame, §13) depend on it instead
+   * of opening a second subscription.
+   */
+  generation: number;
   answer: (question: DaemonQuestion, answer: string | string[], reason?: string) => Promise<void>;
 }
 
@@ -207,9 +214,10 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       problems,
       errors,
       refresh,
+      generation,
       answer,
     };
-  }, [byId, questions, connected, snapshotLoaded, tmuxReadable, problems, errors, refresh, answer]);
+  }, [byId, questions, connected, snapshotLoaded, tmuxReadable, problems, errors, refresh, generation, answer]);
 
   return <DaemonContext.Provider value={value}>{children}</DaemonContext.Provider>;
 }

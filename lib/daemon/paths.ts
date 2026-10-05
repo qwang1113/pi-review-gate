@@ -16,7 +16,8 @@
  *
  * Everything else lives under `~/.pi/agent/rg-daemon/`: the log, the daemon's
  * own persistent identity (used to derive its tmux scope session), the answered
- * question protocol directory and the notification store.
+ * question protocol directory, the notification store, and the scheduled-task
+ * table + its run ledger (`schedulesPath` / `scheduleRunsPath`).
  */
 
 import { readFileSync } from "node:fs";
@@ -48,6 +49,35 @@ export const DAEMON_HOME_ENV = "RG_DAEMON_HOME";
 /** The agent home every daemon path below is derived from. */
 export function daemonUserHome(env: NodeJS.ProcessEnv = process.env): string {
   return env[DAEMON_HOME_ENV] ?? homedir();
+}
+
+/**
+ * THE USER HOME — where the things the daemon READS ABOUT OTHERS are written.
+ *
+ * `daemonUserHome()` above relocates THIS DAEMON's files, and only those. The
+ * files the daemon observes belong to other processes, which resolve their own
+ * homes from `$HOME`:
+ *
+ *   - pi writes its transcripts under `<user home>/.pi/agent/sessions`, from
+ *     its own agent dir (`PI_CODING_AGENT_DIR` / `TAU_CODING_AGENT_DIR` or
+ *     `$HOME/.pi/agent`) — `lib/session-dir.ts` owns that rule in full;
+ *   - a gate session registers its `@名字` under
+ *     `<user home>/.pi/agent/rg-sessions` (`sessionRegistryRoot()`, which
+ *     reads `homedir()`).
+ *
+ * Neither knows `RG_DAEMON_HOME` exists, so a daemon that looked for them under
+ * its OWN home found nothing at all under the documented override — every
+ * session with `transcript: null` / `gateStateFound: false`, and a scheduled
+ * run that could only ever settle as `gone` (t6 acceptance, 2026-10-02). One
+ * reader, one writer, same home.
+ *
+ * The pending-question protocol is the OPPOSITE case on purpose and is not
+ * covered here: its writer is a gate session, which is TOLD the daemon's home
+ * through `RG_DAEMON_HOME` (`lib/daemon/control.ts` injects it at launch), so
+ * both sides resolve that one from `daemonHome()`.
+ */
+export function userHome(): string {
+  return homedir();
 }
 
 /** A session id used as a path segment must not be able to leave its directory. */
@@ -133,6 +163,31 @@ export function questionAnswerPath(home: string, sessionId: string, requestId: s
  */
 export function notificationStorePath(home: string = homedir()): string {
   return join(daemonHome(home), "notifications");
+}
+
+/**
+ * The scheduled-task table (0600): what the scheduler should run.
+ *
+ * One JSON document — `{schema, version, tasks}` — read and rewritten by the
+ * daemon, by a gate session's `schedule_task` tool and by the panel, so its
+ * shape and its version rule live in one module (`lib/schedule-store.ts`);
+ * this path is here because every daemon-owned file is named in one place.
+ */
+export function schedulesPath(home: string = homedir()): string {
+  return join(daemonHome(home), "schedules.json");
+}
+
+/**
+ * The scheduled-run ledger (0600, append-only JSONL): what actually ran.
+ *
+ * Separate from the table on purpose — only the daemon's tick appends to it
+ * and nothing ever rewrites it, so a run that started while another one settled
+ * cannot lose an entry, and a reader can read the file while it is being
+ * appended to. The record shapes are `ScheduleRunRecord` in
+ * `lib/schedule-store.ts`.
+ */
+export function scheduleRunsPath(home: string = homedir()): string {
+  return join(daemonHome(home), "schedule-runs.jsonl");
 }
 
 export function daemonBaseUrl(port: number, host: string = DAEMON_HOST): string {

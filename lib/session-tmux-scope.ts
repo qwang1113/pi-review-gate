@@ -248,13 +248,46 @@ export function sanitizeScopeRecord(raw: unknown): TmuxScopeRecord | undefined {
 
 /** Every session on the server, or undefined when tmux could not be read. */
 export function readSessionNames(run: TmuxRunner): string[] | undefined {
+  const listing = readSessionList(run);
+  return listing.ok ? listing.names : undefined;
+}
+
+/** What `tmux list-sessions` said: the names, or WHY it could not say. */
+export type SessionListReading = { ok: true; names: string[] } | { ok: false; detail: string };
+
+/**
+ * THE ONE READER of the session list, with its failure kept as a value.
+ *
+ * The distinction the detail carries is the difference between two answers a
+ * caller must not confuse: a tmux that cannot run at all (a missing
+ * executable — no command of ours gets past it) and a tmux whose server is
+ * simply not up ({@link tmuxServerAbsent}). Only the first is a reason to
+ * refuse; the second means there is no session to find, which is exactly the
+ * state `new-session` fixes.
+ */
+export function readSessionList(run: TmuxRunner): SessionListReading {
   try {
     const result = run(buildListSessionsArgv());
-    if (!result.ok) return undefined;
-    return parseSessionNames(result.stdout);
-  } catch {
-    return undefined;
+    if (!result.ok) return { ok: false, detail: (result.stderr || "tmux list-sessions 失败").trim() };
+    return { ok: true, names: parseSessionNames(result.stdout) };
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/**
+ * Does this failure mean "no server is up" rather than "tmux is unusable"?
+ *
+ * Measured shapes (tmux 3.5a, macOS): a dead socket answers `list-sessions`
+ * with `error connecting to /private/tmp/tmux-501/default (No such file or
+ * directory)`, and a live tmux with no sessions answers 0 with an empty list.
+ * A missing executable is an ENOENT from the spawn and must stay a refusal —
+ * that one is the failure that silently ate every scheduled run on
+ * 2026-10-02.
+ */
+export function tmuxServerAbsent(detail: string): boolean {
+  if (/ENOENT|not found|command not found/i.test(detail)) return false;
+  return /no server running|error connecting to|connection refused|No such file or directory/i.test(detail);
 }
 
 /**
@@ -561,9 +594,14 @@ function writePin(run: TmuxRunner, session: string, reason: string): string | un
 export function pinOwnSession(run: TmuxRunner, scope: TmuxScope, reason: string): { ok: true } | { ok: false; error: string } {
   const resolved = resolveScope(scope);
   if (!resolved.ok) return { ok: true };
-  const sessions = readSessionNames(run);
-  if (sessions === undefined) return { ok: false, error: "读不到 tmux server，无法铉住专属 session" };
-  if (!sessions.includes(resolved.name)) return { ok: true };
+  const listing = readSessionList(run);
+  // A SERVER THAT IS NOT UP HAS NO SESSION TO PIN: the checkout a sweeper could
+  // reclaim cannot exist there either, so "nothing to do" is the honest answer
+  // — while a tmux that cannot be read at all stays a refusal (fail-closed).
+  if (!listing.ok) {
+    return tmuxServerAbsent(listing.detail) ? { ok: true } : { ok: false, error: "读不到 tmux server，无法铉住专属 session" };
+  }
+  if (!listing.names.includes(resolved.name)) return { ok: true };
   const marker = readOwner(run, resolved.name);
   if (!marker.ok) return { ok: false, error: `读不到 ${resolved.name} 的归属标记：${marker.error}` };
   if (marker.owner !== resolved.owner) return { ok: false, error: `${resolved.name} 的归属标记不是本会话的 —— 不铉` };
@@ -573,7 +611,24 @@ export function pinOwnSession(run: TmuxRunner, scope: TmuxScope, reason: string)
 
 export type OpenScopeWindowResult =
   | ({ ok: true; sessionName: string; created: boolean } & SessionWindowCoords)
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      /**
+       * NO RETRY CAN CHANGE THIS ANSWER: tmux itself cannot run here (the
+       * executable is not reachable), as opposed to a server that is merely
+       * not up yet. The scheduler keeps the slot for every other failure and
+       * consumes it for this one (lib/daemon/scheduler.ts).
+       */
+      permanent?: boolean;
+      /**
+       * THE COMMAND RAN AND A WINDOW MAY EXIST — we just cannot address it
+       * (2026-10-03, reviewer P1). The caller must then NOT delete the checkout
+       * the session may already be working in: the directory is the only copy of
+       * whatever it is doing.
+       */
+      mayHaveStarted?: boolean;
+    };
 
 /**
  * Open ONE window for a child: the first one creates the session, every later
@@ -591,10 +646,18 @@ export function openScopeWindow(
   const resolved = resolveScope(scope);
   if (!resolved.ok) return resolved;
   const { name, owner } = resolved;
-  const sessions = readSessionNames(run);
-  if (sessions === undefined) {
-    return { ok: false, error: "读不到 tmux server（list-sessions 失败）——不在此刻建 session" };
+  // A MISSING SERVER IS NOT A MISSING TMUX (2026-10-03, user decision): with no
+  // server up there is no session to find, and `new-session` is what starts
+  // one — this refusal is for tmux itself being unusable (a missing
+  // executable, an unreachable socket), which no command of ours gets past.
+  // Measured 2026-10-02: the old one-size answer ("读不到 tmux server（list-sessions
+  // 失败）——不在此刻建 session") ate three scheduled runs in a row on a machine
+  // whose tmux was merely not running.
+  const listing = readSessionList(run);
+  if (!listing.ok && !tmuxServerAbsent(listing.detail)) {
+    return { ok: false, error: `起不来 tmux（${listing.detail}）—— 不在这里建 session`, permanent: true };
   }
+  const sessions = listing.ok ? listing.names : [];
   const exists = sessions.includes(name);
   if (exists) {
     const marker = readOwner(run, name);
@@ -647,7 +710,25 @@ export function openScopeWindow(
   }
   const coords = parseSpawnedWindow(result.stdout);
   if (!coords) {
-    return { ok: false, error: "tmux 没有返回新 window/pane id" };
+    // THE COMMAND DID RUN — a window (or a whole session) exists, we just cannot
+    // address it. Leaving it behind is worse than the failure: the caller reads
+    // this as "nothing started" and deletes the checkout that process is running
+    // in (reviewer P1, 2026-10-03). A session THIS CALL created is reclaimed
+    // whole; a window added to an existing session cannot be addressed without
+    // the id we failed to parse, so that case is reported instead.
+    if (!exists) {
+      // A SESSION THIS CALL CREATED IS RECLAIMED WHOLE — and if even THAT fails,
+      // the failure is reported as "a window may exist", because the caller must
+      // not delete the checkout the session could be starting in (reviewer P1,
+      // 2026-10-03).
+      const killed = ((): boolean => {
+        try { return run(buildKillSessionArgv(name)).ok; } catch { return false; }
+      })();
+      return killed
+        ? { ok: false, error: "tmux 没有返回新 session 的坐标 —— 已就地回收" }
+        : { ok: false, error: "tmux 没有返回新 session 的坐标，且就地回收失败", mayHaveStarted: true };
+    }
+    return { ok: false, error: "tmux 没有返回新 window 的坐标（那个 window 无法寻址）", mayHaveStarted: true };
   }
   if (!exists) {
     // THE MARKER IS WRITTEN BEFORE THE RECORD, and a failure to write it UNDOES
@@ -715,10 +796,14 @@ export function closeOwnSession(run: TmuxRunner, scope: TmuxScope): CloseOwnSess
   if (!record) {
     return { ok: true, killed: false, note: "本会话没有专属 tmux session（从未派过子会话，或 sidecar 里的记录不属于本会话）" };
   }
-  const sessions = readSessionNames(run);
-  if (sessions === undefined) {
+  const listing = readSessionList(run);
+  if (!listing.ok) {
+    if (tmuxServerAbsent(listing.detail)) {
+      return { ok: true, killed: false, note: `tmux server 不在了，专属 session ${record.name} 也随之消失` };
+    }
     return { ok: false, error: `读不到 tmux server，未能确认专属 session ${record.name} 是否还在` };
   }
+  const sessions = listing.names;
   if (!sessions.includes(record.name)) {
     return { ok: true, killed: false, note: `专属 session ${record.name} 已不在（tmux 在它的最后一个 window 关掉时自己回收了）` };
   }

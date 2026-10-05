@@ -359,8 +359,14 @@ export const GATE_ENV_NAMES: readonly string[] = Object.freeze([
   "RG_OPENER_STARTED",
   "RG_ORCHESTRATION_ID",
   "RG_PARENT_SESSION",
+  "RG_SCHEDULE_ID",
+  "RG_SCHEDULE_RUN",
   "RG_STATE_VARIANT",
   "RG_STATION_CAP",
+  // Which tmux SERVER this process talks to: a child gets its own from `$TMUX`
+  // (tmux sets it), and inheriting a foreign socket would aim its panes at
+  // somebody else's server (2026-10-03).
+  "RG_TMUX_SOCKET",
   "RG_WORKER_ID",
   "RG_WORKER_OPENER",
   "RG_WORKER_ROLE",

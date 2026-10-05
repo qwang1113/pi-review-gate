@@ -192,3 +192,122 @@ export const MODE_LABELS: Record<string, string> = {
   explore: "探索",
   normal: "普通",
 };
+
+/**
+ * 定时任务（`docs/daemon/api.md` §13）—— 与会话类型同一份契约来源。
+ *
+ * `ScheduledTask` 既有存储字段也有三个**派生**字段：daemon 在
+ * `GET /api/schedules` 里把它们算好一起给（§13.1），所以面板不需要、也不应该
+ * 自己解析 cron。
+ */
+export type DeliveryStation = "precommit" | "commit" | "pr";
+
+/** 用户实际批准过的契约：两段文本各绑自己的 hash（§13.1）。 */
+export interface ScheduleContract {
+  restatement: { text: string; hash: string; station: DeliveryStation; at: string };
+  goal: { text: string; hash: string; at: string };
+  approvedAt: string;
+}
+
+/** 台账里的一条运行记录（§13.6）。`run-started` 不是「结果」，不在 `lastRuns` 里。 */
+export type ScheduledTaskRun =
+  | {
+      kind: "run-started";
+      runId: string;
+      taskId: string;
+      sessionId: string;
+      at: string;
+      /** 这次运行自己的隔离 checkout、它所在的分支，以及切出来的那个 commit（§13.6）。 */
+      worktree?: string;
+      branch?: string;
+      base?: string;
+    }
+  | {
+      kind: "run-settled";
+      runId: string;
+      taskId: string;
+      at: string;
+      outcome: "passed" | "blocked" | "failed" | "gone";
+      verdict: string | null;
+      unmet: string[];
+      /** 产出留在哪个分支上（没产出 / 已合并回收时没有）。 */
+      branch?: string;
+      /** 结算把产出怎么处理了，一行话。 */
+      landing?: string;
+    }
+  | { kind: "run-skipped"; taskId: string; at: string; reason: string }
+  /** 这次运行已登记（契约继承的凭证，§13.6）—— 是补充信息，不是一次运行。 */
+  | { kind: "run-armed"; runId: string; taskId: string; sessionId: string; at: string }
+  /** 这次运行的 tmux 窗口坐标（§13.6）—— 是补充信息，不是一次运行。 */
+  | {
+      kind: "run-window";
+      runId: string;
+      taskId: string;
+      sessionId: string;
+      at: string;
+      scopeSession: string;
+      windowId: string;
+    };
+
+/** `GET /api/schedules/:id/runs` 的一页（§13.6）。 */
+export interface ScheduleRunsResponse {
+  schema: number;
+  taskId: string;
+  /** 这个任务的台账总条数。 */
+  total: number;
+  /**
+   * 下一页要带的 `offset`（游标），**0 表示已经到最早一条**。它是对追加稳定的
+   * 索引（从最早一条数），所以翻页期间台账新增记录不会让遍历重复或漏掉。
+   */
+  nextOffset: number;
+  runs: ScheduledTaskRun[];
+}
+
+/** 一行定时任务：存储字段 + §13.1 的三个派生字段。 */
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  repo: string;
+  cron: string;
+  requirement: string;
+  contract: ScheduleContract;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** 调度器上一次**处理**这个任务的时间（跑了、跳过、起不来都算）。 */
+  lastFiredAt: string | null;
+  /**
+   * 派生：这个任务下一个要处理的 cron 时刻 —— 到点时没跑成的槽会**留着**
+   * （不丢弃），所以它可能落在刚过去的一段时间里（面板会把那种情况标成「已到点
+   * 还没跑」）；`enabled:false` 或 cron 非法时是 `null`。
+   */
+  nextRunAt: string | null;
+  /** 派生：`describeCron` 的一行人话，如「每天 09:00」。 */
+  describe: string;
+  /** 派生：最近 5 条**结果**（`run-settled` / `run-skipped`，旧→新）。 */
+  lastRuns: ScheduledTaskRun[];
+}
+
+export interface SchedulesResponse {
+  schema: number;
+  now: string;
+  tasks: ScheduledTask[];
+}
+
+/** `POST /api/schedules/author` 的回执（§13.3）—— 与启动任务同形，指向 authoring 会话。 */
+export interface ScheduleAuthorResponse {
+  ok: boolean;
+  sessionId: string;
+  scopeSession: string;
+  windowId: string;
+  paneId: string;
+}
+
+/**
+ * `PUT /api/schedules/:id` 与 `DELETE /api/schedules/:id` 的回执（§13.4 / §13.5 —— 两者同形）。
+ */
+export interface ScheduleTaskWriteResponse {
+  ok: boolean;
+  task: ScheduledTask;
+  version: number;
+}

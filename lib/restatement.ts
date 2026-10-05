@@ -65,7 +65,8 @@ import {
 } from "./delivery-station.ts";
 import { capStationAt, stationCapNotice } from "./repo-pr-policy.ts";
 import { raiseStationToFloor, stationFloorNotice } from "./session-worktree.ts";
-import { REVISE_ROW, choiceRows, parseChoice, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
+import { REVISE_ROW, choiceRows, type AskChoiceOpts, type ChoiceSpec } from "./choice-dialog.ts";
+import { awaitApproval } from "./approval-dialog.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest, DialogRenderer } from "./orchestrator-child-channel.ts";
 import { gitRootOfDir } from "./repo-resolve.ts";
 import { buildRejection } from "./rejection-copy.ts";
@@ -222,26 +223,35 @@ export type RestatementCheck =
  * Three mechanical facts only — non-empty, within the caps, and carrying a
  * before/after contrast. Whether the restatement is CORRECT is the user's
  * call in the dialog, and no amount of pattern matching could take that over.
+ *
+ * `tool` names the SUBMITTER in the refusals: `schedule_task`
+ * (lib/schedule-authoring.ts) runs this same check over a SCHEDULED task's
+ * requirement, and a refusal that tells its reader to call
+ * `propose_restatement` would send it to negotiate the session's own goal
+ * instead — the same parameter `checkGoalDraft` carries, for the same reason.
  */
-export function checkRestatementText(raw: unknown): RestatementCheck {
+export function checkRestatementText(
+  raw: unknown,
+  tool: "propose_restatement" | "schedule_task" = "propose_restatement",
+): RestatementCheck {
   const text = normalizeRestatement(String(raw ?? ""));
   if (text.length === 0) {
     return {
       ok: false,
-      text: "review-gate: propose_restatement rejected —— 反述正文是空的。\n" + RESTATEMENT_SKELETON,
+      text: `review-gate: ${tool} rejected —— 反述正文是空的。\n` + RESTATEMENT_SKELETON,
     };
   }
   if (text.length > RESTATEMENT_MAX_CHARS) {
     return {
       ok: false,
-      text: `review-gate: propose_restatement rejected —— 反述 ${text.length} 字，超过 ` +
+      text: `review-gate: ${tool} rejected —— 反述 ${text.length} 字，超过 ` +
         `${RESTATEMENT_MAX_CHARS} 字上限。反述是让用户一眼看出理解偏差的对照，不是设计文档。`,
     };
   }
   if (text.length < RESTATEMENT_MIN_CHARS) {
     return {
       ok: false,
-      text: `review-gate: propose_restatement rejected —— 反述只有 ${text.length} 字，` +
+      text: `review-gate: ${tool} rejected —— 反述只有 ${text.length} 字，` +
         `低于 ${RESTATEMENT_MIN_CHARS} 字下限：这么短装不下上下文、例子、改前改后与受影响的步骤。\n` +
         RESTATEMENT_SKELETON,
     };
@@ -249,7 +259,7 @@ export function checkRestatementText(raw: unknown): RestatementCheck {
   if (!hasBeforeAfterContrast(text)) {
     return {
       ok: false,
-      text: "review-gate: propose_restatement rejected —— 反述里没有「改之前 → 改之后」的对照，" +
+      text: `review-gate: ${tool} rejected —— 反述里没有「改之前 → 改之后」的对照，` +
         "而这正是反述唯一能提前暴露理解偏差的地方。\n" +
         "接受的写法很宽：只要出现箭头（→ / -> / ⇒ / =>），或者「改之前/改前/之前/原来/现在是/现状/目前」" +
         "配上「改之后/改后/之后/以后/改成/变成/将会」中的任意一对即可。\n" +
@@ -544,54 +554,49 @@ export async function doProposeRestatement(
     recommended: RESTATEMENT_APPROVE_LABEL,
     declineRow: REVISE_ROW,
   };
-  try {
-    const outcome = await deps.askEitherSide(
-      {
-        dialogKind: "select",
-        topic: "restatement",
-        title: RESTATEMENT_CONFIRM_TITLE,
-        options: choiceRows(spec),
-        // The FULL text travels in the payload: an orchestrator answering on
-        // the user's behalf must judge the same words the human would see,
-        // never a summary the child retyped.
-        //
-        // The STATION travels beside it, structured (2026-09-06). It is the
-        // half a project manager is not free to agree to: since the ship gate
-        // started reading the station, confirming one looser than the approved
-        // plan's would hand the child ship commands the user never authorized.
-        // `orchestrator_answer` compares the two and refuses the proxy answer
-        // when this is the wider one (lib/orchestrator-answer-tools.ts,
-        // `proxyCrosscheckGuard`); the USER answering their own dialog is
-        // unaffected, since the plan's station came from them in the first
-        // place.
-        payload: text,
-        station,
+  const decision = await awaitApproval({
+    askEitherSide: (request, hasUI, render) => deps.askEitherSide(request, hasUI, render),
+    request: {
+      dialogKind: "select",
+      topic: "restatement",
+      title: RESTATEMENT_CONFIRM_TITLE,
+      options: choiceRows(spec),
+      // The FULL text travels in the payload: an orchestrator answering on
+      // the user's behalf must judge the same words the human would see,
+      // never a summary the child retyped.
+      //
+      // The STATION travels beside it, structured (2026-09-06). It is the
+      // half a project manager is not free to agree to: since the ship gate
+      // started reading the station, confirming one looser than the approved
+      // plan's would hand the child ship commands the user never authorized.
+      // `orchestrator_answer` compares the two and refuses the proxy answer
+      // when this is the wider one (lib/orchestrator-answer-tools.ts,
+      // `proxyCrosscheckGuard`); the USER answering their own dialog is
+      // unaffected, since the plan's station came from them in the first
+      // place.
+      payload: text,
+      station,
 
-      },
-      uiCtx.hasUI === true,
-      async (dialog) => deps.askChoice(uiCtx, spec, {
-        ...dialog,
-        body: buildRestatementConfirmMessage(station) + (capNote ? "\n" + capNote : ""),
-        // THE REPO THE RESTATEMENT BINDS TO (review round 4 P1): same reason as
-        // the goal approval next door — this may be a secondary repo that never
-        // became the active one. `resolveRestatementRepo` answers with a result
-        // object, so the PATH is what travels.
-        repo: repo.ok ? repo.root : undefined,
-      }),
-    );
-    const pick = parseChoice(outcome.answer, spec);
-    confirmed = pick.kind === "chose" && pick.option === RESTATEMENT_APPROVE_LABEL;
-    // The user's OWN typed reason wins over the orchestrator's: the
-    // restatement is theirs to judge.
-    reason = pick.kind === "declined" && pick.reason ? pick.reason : outcome.reason;
-    interrupted = outcome.by === "interrupted";
-    dismissed = pick.kind === "dismissed";
-  } catch {
-    confirmed = false;
-    // No box was rendered at all — that is the same fact as a box nobody
-    // answered, and it must not be reported as an objection.
-    dismissed = true;
-  }
+    },
+    hasUI: uiCtx.hasUI === true,
+    spec,
+    approveLabel: RESTATEMENT_APPROVE_LABEL,
+    render: async (dialog) => deps.askChoice(uiCtx, spec, {
+      ...dialog,
+      body: buildRestatementConfirmMessage(station) + (capNote ? "\n" + capNote : ""),
+      // THE REPO THE RESTATEMENT BINDS TO (review round 4 P1): same reason as
+      // the goal approval next door — this may be a secondary repo that never
+      // became the active one. `resolveRestatementRepo` answers with a result
+      // object, so the PATH is what travels.
+      repo: repo.ok ? repo.root : undefined,
+    }),
+  });
+  confirmed = decision.approved;
+  // The user's OWN typed reason wins over the orchestrator's: the
+  // restatement is theirs to judge.
+  reason = decision.reason;
+  interrupted = decision.interrupted;
+  dismissed = decision.dismissed;
 
   if (!confirmed) {
     if (interrupted) {

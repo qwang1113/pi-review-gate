@@ -89,6 +89,11 @@ function fakeServer(opts: {
   existing?: { name: string; owner: string };
   /** `list-sessions` itself fails — tmux is unreachable. */
   blind?: boolean;
+  /**
+   * …and WHY: the executable itself is not there (`spawnSync tmux ENOENT`),
+   * rather than a server that is merely down (`no server running`).
+   */
+  tmuxMissing?: boolean;
   /** The marker write fails. */
   markerFails?: boolean;
   /** The kill fails. */
@@ -111,9 +116,8 @@ function fakeServer(opts: {
     const sub = argv[0];
     const target = String(argv[argv.indexOf("-t") + 1] ?? "");
     if (sub === "list-sessions") {
-      return opts.blind
-        ? { ok: false, stdout: "", stderr: "no server running" }
-        : { ok: true, stdout: [...sessions.keys()].join("\n"), stderr: "" };
+      if (!opts.blind) return { ok: true, stdout: [...sessions.keys()].join("\n"), stderr: "" };
+      return { ok: false, stdout: "", stderr: opts.tmuxMissing ? "spawnSync tmux ENOENT" : "no server running" };
     }
     if (sub === "new-session") {
       const name = String(argv[argv.indexOf("-s") + 1]);
@@ -433,17 +437,33 @@ test("a marker that failed to write takes the session with it (quality round P2)
   assert.equal(scope.record, undefined, "and nothing was recorded for it");
 });
 
-test("an unreadable tmux is 'I do not know' — nothing is created and nothing is killed", () => {
+test("a server that is DOWN is not a missing tmux: the session is created (2026-10-03)", () => {
+  // The distinction this test exists for: `no server running` means there is no
+  // session to find, and `new-session` is what starts one — refusing there is
+  // what ate three scheduled runs in a row on 2026-10-02. Only a tmux that
+  // cannot run at all stays an "I do not know" (the test right below).
   const server = fakeServer({ blind: true });
   const scope = fakeScope();
   scope.record = { name: NAME, owner: SESSION_ID, createdAt: "2026-09-25T00:00:00.000Z" };
   const opened = openScopeWindow(server.run, scope, { cwd: "/repo", command: ["pi"] });
-  assert.equal(opened.ok, false);
-  if (!opened.ok) assert.match(opened.error, /读不到 tmux server/);
-  assert.equal(server.calls.some((a) => a[0] === "new-session"), false, "no session is created in the dark");
-  const killed = closeOwnSession(server.run, scope);
-  assert.equal(killed.ok, false);
+  assert.equal(opened.ok, true);
+  assert.equal(server.calls.some((a) => a[0] === "new-session"), true, "the session is created on a server that is merely down");
+  // …and closing is a no-op, not a failure: a server that is gone took its
+  // sessions with it.
+  assert.deepEqual(closeOwnSession(server.run, scope), {
+    ok: true,
+    killed: false,
+    note: `tmux server 不在了，专属 session ${NAME} 也随之消失`,
+  });
   assert.equal(server.calls.some((a) => a[0] === "kill-session"), false, "and nothing is killed on a guess");
+});
+
+test("a tmux that cannot run at all is still 'I do not know' — nothing is created", () => {
+  const server = fakeServer({ blind: true, tmuxMissing: true });
+  const opened = openScopeWindow(server.run, fakeScope(), { cwd: "/repo", command: ["pi"] });
+  assert.equal(opened.ok, false);
+  if (!opened.ok) assert.match(opened.error, /起不来 tmux/);
+  assert.equal(server.calls.some((a) => a[0] === "new-session"), false, "no session without a tmux to create it");
 });
 
 test("closing is scoped, idempotent and honest about what it did", () => {
@@ -569,7 +589,11 @@ test("pinOwnSession pins only a session that is provably mine, and is a no-op wh
   assert.equal(pinOwnSession(foreign.run, fakeScope(), "handed-off").ok, false);
   assert.equal(foreign.facts.size, 0);
 
-  assert.equal(pinOwnSession(factsServer({ blind: true }).run, fakeScope(), "handed-off").ok, false);
+  // A server that is DOWN has no session to pin — a no-op, not a refusal.
+  assert.deepEqual(pinOwnSession(factsServer({ blind: true }).run, fakeScope(), "handed-off"), { ok: true });
+  // …while a tmux that cannot run at all stays a refusal: nothing can be
+  // confirmed about a session we cannot even look for.
+  assert.equal(pinOwnSession(factsServer({ blind: true, tmuxMissing: true }).run, fakeScope(), "handed-off").ok, false);
   assert.equal(pinOwnSession(factsServer({ existing: { name: NAME, owner: SESSION_ID }, factFails: SESSION_PINNED_OPTION }).run, fakeScope(), "x").ok, false);
 });
 

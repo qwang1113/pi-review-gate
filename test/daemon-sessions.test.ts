@@ -10,7 +10,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   extractGateState,
@@ -147,7 +148,7 @@ test("prime with an explicit offset resumes exactly where a replay stopped", () 
 test("without a gate-state record the reading is marked unknown, not 'nothing pending'", () => {
   const home = scratchHome();
   writeTranscript(home, { sessionId: "nogate", cwd: "/x", records: [assistantRecord("just output")] });
-  const observer = createSessionObserver({ home, runTmux: paneRunner([]) });
+  const observer = createSessionObserver({ userHome: home, runTmux: paneRunner([]) });
   const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "nogate");
   assert.ok(session);
   assert.equal(session.gateStateFound, false);
@@ -206,7 +207,7 @@ test("sessions merge the pane, the registry and the transcript", () => {
     ],
   });
   const observer = createSessionObserver({
-    home,
+    userHome: home,
     runTmux: paneRunner([
       paneLine({
         session: "rg-project-abc123",
@@ -255,7 +256,7 @@ test("a pane id minted by another tmux server does not make a session look alive
     if (argv[0] === "list-panes") return { ok: true, stdout: "%1\n", stderr: "" };
     return { ok: false, stdout: "", stderr: `unexpected: ${argv.join(" ")}` };
   });
-  const observer = createSessionObserver({ home, runTmux: runner });
+  const observer = createSessionObserver({ userHome: home, runTmux: runner });
   const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "s1");
   assert.ok(session);
   assert.equal(session.alive, false, "a stranger's pane must not read as this session being alive");
@@ -264,7 +265,7 @@ test("a pane id minted by another tmux server does not make a session look alive
 test("a pane that stopped reporting is stalled, not working", () => {
   const home = scratchHome();
   const observer = createSessionObserver({
-    home,
+    userHome: home,
     runTmux: paneRunner([
       paneLine({
         sid: "stale1",
@@ -282,21 +283,28 @@ test("a pane that stopped reporting is stalled, not working", () => {
 test("an unreadable tmux is missing information, never 'no sessions'", () => {
   const home = scratchHome();
   writeRegistry(home, registryEntry({ name: "t1", sessionId: "reg1", repo: "/repo", cwd: "/repo" }));
-  const observer = createSessionObserver({ home, runTmux: brokenRunner() });
+  const observer = createSessionObserver({ userHome: home, runTmux: brokenRunner() });
   const collection = observer.collect();
   assert.equal(collection.tmuxReadable, false);
   assert.ok(collection.problems.length > 0);
   assert.ok(collection.sessions.some((session) => session.sessionId === "reg1"), "the registry still answers");
 });
 
-test("a recent session with no pane and no name is listed as dead, with its true cwd", () => {
+test("a recent session with no pane and no name is dead once its transcript has stopped, with its true cwd", () => {
   const home = scratchHome();
   writeTranscript(home, {
     sessionId: "old1",
     cwd: "/Users/me/legacy",
     records: [assistantRecord("done here")],
   });
-  const observer = createSessionObserver({ home, runTmux: paneRunner([]) });
+  // THE CLOCK, not the fixture, makes the file stale: a transcript that has
+  // STOPPED, with no pane and no registration behind it, is what `dead` is for
+  // (see the live case below — the two differ only by the file's own age).
+  const observer = createSessionObserver({
+    userHome: home,
+    runTmux: paneRunner([]),
+    now: () => Date.now() + 10 * 60_000,
+  });
   const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "old1");
   assert.ok(session, "a transcript from today is what 'recently ran' means");
   assert.equal(session.state, "dead");
@@ -304,12 +312,130 @@ test("a recent session with no pane and no name is listed as dead, with its true
   assert.equal(session.alive, false);
 });
 
+test("a transcript still being written belongs to a live session, not a dead one", () => {
+  // THE DEFECT (t6 acceptance, 2026-10-02): this word used to be hard-coded
+  // `dead` for every session nothing else owned. A run whose pane had lost its
+  // `@rg_sid` was therefore read as finished while it was still working — the
+  // scheduler settled it as `gone` 21 minutes before that same session
+  // recorded its READY, and left its window holding the checkout.
+  const home = scratchHome();
+  writeTranscript(home, { sessionId: "live1", cwd: "/repo", records: [assistantRecord("still working")] });
+  const observer = createSessionObserver({ userHome: home, runTmux: paneRunner([]) });
+  const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "live1");
+  assert.ok(session);
+  assert.equal(session.state, "working");
+  assert.equal(session.stateSource, "transcript");
+  assert.equal(session.alive, false, "`alive` is the pane/registry fact, and neither is there");
+});
+
+test("the observed roots are the producers' own, never the daemon's home", () => {
+  // DEFECT 1: pi writes under the USER home and the gate registers names
+  // there; `RG_DAEMON_HOME` moves neither. Read under the daemon's home, every
+  // session came back `transcript: null` / `gateStateFound: false` and could
+  // only ever settle as `gone`.
+  const daemonHome = scratchHome();
+  const userHome = scratchHome();
+  writeTranscript(userHome, {
+    sessionId: "s-live",
+    cwd: "/repo",
+    records: [gateStateRecord({ review: { verdict: "READY", fingerprint: "tree-1" } })],
+  });
+  writeRegistry(userHome, registryEntry({ name: "t1-live", sessionId: "s-live", repo: "/repo", cwd: "/repo" }));
+  // The same ids planted under the DAEMON's home, where nobody writes:
+  writeTranscript(daemonHome, { sessionId: "s-live", cwd: "/repo", records: [assistantRecord("never seen")] });
+  writeRegistry(daemonHome, registryEntry({ name: "wrong-home", sessionId: "s-live", repo: "/repo", cwd: "/repo" }));
+
+  const observer = createSessionObserver({ userHome, runTmux: paneRunner([]) });
+  const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "s-live");
+  assert.ok(session);
+  assert.equal(session.name, "t1-live", "the registry that was read is the gate's own");
+  assert.ok(
+    observer.transcriptFor("s-live")?.startsWith(`${userHome}/.pi/agent/sessions/`),
+    `expected pi's root, got ${observer.transcriptFor("s-live")}`,
+  );
+  assert.equal(session.gateStateFound, true, "the transcript found there carries the gate state");
+  assert.equal(session.rounds.lastVerdict, "READY");
+});
+
+test("a session-dir OVERRIDE is the whole root: a flat .jsonl layout is read too (t9 quality round)", () => {
+  // `PI_CODING_AGENT_SESSION_DIR` names the session dir ITSELF (lib/session-dir.ts
+  // `piSessionsRoot`), so pi lists the `.jsonl` files directly inside it — there
+  // is no per-cwd subdirectory to descend into. A reader that only ever looked
+  // one level down found no transcripts at all under the override: the panel
+  // lost every round, and a run that really passed settled as `gone`.
+  const home = scratchHome();
+  const flat = join(home, "override-sessions");
+  mkdirSync(flat, { recursive: true });
+  const transcript = join(flat, "2026-10-01T00-00-00-000Z_flat1.jsonl");
+  writeFileSync(
+    transcript,
+    `${JSON.stringify({ type: "session", id: "flat1", timestamp: new Date().toISOString(), cwd: "/repo" })}\n` +
+      `${JSON.stringify(gateStateRecord({ review: { verdict: "READY", fingerprint: "tree-1" } }))}\n`,
+  );
+  const previous = process.env.PI_CODING_AGENT_SESSION_DIR;
+  try {
+    process.env.PI_CODING_AGENT_SESSION_DIR = flat;
+    const observer = createSessionObserver({ userHome: home, runTmux: paneRunner([]) });
+    assert.equal(observer.transcriptFor("flat1"), transcript, "根下直接的 .jsonl 也要被认");
+    const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "flat1");
+    assert.equal(session?.gateStateFound, true, "门禁 state 仍然从那条转写里读得到");
+    assert.equal(session?.rounds.lastVerdict, "READY");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+    else process.env.PI_CODING_AGENT_SESSION_DIR = previous;
+  }
+});
+
+test("the verdict is read where it survives declare_done, not from the rounds it clears", () => {
+  // DEFECT 3: `declare_done` clears `rounds` (lib/declare-done-tool.ts) while
+  // the daemon derived the verdict from that very array — so a run that ended
+  // exactly as it is told to end could never be recorded `passed`.
+  const home = scratchHome();
+  writeTranscript(home, {
+    sessionId: "done1",
+    cwd: "/repo",
+    records: [gateStateRecord({
+      review: { verdict: "READY", fingerprint: "tree-1" },
+      precommit: { verdict: "PASS", fingerprint: "tree-1" },
+      completion: { at: "2026-10-02T00:00:00.000Z", merge: "none" },
+      rounds: [],
+      sentReviewRounds: 2,
+    })],
+  });
+  const observer = createSessionObserver({ userHome: home, runTmux: paneRunner([]) });
+  const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "done1");
+  assert.ok(session);
+  assert.equal(session.rounds.recorded, 0, "the history really is gone");
+  assert.equal(session.rounds.sent, 2, "the session-wide counter is not");
+  assert.equal(session.rounds.lastVerdict, "READY", "the standing conclusion is what the daemon reads");
+  assert.equal(session.completedAt, "2026-10-02T00:00:00.000Z");
+});
+
+test("a verdict that was taken back is PENDING, not an old round's READY", () => {
+  // An edit invalidates the binding (lib/gate-state-transitions.ts) without
+  // touching the round history: falling back to the history would report a run
+  // as `passed` on a verdict that no longer stands for its content.
+  const home = scratchHome();
+  writeTranscript(home, {
+    sessionId: "edited1",
+    cwd: "/repo",
+    records: [gateStateRecord({
+      review: { verdict: "PENDING", fingerprint: null },
+      rounds: [{ verdict: "READY" }],
+    })],
+  });
+  const observer = createSessionObserver({ userHome: home, runTmux: paneRunner([]) });
+  const session = observer.collect().sessions.find((candidate) => candidate.sessionId === "edited1");
+  assert.equal(session?.rounds.recorded, 1);
+  assert.equal(session?.rounds.lastVerdict, null);
+});
+
 test("the branch is looked up per cwd and cached; a failure is null, never a guess", () => {
   const home = scratchHome();
   writeRegistry(home, registryEntry({ name: "t1", sessionId: "b1", repo: "/repo", cwd: "/repo" }));
   let calls = 0;
   const observer = createSessionObserver({
-    home,
+    userHome: home,
     runTmux: paneRunner([]),
     branchOf: (cwd) => {
       calls += 1;
@@ -327,7 +453,7 @@ test("the list is capped and says so instead of silently truncating", () => {
   for (let index = 0; index < 5; index += 1) {
     writeRegistry(home, registryEntry({ name: `t${index}`, sessionId: `s${index}`, repo: "/repo", cwd: "/repo" }));
   }
-  const observer = createSessionObserver({ home, runTmux: paneRunner([]) });
+  const observer = createSessionObserver({ userHome: home, runTmux: paneRunner([]) });
   const collection = observer.collect({ limit: 2 });
   assert.equal(collection.sessions.length, 2);
   assert.ok(collection.problems.some((problem) => problem.includes("只返回最近 2 条")));
@@ -340,7 +466,7 @@ test("SESSION_LIST_LIMIT is the documented default", () => {
 test("the transcript index is refreshed, so a brand-new session is found without a restart", () => {
   const home = scratchHome();
   let at = 1_000_000;
-  const observer = createSessionObserver({ home, runTmux: paneRunner([]), now: () => at });
+  const observer = createSessionObserver({ userHome: home, runTmux: paneRunner([]), now: () => at });
   assert.equal(observer.transcriptFor("late1"), undefined);
   writeTranscript(home, { sessionId: "late1", cwd: "/repo", records: [assistantRecord("hi")] });
   at += 10_000;

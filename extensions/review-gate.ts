@@ -111,6 +111,9 @@ import { registerAdvisoryPrepareTools } from "../lib/advisory-prepare-tools.ts";
 import { registerCopilotReviewTools } from "../lib/copilot-review-tools.ts";
 import { registerGoalTools } from "../lib/goal-tools.ts";
 import { registerRestatementTools } from "../lib/restatement.ts";
+import { registerScheduleTools } from "../lib/schedule-tools.ts";
+import { adoptScheduledRunContract } from "../lib/schedule-run-contract.ts";
+import { daemonUserHome } from "../lib/daemon/paths.ts";
 import { registerLoopStageTools } from "../lib/loop-stages.ts";
 import { recordGoalPrereview, type GoalPrereviewDeps } from "../lib/goal-prereview-tools.ts";
 import { evaluateToolCall, type ShipGateHookDeps } from "../lib/ship-gate-hook.ts";
@@ -1257,6 +1260,15 @@ export default function reviewGate(pi: ExtensionAPI) {
     proxyDecisions: () => dialogProxy.all(),
   });
 
+  // THE GOAL FILE'S ONE WRITER (shared by the goal family and the two
+  // scheduled-task registrations — three call sites, one rule).
+  const writeSessionGoalFile = (path: string, text: string): void => {
+    // A session another one holds this worktree against must not overwrite
+    // `.pi/loop-goal.md` (reviewer P1, 2026-09-05).
+    if (cells.state.exclusivityRefusal) throw new Error(cells.state.exclusivityRefusal);
+    mkdirSync(pathDirname(path), { recursive: true });
+    writeFileSync(path, text, "utf8");
+  };
   // ---------- the goal family, the restatement, the stage switches ----------
   registerGoalTools(pi, {
     ...goalPrereviewDeps,
@@ -1272,13 +1284,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     stationCap: stationCapFromEnv,
     stationFloor: () => (sessionWorktree.inOwnWorktree() ? RELOCATED_STATION_FLOOR : undefined),
     isOrchestrationChild,
-    writeGoalFile: (path, text) => {
-      // A session another one holds this worktree against must not overwrite
-      // `.pi/loop-goal.md` (reviewer P1, 2026-09-05).
-      if (cells.state.exclusivityRefusal) throw new Error(cells.state.exclusivityRefusal);
-      mkdirSync(pathDirname(path), { recursive: true });
-      writeFileSync(path, text, "utf8");
-    },
+    writeGoalFile: writeSessionGoalFile,
   });
   // `propose_restatement` shares the goal family's bindings deliberately: two
   // steps of one negotiation must agree on which repo they are about.
@@ -1296,6 +1302,43 @@ export default function reviewGate(pi: ExtensionAPI) {
     stationFloor: () => (sessionWorktree.inOwnWorktree() ? RELOCATED_STATION_FLOOR : undefined),
     isOrchestrationChild,
   });
+  // ---------- scheduled tasks (lib/schedule-tools.ts + lib/schedule-run-contract.ts) ----------
+  // ONE tool (`schedule_task`) and ONE reader of a run's identity; the whole
+  // authoring chain is lib/schedule-authoring.ts, and what a scheduled run
+  // inherits is decided in lib/schedule-run-contract.ts. This file only wires.
+  const scheduleDeps = {
+    home: () => daemonUserHome(),
+    primaryRepoRoot: () => cells.primaryRepoRoot,
+    cwd: () => cells.cwd,
+    stateFor: (root: string) => stateForRepo(root),
+    persist: (ctx: unknown, root: string) => persistRepo(ctx as unknown as ExtensionContext, root),
+    log: (message: string) => log(message),
+    showToUser: (uiCtx: unknown, lead: string, body: string) =>
+      showToUser(uiCtx as ExtensionContext, lead, body),
+    askChoice: (uiCtx: unknown, spec: Parameters<typeof askChoice>[1], opts?: Parameters<typeof askChoice>[2]) =>
+      askChoice(uiCtx as { ui?: ChoiceUi }, spec, opts),
+    askEitherSide: (request: Parameters<typeof askEitherSide>[0], hasUI: boolean, render: Parameters<typeof askEitherSide>[2]) =>
+      askEitherSide(request, hasUI, render),
+    runGoalAudit: (input: Parameters<typeof runGoalAudit>[0]) => runGoalAudit(input),
+    loopGoalPath: (root: string) => loopGoalPathIn(root),
+    loopGoalRelPath: loopGoalRelPath(SESSION_STATE_VARIANT),
+    writeGoalFile: writeSessionGoalFile,
+    isJudgePane,
+    isWorkerPane: () => readWorkerSideEnv(process.env) !== undefined,
+    isOrchestrationChild,
+    taskMode: () => cells.state.taskMode,
+  };
+  registerScheduleTools(pi, scheduleDeps);
+  const scheduleRunDeps = {
+    home: () => daemonUserHome(),
+    repoRoot: () => cells.primaryRepoRoot,
+    sessionId: () => cells.state.sessionId,
+    stateFor: (root: string) => stateForRepo(root),
+    persist: (ctx: unknown, root: string) => persistRepo(ctx as unknown as ExtensionContext, root),
+    loopGoalPath: (root: string) => loopGoalPathIn(root),
+    writeGoalFile: writeSessionGoalFile,
+    log: (message: string) => log(message),
+  };
   // `choose_loop_stages` — the SAME deps back the tool_call fallback.
   registerLoopStageTools(pi, loopGoal.loopStageDeps);
 
@@ -1420,7 +1463,14 @@ export default function reviewGate(pi: ExtensionAPI) {
     closeScopeOnExit,
     log,
   });
-  pi.on("session_start", (_event, ctx) => lifecycle.onSessionStart(ctx));
+  pi.on("session_start", async (_event, ctx) => {
+    await lifecycle.onSessionStart(ctx);
+    // A SCHEDULED RUN ADOPTS ITS CONTRACT — the daemon started this session for
+    // one scheduled task (`RG_SCHEDULE_ID` / `RG_SCHEDULE_RUN`), and the ledger
+    // must prove that before anything is written. Fail-closed: anything that
+    // does not add up writes nothing and leaves one log line.
+    adoptScheduledRunContract(scheduleRunDeps, ctx);
+  });
   pi.on("session_shutdown", (event) => lifecycle.onSessionShutdown(event));
   pi.on("session_compact", () => lifecycle.onSessionCompact());
   const onTurnEnd = createTurnEndHook(cells, {
