@@ -139,6 +139,16 @@ test("flags are read as FLAGS — a commit message is data (round-1 P2)", () => 
   assert.deepEqual(commandTokens("git commit -am 'feat: x' -S"), ["git", "commit", "-am", "-S"]);
 });
 
+test("an unrelated git env prefix is not a signing opt-out (round-2 P2)", () => {
+  // GIT_CONFIG_GLOBAL=/dev/null touches nothing this rule is about; only the
+  // ephemeral KEY/VALUE pair that actually sets commit.gpgsign=false is one.
+  assert.equal(signOptOut("GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git commit -m x"), undefined);
+  assert.match(
+    String(signOptOut("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false git commit -m x")),
+    /UNSIGNED/,
+  );
+});
+
 test("only EXPLICIT refusals are read as an opt-out", () => {
   assert.match(String(signOptOut("git commit --no-gpg-sign -m x")), /--no-gpg-sign/);
   assert.match(String(signOptOut("git -c commit.gpgsign=false commit -m x")), /commit\.gpgsign=false/);
@@ -267,6 +277,33 @@ test("a FORCE push refspec is not fed to git as a rev (round-1 P1)", () => {
   const scan = scanSignatures(dir, targets);
   assert.equal(scan.error, undefined, "the sanitized rev is readable");
   assert.equal(scan.unsigned.length, 1, "the unsigned commit is still named");
+});
+
+test("a DELETE publishes nothing, so it is never judged as a push of HEAD (round-2 P2)", () => {
+  const { dir } = makeRepo();
+  commitFile(dir, "a.txt", "one");
+  // "`:gone`" is a delete; so is `--delete gone`, even when a local branch of
+  // that name has already been removed.
+  assert.deepEqual(pushTargetsForSegment(dir, "git push origin :gone"), []);
+  assert.deepEqual(pushTargetsForSegment(dir, "git push origin --delete gone"), []);
+  assert.deepEqual(pushTargetsForSegment(dir, "git push origin :work"), []);
+});
+
+test("a stale LOCAL base does not drag published history into the PR range (round-2 P2)", () => {
+  const { dir } = makeRepo();
+  const first = commitFile(dir, "a.txt", "one");
+  const second = commitFile(dir, "b.txt", "two");
+  // The REMOTE is ahead of the local branch: a base resolved locally would put
+  // the already-published commit inside the range and demand a re-sign of
+  // history the user was told would never be rewritten.
+  git(dir, ["update-ref", "refs/remotes/origin/main", second]);
+  git(dir, ["reset", "-q", "--hard", first]);
+  git(dir, ["checkout", "-q", "-b", "work", second]);
+  uncheckedCommit(dir, "c.txt", "three");
+  const targets = prTargetsForSegment(dir, "gh pr create --base main --head work --title x");
+  assert.deepEqual(targets, [{ kind: "range", range: "origin/main..work" }]);
+  const scan = scanSignatures(dir, targets);
+  assert.equal(scan.unsigned.length, 1, "only the commit the PR adds is judged");
 });
 
 test("an unreadable history is a refusal, not a clean scan", () => {

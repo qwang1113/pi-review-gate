@@ -347,7 +347,17 @@ export function signOptOut(segment: string): string | undefined {
     if (/^-c"?commit\.gpgsign=(false|no|off|0)"?$/i.test(tok)) {
       return "`-c commit.gpgsign=false` asks for an UNSIGNED commit";
     }
-    if (/^GIT_CONFIG_[A-Z0-9_]*=/.test(tok)) return "a git config override asks for an UNSIGNED commit";
+    // THE EPHEMERAL CONFIG FORM, read precisely: `GIT_CONFIG_COUNT=1
+    // GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false`. A bare
+    // `GIT_CONFIG_GLOBAL=/dev/null` prefix touches nothing this rule is about
+    // and must not refuse the commit (round-2 reviewer P2).
+    const key = /^GIT_CONFIG_KEY_(\d+)=commit\.gpgsign$/i.exec(tok);
+    if (key !== null) {
+      const value = tokens.find((t) => t.toLowerCase().startsWith("git_config_value_" + key[1] + "="));
+      if (value !== undefined && /=(false|no|off|0)$/i.test(value)) {
+        return "a git config override asks for an UNSIGNED commit";
+      }
+    }
   }
   return undefined;
 }
@@ -477,8 +487,16 @@ export function refspecSource(refspec: string): string | undefined {
   return src;
 }
 
-/** The commit range a ref would publish: the commits on top of its upstream. */
-function targetForRef(root: string, ref: string): VerifyTarget {
+/**
+ * The commit range a ref would publish: the commits on top of its upstream.
+ *
+ * `undefined` when the ref does not exist locally — that is a DELETE of a
+ * branch that only lives on the server (or a typo git itself will reject), and
+ * it publishes no commit from here. Refusing it would block a branch cleanup
+ * for a signature reason that does not apply (round-2 reviewer P2).
+ */
+function targetForRef(root: string, ref: string): VerifyTarget | undefined {
+  if (gitOrNull(root, ["rev-parse", "--verify", "--quiet", ref]) === null) return undefined;
   // `for-each-ref` answers "no upstream" with an empty line and exit 0, which
   // is a real answer; `rev-parse @{upstream}` fails, and a failure must never
   // be confused with the answer.
@@ -499,9 +517,17 @@ export function flagValue(segment: string, flag: string): string | undefined {
   return undefined;
 }
 
-/** A remote branch name git can resolve, or `undefined`. */
+/**
+ * A branch name resolved WITH THE REMOTE FIRST, or `undefined`.
+ *
+ * The order matters (round-2 reviewer P2): `gh pr create --base main` is about
+ * the REMOTE main. Resolving the local one first drags commits the remote
+ * already has into the range when the local branch is ahead, and hides the ones
+ * the PR really adds when it is behind.
+ */
 function resolveRemoteRef(root: string, name: string): string | undefined {
-  for (const candidate of [name, "origin/" + name]) {
+  const candidates = name.includes("/") ? [name] : ["origin/" + name, name];
+  for (const candidate of candidates) {
     if (gitOrNull(root, ["rev-parse", "--verify", "--quiet", candidate]) !== null) return candidate;
   }
   return undefined;
@@ -516,11 +542,18 @@ function resolveRemoteRef(root: string, name: string): string | undefined {
 export function pushTargetsForSegment(root: string, segment: string): VerifyTarget[] {
   const refspecs = pushRefspecs(segment);
   if (refspecs === undefined) return [{ kind: "unpushed", sha: "--branches" }];
-  const sources = refspecs
-    .map(refspecSource)
-    .filter((src): src is string => src !== undefined);
-  if (sources.length === 0) return [targetForRef(root, "HEAD")];
-  return sources.map((src) => targetForRef(root, src));
+  // `--delete` / `-d` publishes nothing, whatever the refspec list says.
+  if (commandTokens(segment).some((tok) => tok === "--delete" || tok === "-d")) return [];
+  // No refspec at all ⇒ push the current branch.
+  if (refspecs.length === 0) return [targetForRef(root, "HEAD")].filter(isTarget);
+  // Every refspec was a DELETE (`:gone`): a branch removal publishes no commit.
+  const sources = refspecs.map(refspecSource).filter((src): src is string => src !== undefined);
+  if (sources.length === 0) return [];
+  return sources.map((src) => targetForRef(root, src)).filter(isTarget);
+}
+
+function isTarget(target: VerifyTarget | undefined): target is VerifyTarget {
+  return target !== undefined;
 }
 
 /**
