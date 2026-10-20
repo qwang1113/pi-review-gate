@@ -5,7 +5,7 @@
  * `extensions/review-gate.ts` (t8, 2026-09-26, wave 4 of the split).
  */
 
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { isAbsolute as pathIsAbsolute, relative as pathRelative, resolve as pathResolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -18,28 +18,8 @@ import {
   newDependencyNames,
 } from "./dependency-justification.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "./file-size-gate.ts";
+import { realDir } from "./fingerprint.ts";
 
-/**
- * A path this session edited, in the ONE form `git ls-files --others` answers.
- *
- * The edit handler records absolute paths; git answers repo-relative ones.
- * Both sides are realpath'd first, because a checkout reached through a symlink
- * (`/tmp` vs `/private/tmp` on macOS) is the same file under two names — and
- * that is exactly the case this normalization was written for.
- */
-function realpathOf(path: string): string {
-  try { return realpathSync(path); } catch { return path; }
-}
-
-export function repoRelativeTo(root: string, file: string): string {
-  const raw = (file ?? "").trim();
-  if (raw === "") return raw;
-  if (!pathIsAbsolute(raw)) return raw;
-  const base = realpathOf(root);
-  const abs = realpathOf(raw);
-  const rel = pathRelative(base, abs);
-  return rel === "" || rel.startsWith("..") ? raw : rel;
-}
 import type { GateState } from "./gate-state.ts";
 import { testsRan } from "./gate-state-transitions.ts";
 import { gitBaseEnv, gitFailureText, gitOrNull, gitRaw, gitText } from "./git-exec.ts";
@@ -51,6 +31,30 @@ import type { SessionCells } from "./session-cells.ts";
 import type { AppealKind } from "./text-appeal.ts";
 import type { ToolHost } from "./tool-host.ts";
 import { isProtectedBranch } from "./workspace-branch.ts";
+
+/**
+ * A path this session edited, in the ONE form `git ls-files --others` answers.
+ *
+ * The edit handler records absolute paths; git answers repo-relative ones. Both
+ * sides go through `realDir` first, because a checkout reached through a
+ * symlink (`/tmp` vs `/private/tmp` on macOS) is the same file under two names —
+ * and that is exactly the case this normalization was written for. `realDir` is
+ * the repo's ONE resolver (lib/fingerprint.ts exports it for the same reason);
+ * a local copy would be a third answer to "which file is this".
+ *
+ * WHEN IT CANNOT PLACE THE PATH (the file is already gone, the root moved) the
+ * relative computation does not match, so the path falls into `leftOut` — the
+ * direction that never commits something we cannot place. A deletion or rename
+ * of an already TRACKED file is unaffected: that half is staged by `git add -A`,
+ * not by this list.
+ */
+export function repoRelativeTo(root: string, file: string): string {
+  const raw = (file ?? "").trim();
+  if (raw === "") return raw;
+  if (!pathIsAbsolute(raw)) return raw;
+  const rel = pathRelative(realDir(root), realDir(raw));
+  return rel === "" || rel.startsWith("..") ? raw : rel;
+}
 
 export interface CheckpointToolDeps {
   resolveToolRepo: SessionRepos["resolveToolRepo"];

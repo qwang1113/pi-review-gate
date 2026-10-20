@@ -7395,7 +7395,7 @@ test("F3: every path the edit tools wrote is recorded, code or not", () => {
     /for \(const candidate of new Set\(\[cells\.primaryRepoRoot, root\]\)\) \{\n\s*if \(abs\.startsWith\(candidate \+ "\/"\)\) return abs\.slice\(candidate\.length \+ 1\);/,
     "recorded paths are REPO-root-relative (both spellings), never cwd-relative",
   );
-  assert.match(SRC, /const physical = realpathOf\(abs\);/, "the physical spelling is tried too");
+  assert.match(SRC, /const physical = realDir\(abs\);/, "the physical spelling is tried too — through the repo's ONE resolver");
 });
 
 test("F4: the round's receipt names the checkpoint and the files in it", () => {

@@ -1,12 +1,3 @@
-/** A path in its physical spelling, or unchanged when it cannot be read. */
-function realpathOf(path: string): string {
-  try {
-    return realpathSync(path);
-  } catch {
-    return path;
-  }
-}
-
 /**
  * THE SESSION'S REPOS — the per-repo gate state, how a repo is named in a
  * message, which repo a tool targets, and the review-scope facts of each.
@@ -19,12 +10,12 @@ function realpathOf(path: string): string {
  * repo's is loaded lazily into `cells.repoStateCache`.
  */
 
-import { realpathSync } from "node:fs";
 import { join as pathJoin, resolve as pathResolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { acceptanceStatusLine } from "./acceptance-round.ts";
 import { blockedMarkerPath, recordBlockedMarker, reconcileBlockedMarker } from "./blocked-marker.ts";
 import { copilotProblems } from "./copilot-review-state.ts";
+import { realDir } from "./fingerprint.ts";
 import { armingFromFacts } from "./gate-arming.ts";
 import { emptyState, type GateState } from "./gate-state.ts";
 import { saveSidecarPreservingConcurrent } from "./gate-state-io.ts";
@@ -330,7 +321,7 @@ export function createSessionRepos(cells: SessionCells, deps: SessionReposDeps) 
    */
   function repoRelative(p: string): string {
     const abs = p.startsWith("/") ? p : pathJoin(cells.cwd, p);
-    const root = realpathOf(cells.primaryRepoRoot);
+    const root = realDir(cells.primaryRepoRoot);
     // TWO SPELLINGS OF ONE CHECKOUT (2026-10-20, measured): the session's repo
     // root can be the LOGICAL path (`/tmp/...`) while git reports the PHYSICAL
     // one (`/private/tmp/...`). A plain string prefix then misses, every path
@@ -342,7 +333,7 @@ export function createSessionRepos(cells: SessionCells, deps: SessionReposDeps) 
     for (const candidate of new Set([cells.primaryRepoRoot, root])) {
       if (abs.startsWith(candidate + "/")) return abs.slice(candidate.length + 1);
     }
-    const physical = realpathOf(abs);
+    const physical = realDir(abs);
     return physical.startsWith(root + "/") ? physical.slice(root.length + 1) : abs;
   }
 
