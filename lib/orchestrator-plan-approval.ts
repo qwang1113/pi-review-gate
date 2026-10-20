@@ -57,8 +57,7 @@ import {
   type DeliveryStation,
 } from "./delivery-station.ts";
 import { allowsMultiplePrs, effectiveTaskStation, taskRepoOf, type RepoPrPlanInput } from "./repo-pr-policy.ts";
-import { taskAcceptanceOn } from "./acceptance-round.ts";
-import type { PlanTaskStages } from "./loop-stages.ts";
+
 
 /** The authorization-relevant shape of one task, as the user approved it. */
 export interface ApprovedTaskSnapshot {
@@ -66,13 +65,6 @@ export interface ApprovedTaskSnapshot {
   dependsOn: string[];
   execution: TaskExecution;
   repo?: string;
-  /**
-   * The stages the task switched off (2026-09-27). A snapshot without it reads
-   * as all ON — the stricter side, so switching one off afterwards can only
-   * ever look like the widening it is. Also what a recovered child's
-   * acceptance flag is recomputed from.
-   */
-  stages?: PlanTaskStages;
   /** An isolated checkout was approved (D30). Absent reads as shared. */
   isolated?: true;
 }
@@ -112,6 +104,14 @@ export interface ApprovedPlanSnapshot {
    * the user grants, never something an orchestrator discovers.
    */
   allowMultiplePrs?: string[];
+  /**
+   * The acceptance checklist the user approved (2026-10-20).
+   *
+   * Optional for the same reason the two fields above are: a snapshot written
+   * before the field existed has none, and a MISSING one is read as "" — the
+   * strictest reading, which can only make the next edit look like a widening.
+   */
+  acceptancePlan?: string;
   tasks: ApprovedTaskSnapshot[];
 }
 
@@ -127,12 +127,12 @@ export function snapshotApprovedPlan(
     maxParallel: plan.maxParallel,
     deliveryStation: plan.deliveryStation,
     allowMultiplePrs: [...plan.allowMultiplePrs],
+    acceptancePlan: plan.acceptancePlan,
     tasks: plan.tasks.map((task) => ({
       id: task.id,
       dependsOn: [...task.dependsOn],
       execution: task.execution,
       ...(task.repo ? { repo: task.repo } : {}),
-      ...(task.stages ? { stages: { ...task.stages } } : {}),
       ...(task.isolated ? { isolated: true as const } : {}),
     })),
   };
@@ -210,6 +210,19 @@ export function decideApprovalCarry(
   // revokes the approval, REMOVING one takes that authority back and carries.
   // A snapshot with no list at all reads as empty, so an approval predating
   // the field can only ever be asked about again.
+  // THE ACCEPTANCE CHECKLIST IS AUTHORITY (2026-10-20): it is the list the
+  // acceptance judge holds the finished work to, so rewriting it changes what
+  // "done" means. ANY difference — including emptying or dropping it — asks the
+  // user again, and a snapshot that never carried one reads as "" so an older
+  // approval can only ever look weaker.
+  const approvedAcceptance = approved.acceptancePlan ?? "";
+  if (approvedAcceptance !== next.acceptancePlan) {
+    widenings.push(
+      `「真实验收方案」被改写（${approvedAcceptance.length} 字 → ${next.acceptancePlan.length} 字）—— ` +
+      "统一验收的清单变了，需要重新批准",
+    );
+  }
+
   const approvedAllow = new Set(approved.allowMultiplePrs ?? []);
   const nextAllow = new Set(next.allowMultiplePrs);
   const newlyAllowed = [...nextAllow].filter((repo) => !approvedAllow.has(repo));
@@ -265,15 +278,6 @@ export function decideApprovalCarry(
       widenings.push(`任务 "${task.id}" 改为在门禁新建的独立 checkout 里工作（新的写入目录）`);
     } else if (before.isolated && !task.isolated) {
       amendments.push(`任务 "${task.id}" 不再要求独立 checkout`);
-    }
-
-    // SWITCHING A STAGE OFF IS LESS SUPERVISION (2026-09-27): the user signed
-    // that this task's work gets accepted by it, so moving that elsewhere asks
-    // them again; switching it back on only adds a check.
-    if (taskAcceptanceOn(before) && !taskAcceptanceOn(task)) {
-      widenings.push(`任务 "${task.id}" 关闭了验收环节（少了一道检查）`);
-    } else if (!taskAcceptanceOn(before) && taskAcceptanceOn(task)) {
-      amendments.push(`任务 "${task.id}" 重新打开了验收环节`);
     }
 
     // HOW FAR A TASK MAY SHIP IS AUTHORITY TOO, AND THE PLAN'S LAST TASK HAS

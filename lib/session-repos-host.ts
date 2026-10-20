@@ -15,6 +15,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { acceptanceStatusLine } from "./acceptance-round.ts";
 import { blockedMarkerPath, recordBlockedMarker, reconcileBlockedMarker } from "./blocked-marker.ts";
 import { copilotProblems } from "./copilot-review-state.ts";
+import { realDir } from "./fingerprint.ts";
 import { armingFromFacts } from "./gate-arming.ts";
 import { emptyState, type GateState } from "./gate-state.ts";
 import { saveSidecarPreservingConcurrent } from "./gate-state-io.ts";
@@ -320,8 +321,20 @@ export function createSessionRepos(cells: SessionCells, deps: SessionReposDeps) 
    */
   function repoRelative(p: string): string {
     const abs = p.startsWith("/") ? p : pathJoin(cells.cwd, p);
-    const root = cells.primaryRepoRoot;
-    return abs.startsWith(root + "/") ? abs.slice(root.length + 1) : abs;
+    const root = realDir(cells.primaryRepoRoot);
+    // TWO SPELLINGS OF ONE CHECKOUT (2026-10-20, measured): the session's repo
+    // root can be the LOGICAL path (`/tmp/...`) while git reports the PHYSICAL
+    // one (`/private/tmp/...`). A plain string prefix then misses, every path
+    // this session wrote is recorded ABSOLUTE, and the checkpoint's
+    // "did this session write it" test — which compares against git's
+    // repo-relative paths — leaves every NEW file out of its own commit. The
+    // read side normalizes too (lib/checkpoint-tool.ts `repoRelativeTo`); the
+    // two together are what make the record usable by both spellings.
+    for (const candidate of new Set([cells.primaryRepoRoot, root])) {
+      if (abs.startsWith(candidate + "/")) return abs.slice(candidate.length + 1);
+    }
+    const physical = realDir(abs);
+    return physical.startsWith(root + "/") ? physical.slice(root.length + 1) : abs;
   }
 
   /**

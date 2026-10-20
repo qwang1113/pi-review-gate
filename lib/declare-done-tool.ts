@@ -46,7 +46,8 @@ export interface DeclareDoneToolDeps {
   repoLabel(root: string): string;
   repoDirFor(root: string): string;
   copilotProblemsAcrossRepos(): string[];
-  goalStageSatisfied(): boolean;
+  /** Per repo (2026-10-20): the goal binds to the repo the work landed in. */
+  goalStageSatisfied(root?: string): boolean;
   deliveryStationFor(root: string): DeliveryStation | undefined;
   orchestrationDoneProblems(): string[];
   resetOrchestratorContinuations(): void;
@@ -231,7 +232,13 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
       const completionProblems: string[] = [];
       if (!orchestratorMode) {
         completionProblems.push(...deps.copilotProblemsAcrossRepos());
-        if (isEnforcedMode(state.taskMode) && !deps.goalStageSatisfied()) {
+        // THE SESSION-LEVEL ANSWER, per repo under the hood (2026-10-20): a goal
+        // binds to a repo, so the question is answered for the repos this round
+        // actually changed — lib/loop-goal-host.ts `goalSatisfiedForWork`, the
+        // ONE implementation every reader (this one, the ship gate, L2, the
+        // per-turn directive, the strip) shares.
+        const goalSatisfied = deps.goalStageSatisfied();
+        if (isEnforcedMode(state.taskMode) && !goalSatisfied) {
           completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
         }
         // DID THIS ROUND ARRIVE AT ITS STATION (2026-09-06)? LOOP MODE ONLY —
@@ -239,7 +246,7 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
         // `orchestrationDoneProblems`. Every fact is the gate's OWN; the GitHub
         // question runs ONLY when the free local facts cannot prove arrival.
         // PER REPO, not once for the session (round-1 reviewer P2).
-        if (isEnforcedMode(state.taskMode) && deps.goalStageSatisfied()) {
+        if (isEnforcedMode(state.taskMode) && goalSatisfied) {
           for (const root of cells.sessionRepos) {
             const station = deps.deliveryStationFor(root);
             if (station === undefined) continue; // no contract for that repo

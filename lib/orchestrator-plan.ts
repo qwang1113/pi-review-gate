@@ -47,8 +47,7 @@ import {
   type StationAudience,
 } from "./delivery-station.ts";
 import { deliveryTaskId, narrowedRepoLines, normalizeRepoPath } from "./repo-pr-policy.ts";
-import { parsePlanTaskStages, type PlanTaskStages } from "./loop-stages.ts";
-import { acceptanceDelegatesOf, acceptanceHandoverPhrase, taskAcceptanceOn } from "./acceptance-round.ts";
+import { acceptanceHandoverPhrase, acceptanceTaskIdOf } from "./acceptance-round.ts";
 import { openDecisions } from "./orchestrator-plan-progress.ts";
 
 /** Repo-root-relative location of the plan (gate-excluded via `.pi/`). */
@@ -78,12 +77,6 @@ export interface PlanTask {
   dependsOn: string[];
   /** What the plan ASKED for; the scheduler may downgrade it (constraint 6). */
   execution: TaskExecution;
-  /**
-   * The stages this task switches OFF (2026-09-27) — only `acceptance` is
-   * open (lib/loop-stages.ts `PLAN_TASK_STAGES_OPEN`). Absent ⇒ all on.
-   * Approved content: switching a stage off is a widening.
-   */
-  stages?: PlanTaskStages;
   /**
    * Work in the gate's OWN isolated checkout even with no sibling in the repo
    * (D30, 2026-09-27): a task meant to ship its own PR must not share the
@@ -115,6 +108,19 @@ export interface PlanTask {
    */
   note?: string;
 }
+
+/**
+ * The shape a plan's acceptance checklist is written in — quoted by the refusal
+ * a manager reads when `submit` finds none (2026-10-20), so the fix is a copy
+ * rather than a guess.
+ */
+export const ACCEPTANCE_PLAN_SKELETON = [
+  "## 真实验收方案骨架（照抄这个骨架填即可）",
+  "- 正向真实调用：<起什么、调什么、期望返回什么>",
+  "- 反向验证：<改完后要再确认哪些原本正确的行为没被破坏>",
+  "- 环境前提：<要真实跑起来需要什么>",
+  "确实没有可真实验收的东西就写「本轮无真实验收（理由）」。",
+].join("\n");
 
 /** A question only the human can settle (constraint 11 / constraint 14). */
 export interface PlanDecision {
@@ -177,6 +183,21 @@ export interface OrchestratorPlan {
    * (lib/orchestrator-plan-approval.ts) — removing one only narrows.
    */
   allowMultiplePrs: string[];
+  /**
+   * THE PLAN'S OWN REAL-ACCEPTANCE PLAN (2026-10-20, user decision).
+   *
+   * A child session no longer negotiates a loop goal, so the acceptance round
+   * can no longer read its checklist out of one: the plan carries it instead.
+   * It is APPROVED CONTENT (canonical text + hash + the summary the user reads
+   * in the approval box + the plan auditor's brief), because it is the
+   * checklist a judge will be held to — "verifies nothing in particular" must
+   * cost the user a dialog, not slip through.
+   *
+   * Required: `parsePlan` refuses a plan without it. The dispatch path copies
+   * it into each child's sidecar (that is how a child in its own worktree,
+   * which cannot see this repo's `.pi/`, gets hold of it).
+   */
+  acceptancePlan: string;
   updatedAt: string;
 }
 
@@ -230,6 +251,23 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
   if (!title) problems.push("plan.title 不能为空");
   const intent = asString(obj.intent);
   if (!intent) problems.push("plan.intent 不能为空（一句话说明这轮编排要达成什么）");
+  // THE ACCEPTANCE CHECKLIST IS REQUIRED (2026-10-20): the plan's last task
+  // runs the round, and a round with no checklist can only answer BLOCKED. The
+  // refusal carries the shape so a manager can copy it.
+  //
+  // REQUIRED ON THE WRITE PATH ONLY, exactly like `repo` below (strictRepo): a
+  // plan file written before the field existed must still LOAD — refusing it
+  // would strand a running orchestration on a payload nothing can retype — while
+  // submitting one is refused, because that is the moment the user would be
+  // asked to approve a checklist that is not there.
+  const acceptancePlan = asString(obj.acceptancePlan);
+  if (strictRepo && !acceptancePlan) {
+    problems.push(
+      "plan.acceptancePlan 不能为空 —— plan 的最后一个任务是统一验收任务，验收轮就照这段清单执行" +
+      "（起什么、调什么、期望返回什么、改完后要再确认哪些邻居路径）。" +
+      "确实没有可真实验收的东西就写「本轮无真实验收（理由）」。",
+    );
+  }
 
   const rawTasks = Array.isArray(obj.tasks) ? obj.tasks : [];
   if (rawTasks.length === 0) problems.push("plan.tasks 至少要有一个任务");
@@ -289,8 +327,19 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
       problems.push(`${label}.execution "${String(t.execution)}" 非法（serial/parallel）`);
     }
 
-    const parsedStages = parsePlanTaskStages(t.stages, label);
-    problems.push(...parsedStages.problems);
+    // THE PER-TASK STAGE SWITCH IS GONE (2026-10-20, user decision): one plan
+    // runs ONE acceptance round, owned by its last task. A plan being WRITTEN
+    // or SUBMITTED with the field is REFUSED rather than silently ignored — an
+    // ignored switch would approve a plan whose text says one thing and whose
+    // behaviour is another. The READ path stays lenient for the same reason
+    // `repo` does: a plan file written before the field was removed must still
+    // load, or a running orchestration is stranded on a payload nobody can edit.
+    if (strictRepo && t.stages !== undefined) {
+      problems.push(
+        `${label}.stages 已删除 —— 验收只由 plan 的最后一个任务统一做（2026-10-20）。` +
+        "把这一项去掉：实现任务与收尾任务不必再写 stages，最后一个任务请写成独立验收任务。",
+      );
+    }
     if (t.isolated !== undefined && typeof t.isolated !== "boolean") {
       problems.push(`${label}.isolated "${String(t.isolated)}" 非法（只能是 true / false）`);
     }
@@ -301,7 +350,6 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
       ...(asString(t.repo) ? { repo: asString(t.repo)! } : {}),
       dependsOn: asStringArray(t.dependsOn).map((d) => d.trim()).filter(Boolean),
       execution,
-      ...(parsedStages.stages ? { stages: parsedStages.stages } : {}),
       ...(t.isolated === true ? { isolated: true as const } : {}),
       status,
       note: asString(t.note) || undefined,
@@ -319,16 +367,12 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
   const cycle = findDependencyCycle(tasks);
   if (cycle) problems.push(`任务依赖成环：${cycle.join(" → ")}`);
 
-  // NOBODY'S WORK GOES UNACCEPTED (2026-09-27): a task that switches its own
-  // acceptance off hands it to a task that accepts AND runs after it — so the
-  // handover can be named to the child, and "all switched off" is refused.
-  for (const task of tasks) {
-    if (taskAcceptanceOn(task) || acceptanceDelegatesOf(tasks, task.id).length > 0) continue;
-    problems.push(
-      `任务 "${task.id}" 关闭了验收，但没有任何开着验收、且（传递）dependsOn 它的任务来接手 —— ` +
-      "加一个依赖它的验收任务，或者把它的验收打开",
-    );
-  }
+  // ONE ACCEPTANCE ROUND PER PLAN (2026-10-20): the LAST task accepts, and the
+  // round is dispatched there once every other task is done. The rule's only
+  // home is lib/acceptance-round.ts `acceptanceTaskIdOf`, which reads
+  // lib/repo-pr-policy.ts's `deliveryTaskId` — the "no last task" shape it
+  // would answer `undefined` for is already refused above ("plan.tasks 至少
+  // 要有一个任务"), so there is nothing left for a second check to catch.
 
   const decisions: PlanDecision[] = [];
   const rawDecisions = Array.isArray(obj.decisions) ? obj.decisions : [];
@@ -377,6 +421,7 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
           .filter((entry) => entry.length > 0),
       ),
     ],
+    acceptancePlan,
     updatedAt: asString(obj.updatedAt) || now,
   };
   return { ok: problems.length === 0, plan: problems.length === 0 ? plan : undefined, problems };
@@ -439,15 +484,24 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
     // approval nobody meant to touch. The PERMISSIONS are what the user
     // signed; the order they happen to be written in grants nothing.
     allowMultiplePrs: [...plan.allowMultiplePrs].sort(),
+    // The checklist the acceptance judge is held to: approved content, so it
+    // is hashed and any change asks the user again. ONLY WHEN PRESENT — a plan
+    // file written before the field existed parses to "", and hashing that as
+    // a new term would move the hash of every running orchestration and make
+    // its approval look forged (quality round P2, 2026-10-20).
+    //
+    // NOT SO FOR `tasks[].stages`: that field was REMOVED, so a plan approved
+    // with it (the old prompt taught exactly that) hashes differently now and
+    // asks the user once more. Carrying the dead field into the hash to spare
+    // that one dialog would mean keeping the removed shape alive in the
+    // canonical text — the trade the whole change is against.
+    ...(plan.acceptancePlan ? { acceptancePlan: plan.acceptancePlan } : {}),
     tasks: plan.tasks.map((t) => ({
       id: t.id,
       title: t.title,
       ...(t.repo ? { repo: t.repo } : {}),
       dependsOn: [...t.dependsOn].sort(),
       execution: t.execution,
-      // Only when something is OFF, so a plan that never wrote the field
-      // hashes exactly as it did before the field existed.
-      ...(t.stages ? { stages: t.stages } : {}),
       ...(t.isolated ? { isolated: true } : {}),
     })),
   });
@@ -478,6 +532,9 @@ export function formatPlanSummary(
   repoRoot = "",
   audience: StationAudience = "agent",
 ): string {
+  // A plan read off disk may predate the field (the read path stays lenient);
+  // render that fact instead of throwing on it.
+  const acceptanceChecklist = typeof plan.acceptancePlan === "string" ? plan.acceptancePlan : "";
   const lines: string[] = [
     `${plan.title}`,
     `目标：${plan.intent}`,
@@ -486,6 +543,21 @@ export function formatPlanSummary(
     // brief); the one that is not — the approval transcript — asks for the
     // user's own person explicitly (round-2 P2).
     deliveryStationLine(plan.deliveryStation, audience),
+    "",
+    // THE CHECKLIST THE USER IS SIGNING OFF (2026-10-20). This summary IS the
+    // approval transcript AND the plan auditor's brief, so a checklist that
+    // never reached it would be approved unseen and audited unseen. It is
+    // rendered verbatim: it is the user's own contract, not a description.
+    //
+    // A plan read off disk before the field existed has none — said out loud
+    // here rather than rendered as an empty block, because submitting it is
+    // refused and the user should see why before they try.
+    ...(acceptanceChecklist === ""
+      ? ["真实验收方案：（这份 plan 没有 —— 提交会被拒，补上再提交）"]
+      : [
+          "真实验收方案（plan 的最后一个任务按它跑统一验收轮）：",
+          ...acceptanceChecklist.split("\n").map((line) => `  ${line}`),
+        ]),
     "",
   ];
   // THE NARROWING IS STATED WHERE THE STATION IS (2026-09-15). A plan that
@@ -513,11 +585,13 @@ export function formatPlanSummary(
       ? "　← 按约定：plan 的最后一环 = 交付任务（通常就是独立验收任务；站点不受同 repo 收窄：" +
         `${describeDeliveryStation(plan.deliveryStation, audience)}；汇合 / 整体审核 / commit 是它前面收尾任务的事）`
       : "";
-    // THE ACCEPTANCE SWITCH IS SAID PER TASK (2026-09-27): it is approved
-    // content, so the user reads who accepts before signing.
-    const acceptLine = taskAcceptanceOn(t)
-      ? "验收：开"
-      : `验收：关（${acceptanceHandoverPhrase(acceptanceDelegatesOf(plan.tasks, t.id))}）`;
+    // WHO ACCEPTS IS DECIDED BY POSITION (2026-10-20): the last task runs the
+    // one acceptance round, every other task is released at that checkpoint
+    // with the handover named. The rule has one home (lib/repo-pr-policy.ts);
+    // this line only says it where the user reads the plan.
+    const acceptLine = t.id === acceptanceTaskIdOf(plan.tasks)
+      ? "验收：开（统一验收任务，整个 plan 只有它跑一次验收轮）"
+      : `验收：关（${acceptanceHandoverPhrase([acceptanceTaskIdOf(plan.tasks) ?? "最后一个任务"])}）`;
     lines.push(
       `- [${t.status}] ${t.id} (${t.execution})${deps}：${t.title}${deliveryMark}` +
       `\n    ${acceptLine}` +

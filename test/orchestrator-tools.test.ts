@@ -337,15 +337,17 @@ test("a single-task repo keeps the plan's station — the ceiling is not a blank
   assert.equal(world.panes.get(child.paneId)!.env[STATION_CAP_ENV], "pr");
 });
 
-test("the acceptance gate a child is spawned with is its task's own `stages` (2026-09-27)", async () => {
-  // The gate is an ENTITLEMENT the dispatcher writes from the task's switch —
-  // not from its position — and a switched-off task is told who accepts for it.
+test("the acceptance gate a child is spawned with follows the POSITION: only the last task accepts (2026-10-20)", async () => {
+  // One plan, one acceptance round. The gate is an ENTITLEMENT the dispatcher
+  // writes from the plan's order — there is no per-task switch any more — and
+  // every other child is told who accepts for it.
   const parsed = parsePlan({
     title: "两任务",
-    intent: "验收 gate 跟任务的 stages 走",
+    intent: "验收 gate 跟 plan 的位置走",
     deliveryStation: "commit",
+    acceptancePlan: "起服务 → 调接口 → 比数据",
     tasks: [
-      { id: "t1", title: "A", repo: "/repo", stages: { acceptance: false } },
+      { id: "t1", title: "A", repo: "/repo" },
       { id: "t2", title: "B", repo: "/repo" },
       { id: "t3", title: "C", repo: "/repo", dependsOn: ["t1"] },
     ],
@@ -360,8 +362,8 @@ test("the acceptance gate a child is spawned with is its task's own `stages` (20
   const second = await world.call("orchestrator_spawn", { taskId: "t2", task: "做任务二" });
   assert.equal(second.isError, undefined, replyText(second));
   const acceptance = world.runtime().children.find((c) => c.taskId === "t2")!;
-  assert.equal(world.panes.get(acceptance.paneId)!.env[ACCEPTANCE_GATE_ENV], "on",
-    "t2 is NOT the last task, yet its acceptance is on — the default");
+  assert.equal(world.panes.get(acceptance.paneId)!.env[ACCEPTANCE_GATE_ENV], "off:t3",
+    "t2 is not the last task either — it hands the round to t3 as well");
 });
 
 test("the task book states the branch the child is on — a FACT, not an order to branch (A, 2026-09-18)", async () => {
@@ -424,10 +426,51 @@ test("an ISOLATED child is told which branch it holds — and whether it may pub
 // never read it: the child got whatever `task` the manager typed at spawn
 // time, so the audited text, the approved text and the delivered text could
 // all differ, with nothing keeping them in step.
+test("a spawn writes the child's OWN gate record: goal off, acceptance by position, and the two plan texts (2026-10-20)", async () => {
+  const parsed = parsePlan({
+    title: "计划",
+    intent: "子会话的合同是任务书",
+    acceptancePlan: "起服务 → 调 t2 的接口 → 比对返回",
+    tasks: [
+      { id: "t1", title: "任务一", repo: "/repo", note: "目标：做分页" },
+      { id: "t2", title: "统一验收", repo: "/repo" },
+    ],
+  });
+  assert.ok(parsed.plan, parsed.problems.join("; "));
+  const world = makeFakeWorld({ plan: parsed.plan!, approvePlan: true, resolvableRepos: ["/repo"] });
+  const childId = await spawnT1(world);
+  const path = `/repo/.pi/review-gate-state.${childId}.json`;
+  const raw = world.scratch.get(path);
+  assert.ok(raw, `the dispatcher writes the child's sidecar (looked for ${path})`);
+  const record = JSON.parse(raw!) as {
+    sessionId: string;
+    stages: Record<string, boolean>;
+    childContext: { planIntent: string; acceptancePlan: string; taskBrief: string };
+  };
+  assert.equal(record.sessionId, `rg-child-${childId}`,
+    "the record belongs to the child's OWN session id — a null there is reset on its first boot");
+  assert.deepEqual(record.stages, { goal: false, review: true, quality: true, acceptance: false, precommit: true },
+    "goal off for every child; acceptance off for everyone but the plan's LAST task");
+  assert.equal(record.childContext.planIntent, "子会话的合同是任务书");
+  assert.equal(record.childContext.acceptancePlan, "起服务 → 调 t2 的接口 → 比对返回");
+  assert.match(record.childContext.taskBrief, /做任务一/, "the brief travels with it — that IS the contract");
+});
+
+test("the plan's LAST task cannot start until every other task is done (2026-10-20)", async () => {
+  const world = makeFakeWorld({ plan: twoTaskPlan(), approvePlan: true, resolvableRepos: ["/repo"] });
+  await spawnT1(world);
+  const early = await world.call("orchestrator_spawn", { taskId: "acc", task: "统一验收" });
+  assert.equal(early.isError, true);
+  assert.match(replyText(early), /统一验收任务/);
+  assert.match(replyText(early), /t1（running）/, "the refusal names what is still outstanding");
+  assert.equal(world.runtime().children.length, 1, "and no pane was opened for it");
+});
+
 test("a spawn with no `task` hands over the task BOOK", async () => {
   const parsed = parsePlan({
     title: "计划",
     intent: "任务书就是子会话的第一条消息",
+    acceptancePlan: "起服务 → 调接口 → 比数据",
     tasks: [{
       id: "t1",
       title: "任务一",
@@ -448,6 +491,7 @@ test("a spawn still refuses when NEITHER the task book nor `task` says anything"
   const parsed = parsePlan({
     title: "计划",
     intent: "没有任务书也没有 task",
+    acceptancePlan: "起服务 → 调接口 → 比数据",
     tasks: [{ id: "t1", title: "任务一", repo: "/repo" }],
   }, undefined, true);
   assert.ok(parsed.plan, `fixture must parse: ${parsed.problems.join("; ")}`);
@@ -1267,8 +1311,9 @@ test("a recovered child is handed its station ceiling again (2026-09-15)", async
     title: "同 repo 两任务",
     intent: "验证恢复后的站点上界",
     deliveryStation: "pr",
+    acceptancePlan: "起服务 → 调接口 → 比数据",
     tasks: [
-      { id: "t1", title: "A", repo: "/repo", stages: { acceptance: false } },
+      { id: "t1", title: "A", repo: "/repo" },
       { id: "t2", title: "B", repo: "/repo", execution: "parallel", dependsOn: ["t1"] },
     ],
   });
@@ -1278,11 +1323,16 @@ test("a recovered child is handed its station ceiling again (2026-09-15)", async
   const before = world.runtime().children[0]!;
   assert.equal(world.panes.get(before.paneId)!.env[STATION_CAP_ENV], "commit");
   assert.equal(world.panes.get(before.paneId)!.env[ACCEPTANCE_GATE_ENV], "off:t2",
-    "t1's plan switched acceptance off and t2 accepts for it");
+    "t1 is not the plan's last task: t2 runs the one acceptance round");
+  const recordPath = `/repo/.pi/review-gate-state.${childId}.json`;
+  const recordBefore = world.scratch.get(recordPath);
+  assert.ok(recordBefore, "the dispatch record exists after spawn");
 
   world.panes.get(before.paneId)!.alive = false;
   const recovered = await world.call("orchestrator_recover", { childId, reason: "机器睡眠" });
   assert.equal(recovered.isError, undefined, replyText(recovered));
+  assert.equal(world.scratch.get(recordPath), recordBefore,
+    "recover keeps the SAME variant, so its dispatch record is neither rewritten nor lost");
   const after = world.runtime().children[0]!;
   assert.notEqual(after.paneId, before.paneId);
   assert.equal(world.panes.get(after.paneId)!.env[STATION_CAP_ENV], "commit",
@@ -1564,7 +1614,7 @@ test("archive asks NOBODY when every task is done — and the receipt says what 
   const text = replyText(reply);
   assert.match(text, /orchestrator-plan\.archived-/, "the receipt names WHERE it landed");
   assert.match(text, /《测试计划》/, "…WHICH plan went away…");
-  assert.match(text, /2 个任务/, "…how big it was…");
+  assert.match(text, new RegExp(`${finished.tasks.length} 个任务`), "…how big it was…");
   assert.match(text, /没有删除任何东西/, "…and that nothing was destroyed");
 });
 

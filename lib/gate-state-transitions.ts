@@ -35,6 +35,11 @@ export function nextReviewRoundNumber(st: Pick<GateState, "sentReviewRounds">): 
  *  - `restatement` — what the user confirmed the requirement IS (it already
  *    outlives the drafts that follow it; a handover is one more draft);
  *  - `loopGoal` — the goal text the user APPROVED;
+ *  - `stages` — the user's five switches (a released stage stays released);
+ *  - `childContext` — an orchestration child's dispatch record: the plan's
+ *    intent, its acceptance checklist and its task book (2026-10-20). A
+ *    successor runs under a NEW session id against the SAME variant sidecar —
+ *    this is the only path by which it gets its contract back;
  *  - `rounds` / `turnsWithoutGoal` — the ROUND BUDGET. Inherited on purpose,
  *    and not as a courtesy: a successor that restarts the count would let a
  *    handover wash away rounds already spent, and the budget exists precisely
@@ -91,6 +96,14 @@ export function inheritGoalContract(target: GateState, predecessor: GateState): 
     // released — inheriting none would silently re-enable the gate the user
     // switched off, mid-task, with the once-per-session box already spent.
     ...(predecessor.stages ? { stages: predecessor.stages } : {}),
+    // THE DISPATCH RECORD FOLLOWS THE WORK TOO (reviewer P1, 2026-10-20). A
+    // child's `session_handoff` successor runs under a NEW session id
+    // (`rg-child-…-hN`) against the SAME variant sidecar, so it lands in the
+    // mismatch branch of the restore and is rebuilt from THIS function. Dropping
+    // the record there left the successor — and its reviewers — with no
+    // contract at all: no plan intent, no task book, and an acceptance round
+    // skipped as "no plan" on the very task that is supposed to accept.
+    ...(predecessor.childContext ? { childContext: predecessor.childContext } : {}),
     // THE TMUX GRANT TRAVELS WITH THE SEAT (user decision, 2026-09-17: “当前
     // 会话和他的继承者都能用”). It is permission the USER gave to an on-going
     // piece of work rather than to a process id — a handover changes who holds

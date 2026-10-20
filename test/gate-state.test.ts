@@ -451,6 +451,15 @@ test("a relay successor inherits the user's contracts and the round budget — a
   // The user's permission to type tmux at all (2026-09-17). It belongs to the
   // WORK, not to a process id: the user said “当前会话和他的继承者”.
   predecessor.tmuxAccess = { at: "2026-09-16T00:05:00.000Z", scope: "session" };
+  // The dispatch record (2026-10-20): a child's handoff successor runs under a
+  // NEW session id against the SAME variant sidecar, so its restore rebuilds
+  // from this function — dropping the record left the successor with no
+  // contract and its acceptance round skipped as "no plan".
+  predecessor.childContext = {
+    planIntent: "把这轮编排的目标做完",
+    acceptancePlan: "起服务 → 调接口 → 比数据",
+    taskBrief: "目标：把分页做出来",
+  };
 
   const inherited = inheritGoalContract(emptyState("sess-new", 10), predecessor);
 
@@ -472,6 +481,8 @@ test("a relay successor inherits the user's contracts and the round budget — a
   assert.equal(inherited.scopeLimit, undefined, "a scope limit is one session's grant");
   assert.deepEqual(inherited.tmuxAccess, predecessor.tmuxAccess,
     "the tmux grant travels — the user asked for exactly that (the successor does not re-ask)");
+  assert.deepEqual(inherited.childContext, predecessor.childContext,
+    "the dispatch record travels: the successor continues the SAME task, in the same sidecar");
   assert.deepEqual(inherited.sessionReposPaths, ["/other/repo"],
     "but the OTHER repos this work touched do travel — declare_done must still re-check them");
   assert.equal(inherited.review.verdict, "PENDING");

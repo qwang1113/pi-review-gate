@@ -271,9 +271,14 @@ test("close leaves every other pane's border alone, sibling or review pane", asy
   const plan = parsePlan({
     title: "跨仓库计划",
     intent: "两个仓库各一个任务，可以并行",
+    acceptancePlan: "起服务 → 调接口 → 比数据",
     tasks: [
       { id: "t1", title: "任务一", repo: "/repo" },
       { id: "t2", title: "任务二", repo: "/other/repo" },
+      // The plan's LAST task is the one that accepts, so it may not start until
+      // every other task is done. A fixture that spawns two implementation
+      // tasks needs a tail it never dispatches.
+      { id: "acc", title: "统一验收", repo: "/repo" },
     ],
   });
   assert.ok(plan.plan, plan.problems.join("; "));
@@ -311,9 +316,11 @@ test("close leaves every other pane's border alone, whatever the registry says",
   const plan = parsePlan({
     title: "跨仓库计划",
     intent: "两个仓库各一个任务",
+    acceptancePlan: "起服务 → 调接口 → 比数据",
     tasks: [
       { id: "t1", title: "任务一", repo: "/repo" },
       { id: "t2", title: "任务二", repo: "/other/repo" },
+      { id: "acc", title: "统一验收", repo: "/repo" },
     ],
   });
   assert.ok(plan.plan, plan.problems.join("; "));

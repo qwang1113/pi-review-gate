@@ -32,6 +32,7 @@ function planOf(overrides: Record<string, unknown> = {}): OrchestratorPlan {
   const parsed = parsePlan({
     title: "拆分 review-gate",
     intent: "把扩展拆成模块并澄清需求",
+    acceptancePlan: "起服务 → 调接口 → 比对返回数据 → 再验邻居路径",
     tasks: [
       { id: "a", title: "抽 plan 模块", repo: "/work/pi-review-gate" },
       { id: "b", title: "抽 tmux 模块", repo: "/work/pi-review-gate" },
@@ -216,10 +217,12 @@ test("the audit task carries the 10th check: the plan ENDS with an independent a
   assert.match(task, /deliveryTaskId/);
   assert.match(task, /effectiveTaskStation/);
   assert.doesNotMatch(task, /finishTaskId|acceptanceTaskId/, "the old names are gone, not living beside the new one");
-  // WHO ACCEPTS is the per-task switch (2026-09-27), and the auditor is told
-  // the coverage is already mechanical — so it judges the division of labour.
-  assert.match(task, /stages\.acceptance/);
-  assert.match(task, /机械保证/);
+  // WHO ACCEPTS is the plan's LAST task (2026-10-20), and the auditor is told
+  // the coverage is already mechanical — so it judges the division of labour
+  // and the checklist (11th check), not a switch that no longer exists.
+  assert.match(task, /整个 plan 只跑一次统一验收，归最后一个任务/);
+  assert.match(task, /acceptancePlan/);
+  assert.doesNotMatch(task, /stages\.acceptance/, "the per-task switch is gone from the checklist too");
   // A POSITION, not a new plan field — the check must not become a demand for
   // one (same discipline as the 9th check's file lists).
   assert.match(task, /位置约定/);

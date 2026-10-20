@@ -609,7 +609,10 @@ test("an acceptance round the USER switched off records that reason, not the orc
   // Reviewer P2: `acceptanceDecision` writes DISABLED for both causes and its
   // copy names the orchestration rule; the status stays the module's, the
   // recorded reason is composed where the switch is known.
-  assert.match(ACCEPTANCE_HOST_SRC, /const skippedReason = !stageIsOn\("acceptance", root\)/);
+  // Both causes are told apart here: the USER's switch gets the stage wording,
+  // the plan's handover (an orchestration child, 2026-10-20) keeps the
+  // decision's own reason, which names who accepts.
+  assert.match(ACCEPTANCE_HOST_SRC, /const userThrewTheSwitch = !stageIsOn\("acceptance", root\) && acceptanceGateOpen\(process\.env\)/);
   assert.match(ACCEPTANCE_HOST_SRC, /reason: skippedReason,/);
 });
 
@@ -637,12 +640,12 @@ const CANCEL_SRC = libSrc("round-cancel-host.ts");
 test("the goal stage releases the edit gate and the ship block through goalStageSatisfied", () => {
   assert.match(SRC, /goalConfirmed: goalStageSatisfied\(goalRoot, goalSt\)/,
     "the L8 edit gate asks the stage-aware question");
-  assert.match(SRC, /loopGoalConfirmed: \(\) => goalStageSatisfied\(\)/,
-    "the L1 ship gate asks the stage-aware question");
+  assert.match(SRC, /loopGoalConfirmed: \(root\) => goalStageSatisfied\(root\)/,
+    "the L1 ship gate asks the stage-aware question, per repo (2026-10-20)");
   assert.match(SRC, /if \(!deps\.goalStageSatisfied\(\)\) completion\.push\(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK\)/,
     "the completion/continuation path asks the stage-aware question");
-  assert.match(SRC, /if \(!stageIsOn\("goal", root\)\) return undefined;/,
-    "a released goal stage has no delivery station to read");
+  assert.match(SRC, /if \(!stageIsOn\("goal", root\)\) return isOrchestrationChildEnv\(\) \? stationCapFromEnv\(\) : undefined;/,
+    "a released goal stage has no GOAL station, but an orchestration child keeps its ceiling (2026-10-20)");
 });
 
 test("the five checkpoints read the ONE query, not a second rule", () => {
@@ -653,6 +656,15 @@ test("the five checkpoints read the ONE query, not a second rule", () => {
   assert.match(SRC, /registerLoopStageTools\(pi, loopGoal\.loopStageDeps\)/, "the tool is registered");
   assert.match(SRC, /ensureLoopStages: \(ctx\) => ensureLoopStagesFor\(ctx\)/,
     "the fallback is wired into the L1 hook for the first edit / restatement");
+});
+
+test("an orchestration child's acceptance round reads the checklist the DISPATCHER wrote (2026-10-20)", () => {
+  // A child has no goal, and its checkout may never have seen the manager's
+  // plan file: the two plan texts travel in its own sidecar.
+  assert.match(ACCEPTANCE_HOST_SRC, /const dispatched = st\.childContext;\s*\n\s*if \(dispatched !== undefined\) return dispatched\.acceptancePlan;/,
+    "the plan's checklist is the child's source, before any goal read");
+  assert.match(libSrc("orchestrator-dispatch.ts"), /deps\.writeChildGateRecord\(\{/);
+  assert.match(libSrc("child-gate-record.ts"), /childStagesRecord\(\{ accepts, at: input\.at \}\)/);
 });
 
 test("a plan handover reaches the child: its prompt, its goal audit and its declare_done receipt (2026-09-27)", () => {
@@ -754,8 +766,11 @@ test("the no-acceptance declaration is only read from a goal that is in force", 
   assert.match(guard, /return undefined/, "…and anything else is no contract (fail-closed)");
   const at = ACCEPTANCE_HOST_SRC.indexOf("const declared = ");
   assert.ok(at > 0, "armAcceptanceRound reads the declaration");
-  const read = ACCEPTANCE_HOST_SRC.slice(at - 300, at + 400);
+  const read = ACCEPTANCE_HOST_SRC.slice(Math.max(0, at - 1200), at + 600);
   assert.match(read, /acceptanceGoalText\(root, st\)/, "…through that one read");
+  // A dispatched child has no goal: its checklist is the plan's own text, and
+  // the SAME declaration parser reads it (2026-10-20).
+  assert.match(read, /parseNoAcceptanceDeclaration\(dispatched\.acceptancePlan\)/);
   assert.match(read, /parseNoAcceptanceDeclaration\(goalText\)/);
   assert.match(read, /extractAcceptancePlan\(goalText\)/, "the plan comes from the same text");
   const dispatchAt = ACCEPTANCE_HOST_SRC.indexOf("async function dispatchAcceptanceRound(");

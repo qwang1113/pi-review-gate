@@ -274,9 +274,11 @@ test("a wait scoped to one child does not spend its siblings' news", async () =>
   const plan = parsePlan({
     title: "测试计划",
     intent: "两个仓库各一个任务",
+    acceptancePlan: "起服务 → 调接口 → 比数据",
     tasks: [
       { id: "t1", title: "任务一", repo: "/repo" },
       { id: "t2", title: "任务二", repo: "/other/repo" },
+      { id: "acc", title: "统一验收", repo: "/repo" },
     ],
   });
   assert.ok(plan.plan, plan.problems.join("; "));

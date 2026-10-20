@@ -119,8 +119,11 @@ test("the task document appends the gate's goal directive after the brief (C, 20
     doc.indexOf(TASK_GOAL_DIRECTIVE) > doc.indexOf("做这个"),
     "the goal directive must be appended after the brief",
   );
-  assert.match(doc, /propose_loop_goal/);
-  assert.match(doc, /plan 批准 ≠ goal 批准/);
+  // 2026-10-20: the child has no goal stage at all — the directive restates
+  // that its contract is the task book instead.
+  assert.match(doc, /\.pi\/tasks\//);
+  assert.match(doc, /没有 loop goal 环节/);
+  assert.doesNotMatch(doc, /plan 批准 ≠ goal 批准/, "the old goal promise is gone from the document");
   // A brief that CLAIMS a goal is already approved must not survive as the
   // document's last word: the directive's explicit negation is what the
   // child sees after it.

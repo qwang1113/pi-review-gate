@@ -69,15 +69,15 @@ export const PLAN_TASK_SKELETON = [
  * the LAST one is the independent acceptance task — no new requirement, no
  * business code — and it delivers (push, PR).
  *
- * POSITION FOR THE STATION, A FIELD FOR ACCEPTANCE: the plan's LAST task is the
- * delivery task (`deliveryTaskId`), and its station is `plan.deliveryStation`
- * no matter how many tasks its repo holds; the wrap-up is second-to-last and is
- * capped like any other task. Who runs the acceptance round is each task's own
- * `stages.acceptance` (2026-09-27) — the manager switches it off on the tasks
- * whose work a later acceptance task accepts. Rendered wherever the task book is (the `note` field, the
- * plan tool's description, this standing block) so the manager cannot write a
- * plan that ends in mid-air — and the plan audit
- * (lib/orchestrator-plan-audit.ts) objects with a P1 when it happens anyway.
+ * POSITION DECIDES BOTH: the plan's LAST task is the delivery task
+ * (`deliveryTaskId`), and its station is `plan.deliveryStation` no matter how
+ * many tasks its repo holds; the wrap-up is second-to-last and is capped like
+ * any other task. The same last task runs the plan's ONE acceptance round
+ * (2026-10-20, user decision — the per-task `stages` switch is gone). Rendered
+ * wherever the task book is (the `note` field, the plan tool's description,
+ * this standing block) so the manager cannot write a plan that ends in mid-air
+ * — and the plan audit (lib/orchestrator-plan-audit.ts) objects with a P1 when
+ * it happens anyway.
  */
 export const PLAN_FINISH_TASK_BRIEF = [
   "## plan 的最后两环 = 收尾任务 + 独立验收任务（位置约定：plan 顺序的**倒数第二个**与**最后一个**，不是 plan 的新字段）",
@@ -88,10 +88,11 @@ export const PLAN_FINISH_TASK_BRIEF = [
   "跑真实路径 / 命令 / 观察（不是复述实现）→ push → 开 PR。",
   "它的站点就是 plan 的 `deliveryStation`，**不受「同一 repo 多任务收窄为 commit」的影响**：",
   "被收窄就没有能 ship 的一方了 —— 你被禁止写代码，同 repo 的子会话又被收窄，整轮会卡在交付上。",
-  "**验收是每个任务自己的开关**（`tasks[].stages`，只开放 `acceptance`，缺省开）：建议实现与验收分开 ——",
-  "实现任务与收尾任务写 `stages: { acceptance: false }`，验收放在实现都完成之后的专门任务（通常就是最后一个），",
-  "粒度（一个验收任务还是每组一个）由你定。关掉验收的任务必须被某个开着验收的任务（传递）dependsOn，",
-  "否则 plan 直接被拒；门禁会告诉那个子会话「本任务不验收、由谁统一验收」。关闭验收 = 扩权（要重批），重新打开不要。",
+  "**整个 plan 只跑一次统一验收**（2026-10-20 用户决定）：验收轮归 plan 的**最后一个任务**，其余任务一律不验收、",
+  "由它统一验收 —— 子会话没有自己的 goal，也就不会自评。plan 里**没有** `tasks[].stages` 这个开关（写了直接被拒）。",
+  "最后一个任务在其余任务全部 done 之前派不出来（门禁在 spawn 时拒绝），所以顺序要排对。",
+  "**plan 顶层的 `acceptancePlan` 就是那张验收清单**（整体「真实验收方案」）：起什么、调什么、期望返回什么、",
+  "改完后要再确认哪些邻居路径。它进批准文本、随 plan 一起被 plan 审计、由用户批准；改写它要重新批准。",
   "两个任务书都照上面的骨架写，另外写清：收尾任务的汇合范围与整体审核怎么做；",
   "验收任务怎么做真实验收、交付物是什么（PR 链接 / 已 push 的分支）。",
   "派发顺序：其余任务都 done 之后再派收尾任务，它 commit 之后再派验收任务 ——",

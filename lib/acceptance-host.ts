@@ -17,6 +17,7 @@ import {
   acceptanceGateOpen,
   acceptanceProblems,
   buildAcceptanceTask,
+  dispatchedChecklist,
   extractAcceptancePlan,
   parseNoAcceptanceDeclaration,
   type AcceptanceDecision,
@@ -73,6 +74,12 @@ export function createAcceptanceHost(
    * contract for this round, and then there is no plan to work either.
    */
   function acceptanceGoalText(root: string, st: GateState): string | undefined {
+    // AN ORCHESTRATION CHILD HAS NO GOAL (2026-10-20): its checklist is the
+    // plan's own `acceptancePlan`, copied into its sidecar at dispatch because
+    // the plan file lives in the MANAGER's checkout (the child may be in a
+    // /tmp worktree that has never seen it).
+    const dispatched = st.childContext;
+    if (dispatched !== undefined) return dispatched.acceptancePlan;
     const goal = readSessionLoopGoal(root);
     if (!goal.present || !loopGoalConfirmed(root, st)) return undefined;
     // THE RAW FILE, NOT THE PROMPT COPY (real-session P1, 2026-09-22).
@@ -124,6 +131,8 @@ export function createAcceptanceHost(
     root: string,
     fingerprint: string,
     goalText: string,
+    /** The checklist, when it arrived ALREADY extracted (a dispatched plan). */
+    planText?: string,
     sinceAccepted?: { head: string; files: readonly string[] },
   ): Promise<{ ok: true; judgeId: string } | { ok: false; error: string }> {
     const head = gitOrNull(root, ["rev-parse", "HEAD"])?.trim() || undefined;
@@ -134,6 +143,7 @@ export function createAcceptanceHost(
     const task = `${buildAcceptanceTask({
       repoRoot: root,
       goalText,
+      ...(planText === undefined ? {} : { planText }),
       ...(target === undefined
         ? {}
         : { range: `${target.baseline.slice(0, 12)}..${target.head.slice(0, 12)}` }),
@@ -282,9 +292,27 @@ export function createAcceptanceHost(
     // an unapproved draft or a leftover `.pi/loop-goal.md` could exempt this
     // round; read the other way, the same file could hand the judge a checklist
     // that was never approved for this round. See `acceptanceGoalText`.
+    // THE CHILD'S CHECKLIST ARRIVES ALREADY EXTRACTED (reviewer P1, 2026-10-20).
+    // A dispatched plan carries the checklist as plain prose — there is no
+    // 「真实验收方案」 heading to parse, because the section IS the plan's own
+    // field — so running `extractAcceptancePlan` over it answered undefined and
+    // the plan's ONE unified acceptance round was silently SKIPPED. An empty
+    // checklist is not a skip either: it is a plan defect the manager has to
+    // fix, so it blocks (below) instead of releasing the round.
+    const dispatched = st.childContext;
+    const checklist = dispatchedChecklist(dispatched);
     const goalText = acceptanceGoalText(root, st);
-    const declared = goalText === undefined ? undefined : parseNoAcceptanceDeclaration(goalText);
-    const plan = goalText === undefined ? undefined : extractAcceptancePlan(goalText);
+    // THE PLAN MAY DECLARE THERE IS NOTHING TO ACCEPT (quality round P1,
+    // 2026-10-20): the skeleton, `parsePlan`'s refusal and the plan audit all
+    // tell the manager it may write 「本轮无真实验收（理由）」 — so the dispatched
+    // checklist goes through the SAME parser. Skipping it would hand a judge a
+    // "checklist" that is really an exemption sentence.
+    const declared = dispatched !== undefined
+      ? parseNoAcceptanceDeclaration(dispatched.acceptancePlan)
+      : (goalText === undefined ? undefined : parseNoAcceptanceDeclaration(goalText));
+    const plan = checklist !== undefined
+      ? checklist.plan
+      : (goalText === undefined ? undefined : extractAcceptancePlan(goalText));
     const fp = computeFingerprint(root);
     const fingerprint = fp.unavailable ? "" : fp.digest;
     // THE SCOPE: since the last accepted HEAD, else since the branch base.
@@ -305,7 +333,11 @@ export function createAcceptanceHost(
       // round P2, 2026-09-22): a judge told to work a checklist it does not
       // have can only answer BLOCKED, and no action of the agent could resolve
       // that. The module's reason names both ways out.
-      ...(plan === undefined ? { hasPlan: false } : {}),
+      //
+      // FOR A DISPATCHED CHILD AN EMPTY CHECKLIST IS A BLOCK, NOT A SKIP
+      // (reviewer P1, 2026-10-20): the plan shipped without one, and skipping
+      // would let the plan's one acceptance round evaporate silently.
+      ...(plan === undefined && dispatched === undefined ? { hasPlan: false } : {}),
       fingerprint,
       ...(st.acceptance === undefined ? {} : { record: st.acceptance }),
       roundAlive: acceptanceRoundAlive(root),
@@ -322,7 +354,13 @@ export function createAcceptanceHost(
       // a standalone session whose USER switched the acceptance stage off. The
       // STATUS stays the module's (semantics untouched); only the recorded
       // reason is composed here, where the switch is known.
-      const skippedReason = !stageIsOn("acceptance", root)
+      // WHICH WAY THE STAGE IS OFF decides the sentence (2026-10-20): a
+      // standalone session's USER threw the switch; an orchestration child's
+      // dispatcher did (one acceptance round per plan), and for that case the
+      // decision's own reason — the handover to the plan's last task — is the
+      // true one.
+      const userThrewTheSwitch = !stageIsOn("acceptance", root) && acceptanceGateOpen(process.env);
+      const skippedReason = userThrewTheSwitch
         ? "验收环节已关闭（用户设定的环节开关）—— 跳过真实验收。"
         : decision.reason;
       if (st.acceptance?.status !== decision.status || st.acceptance.reason !== skippedReason) {
@@ -343,7 +381,11 @@ export function createAcceptanceHost(
       // `skippedReason`, the module's word for THIS skip.
       // A PLAN HANDOVER IS ALWAYS SAID (2026-09-27): the child has to be able
       // to read in its own receipt who accepts for it, code or no code.
-      if (stageIsOn("acceptance", root) && (st.hasCodeChange || decision.status === "DISABLED")) {
+      // A PLAN HANDOVER IS ALWAYS SAID (2026-09-27), and since 2026-10-20 the
+      // plan — not the user — is what switched this child's round off, so the
+      // handover reaches the receipt even though the stage reads off here.
+      if ((stageIsOn("acceptance", root) || decision.status === "DISABLED") &&
+        (st.hasCodeChange || decision.status === "DISABLED")) {
         notes.push(skippedReason);
         // THE LINE STAYS GENERIC, THE REASON RIDES THE NOTE (reviewer Nit,
         // 2026-09-22): this branch is reached by THREE skips — no plan, the
@@ -354,6 +396,13 @@ export function createAcceptanceHost(
       }
       return undefined;
     }
+    // AN EMPTY CHECKLIST BLOCKS ONLY FOR THE SESSION THAT OWES THE ROUND
+    // (quality round P2, 2026-10-20). Checked AFTER the skip/pass decisions: an
+    // implementation task whose stage is off never runs the round, and it is in
+    // no position to fix the plan — holding it there would be a dead end.
+    if (checklist?.problem !== undefined) {
+      return { problems: [label + checklist.problem], armed: false };
+    }
     if (decision.action === "wait" || decision.action === "block") {
       // The projection, not a second reading of the decision: what declares
       // itself blocking is what lands in the completion problem list.
@@ -363,17 +412,17 @@ export function createAcceptanceHost(
     // instead (see `acceptanceDecision`'s no-fingerprint rule, lib/acceptance-round.ts),
     // so this call is only reachable with one. A second judgement here would be
     // the drift that rule exists to prevent.
-    const dispatched = await dispatchAcceptanceRound(
-      ctx, root, fingerprint, goalText ?? "",
+    const round = await dispatchAcceptanceRound(
+      ctx, root, fingerprint, goalText ?? "", plan,
       acceptedHead !== undefined && scopeFiles !== undefined ? { head: acceptedHead, files: scopeFiles } : undefined,
     );
-    if (!dispatched.ok) {
+    if (!round.ok) {
       return {
-        problems: [`${label}验收轮派不出去（${dispatched.error}）—— 门禁不会静默跳过它；修好之后再 declare_done。`],
+        problems: [`${label}验收轮派不出去（${round.error}）—— 门禁不会静默跳过它；修好之后再 declare_done。`],
         armed: false,
       };
     }
-    return { problems: [], armed: true, judgeId: dispatched.judgeId };
+    return { problems: [], armed: true, judgeId: round.judgeId };
   }
 
   return { armAcceptanceRound };

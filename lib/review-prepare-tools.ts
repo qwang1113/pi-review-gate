@@ -425,7 +425,12 @@ async function doPrepareReview(
   const streamPath = pathJoin(root, ".pi", "review-stream", `${runId}-review.jsonl`);
   try { mkdirSync(pathJoin(streamPath, ".."), { recursive: true }); } catch { /* stream is optional */ }
   const goalSt = deps.stateFor(root);
-  const goalForReview = deps.goalConfirmed(root, goalSt) ? deps.goalTextForReviewers(root) : undefined;
+  // WHICH CONTRACT THIS ROUND IS JUDGED AGAINST: the approved loop goal for a
+  // standalone session, the dispatch record (plan intent + task book) for an
+  // orchestration child — it has no goal to approve (2026-10-20).
+  const goalForReview = goalSt.childContext !== undefined || deps.goalConfirmed(root, goalSt)
+    ? deps.goalTextForReviewers(root)
+    : undefined;
   const goalText = goalForReview?.text;
   const goalTruncated = goalForReview?.truncated === true;
   // NOTE: no display title is computed here — judge_submit derives the

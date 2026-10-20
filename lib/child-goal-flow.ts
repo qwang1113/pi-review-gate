@@ -1,14 +1,19 @@
 /**
- * THE ORCHESTRATION CHILD'S GOAL FLOW (round 4, user decision 2026-09-28).
+ * THE ORCHESTRATION CHILD'S CONTRACT — the task book, not a goal (2026-10-20).
  *
- * A child works ONE task of a plan the user already approved, under a project
- * manager who reads its goal draft anyway. The two steps a standalone loop
- * session runs before its approval dialog — the requirement RESTATEMENT and the
- * `goal-auditor` audit — only re-asked what the plan and the manager already
- * settled, and cost a dialog plus a minutes-long judge round per child. So a
- * child skips both: it drafts its goal and calls `propose_loop_goal`, whose
- * approval box goes to the manager (with its mandatory crosscheck) and to the
- * child's own pane, first answer wins.
+ * A child works ONE task of a plan the user already approved. Round 4
+ * (2026-09-28) had already dropped the restatement and the `goal-auditor`
+ * audit from its flow, but kept `propose_loop_goal` and the manager's
+ * crosschecked approval — a dialog and a review of a contract the plan had
+ * settled. The user's decision is the blunt version: a child has NO goal stage
+ * at all. The GATE writes the child's five-switch record when it dispatches it
+ * (goal off: lib/loop-stages.ts `childStagesRecord`), so restatement, goal
+ * negotiation, the goal audit and the L8 goal block simply do not apply, and
+ * the child's contract is what the plan already says — the task book the gate
+ * wrote into `.pi/tasks/` plus the station ceiling in its environment.
+ *
+ * The acceptance round follows the same logic one level up: it belongs to the
+ * plan's LAST task, not to every child (lib/acceptance-round.ts).
  *
  * Every surface that tells a child what to do next reads its text from HERE,
  * so the standalone texts (lib/loop-goal-directives.ts, lib/loop-goal.ts,
@@ -17,40 +22,40 @@
 
 import { buildRejection } from "./rejection-copy.ts";
 
-/** The whole flow, in one sentence group — quoted by every child surface. */
+/** The whole contract, in one sentence group — quoted by every child surface. */
 export const CHILD_GOAL_FLOW =
-  "编排子会话的 goal 流程只有一步：**不做**需求反述（`propose_restatement` 会被拒），也**不跑** " +
-  "goal-auditor 审计 —— 直接用简体中文写好你自己的 loop goal（标识符、路径、代码 token 保持英文），" +
-  "调 `propose_loop_goal`。它弹出批准框，同时经通道交给项目经理审核，用户或项目经理谁先答算谁的；" +
-  "交付站点缺省就是 plan 给本任务的上限。goal 获批前，L8 会拦下所有 edit/write。";
+  "编排子会话**没有 loop goal 环节**（门禁派发时已把 goal 环节关掉）：`propose_restatement` 与 " +
+  "`propose_loop_goal` 都会被拒，也不会弹任何批准框。你的合同是**任务书** —— 门禁写进 `.pi/tasks/`，" +
+  "agent 不可编辑 —— 加上环境里的交付站点上界（`RG_STATION_CAP`）。整个 plan 的真实验收由最后一个任务统一做。";
 
-/** Step 0 of the per-turn prompt while the child has no approved goal. */
-export const CHILD_GOAL_MISSING_DIRECTIVE =
-  "## Loop goal（Step 0 —— 编排子会话，先谈 goal 再动手）\n" +
-  "本会话还没有获批的 loop goal。任务书只是 plan 的任务边界，不是你的 goal；plan 批准 ≠ goal 批准。\n" +
-  CHILD_GOAL_FLOW;
+/** The child's standing directive: what its contract IS. */
+export const CHILD_TASK_BOOK_DIRECTIVE =
+  "## 你的合同：任务书（编排子会话没有 loop goal）\n" +
+  CHILD_GOAL_FLOW +
+  "\n任务书里写了目标、交付物、代码落点、验收与边界；照它做，不要扩大范围。" +
+  "对它理解有偏差就用 `orchestrator_instruct` 之外的常规方式问项目经理（`ask_user` 会把问题经通道交给他）。";
 
 /** The escalated form, once too many turns went by without a goal. */
-export function buildChildGoalForceNegotiateDirective(shown: string): string {
-  return (
-    "## 强制协商 loop goal（门禁，2026-09-17）\n" +
-    `你已 ${shown} 未获批 loop goal。继续只读探查或任何其他工作之前，**必须先**把 goal 交出去。\n` +
-    CHILD_GOAL_FLOW
-  );
+export function buildChildTaskBookDirective(): string {
+  return CHILD_TASK_BOOK_DIRECTIVE +
+    "\n现在就可以开始：读代码、改代码、`judge_submit` 送审，全部按任务书来。";
 }
 
-/** Appended to a read-only result while the child has no approved goal. */
+/** Appended to a read-only result: the child owes no goal, and says so once. */
 export const CHILD_GOAL_REMINDER_TEXT =
-  "\n[review-gate] 你还没获批本会话的 loop goal —— 直接写 goal 调 `propose_loop_goal`" +
-  "（编排子会话不做需求反述、不跑 goal 审计，由项目经理审），获批之后才改代码（未批准前 L8 会拦下 edit/write）。";
+  "\n[review-gate] 编排子会话没有 loop goal 环节 —— 你的合同是 `.pi/tasks/` 里的任务书（门禁写的，别改它）" +
+  "加上交付站点上界，照它直接干活即可，不需要也不允许 `propose_loop_goal` / `propose_restatement`。";
 
 /** The L8 edit block's next step, for a child. */
 export function childGoalEditBlock(repoRoot?: string): string {
   return buildRejection({
-    what: "edit/write 被拦 —— 这个仓库还没有获批的 loop goal" + (repoRoot ? ` (repo: ${repoRoot})` : ""),
-    why: "L8 在编辑发生之前就拦：批准只有在动手之前才有意义。",
+    what: "edit/write 被拦 —— 这个仓库的 loop goal 未获批" + (repoRoot ? ` (repo: ${repoRoot})` : ""),
+    why: "L8 只在「goal 环节开着、且 goal 未获批」时拦；编排子会话的 goal 环节由门禁在派发时关掉，" +
+      "所以正常不会走到这里 —— 走到了说明它的派发记录没落到 sidecar（旧版项目经理派的子会话，或文件被删）。",
     by: "agent",
-    next: CHILD_GOAL_FLOW,
+    next: "不要自己再去协商 goal（子会话的两条 goal 路径都会被门禁拒）。先看 " +
+      "`.pi/review-gate-state.<你的 variant>.json` 在不在、里面有没有 `stages`；确实没有就把情况报给项目经理" +
+      "（`ask_user` 会经通道转交给他），由他重开这个任务。",
   });
 }
 
@@ -58,7 +63,7 @@ export function childGoalEditBlock(repoRoot?: string): string {
 export function childRestatementRefusal(): string {
   return buildRejection({
     what: "propose_restatement 被拒 —— 编排子会话不做需求反述，没有弹出任何对话框",
-    why: "需求已经由用户批准的 plan 定下，你的 goal 由项目经理直接审核；再反述一遍只是多问一次同样的事。",
+    why: "需求已由用户批准的 plan 定下，而你的合同就是那份 plan 写给你的任务书。",
     by: "agent",
     next: CHILD_GOAL_FLOW,
   });

@@ -101,6 +101,36 @@ function makeDeps(over: Partial<ShipGateHookDeps> & { taskMode?: () => TaskMode 
   return { calls, state, deps: { ...base, ...over } as ShipGateHookDeps };
 }
 
+test("the loop-goal ship block is decided PER REPO — the one this round changed (2026-10-20)", async () => {
+  // A goal binds to a repo, so a session whose work lives in another checkout
+  // has it approved there and nowhere else. Asking the primary refused every
+  // push from the checkout the work was in (measured on a `git worktree`
+  // session: review READY, precommit PASS, push impossible).
+  const primary = "/repos/main";
+  const secondary = "/repos/worktree";
+  const approved = makeDeps({
+    sessionRepos: () => [primary, secondary],
+    enforcementStateFor: (root) => ({
+      ...shippableState(),
+      hasCodeChange: root === secondary,
+      hasDocChange: false,
+    }),
+    loopGoalConfirmed: (root) => root === secondary,
+  });
+  const allowed = await evaluateToolCall(approved.deps, bashCall("git push -u origin feat/x"), {});
+  assert.notEqual(allowed?.block, true, allowed?.reason ?? "");
+  assert.doesNotMatch(allowed?.reason ?? "", /loop goal not confirmed/);
+
+  // …and the mirror case still blocks: the repo that was not approved is named.
+  const denied = await evaluateToolCall(
+    { ...approved.deps, loopGoalConfirmed: () => false } as ShipGateHookDeps,
+    bashCall("git push -u origin feat/x"),
+    {},
+  );
+  assert.equal(denied?.block, true);
+  assert.match(denied?.reason ?? "", /loop goal not confirmed/);
+});
+
 const editCall = (path: string) => ({ toolName: "edit", input: { path, newText: "x" } });
 const bashCall = (command: string) => ({ toolName: "bash", input: { command } });
 

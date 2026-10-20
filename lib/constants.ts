@@ -101,7 +101,17 @@ export const SENSITIVE_FILE_PATTERNS: readonly RegExp[] = Object.freeze([
   // thing that is checking it. The extension and the runner write these with
   // plain fs calls, which this guard does not touch; a human can still edit
   // them by hand.
-  /(^|\/)\.pi\/(review-gate-state\.json(\.blocked)?|precommit-cache\.json|verified-branches\.json)$/i,
+  // The VARIANT sidecars too (2026-10-20, quality round P2): an orchestration
+  // child's own file carries its five switches and the plan's acceptance
+  // checklist (`childContext`), so writing it from a tool would let a session
+  // rewrite the criteria it is judged by.
+  /(^|\/)\.pi\/(review-gate-state(\.[A-Za-z0-9._-]+)?\.json(\.blocked)?|precommit-cache\.json|verified-branches\.json)$/i,
+  // THE CHILD'S TASK BOOK (2026-10-20). It is the assignment the gate handed
+  // an orchestration child — its whole contract now that children have no goal
+  // — so rewriting it after dispatch would rewrite the contract from the
+  // inside. Written by lib/orchestrator-wiring.ts with plain fs calls, which
+  // this guard does not touch; a human can still edit one by hand.
+  /(^|\/)\.pi\/tasks\//i,
 ]);
 
 export function isSensitiveFile(filePath: string): boolean {

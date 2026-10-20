@@ -77,8 +77,16 @@ export interface ShipGateBashDeps {
   hasStagedChanges(root: string): boolean | undefined;
   /** Trees of commits made since the last REVIEWED one. */
   unreviewedTreesSince(root: string, review: GateState["review"]): string[] | undefined;
-  /** Has the USER approved this session's loop goal (primary repo)? */
-  loopGoalConfirmed(): boolean;
+  /**
+   * Has the USER approved the loop goal of THIS repo? (2026-10-20)
+   *
+   * Per repo, not per session: a session whose work lives in another checkout
+   * — a `git worktree` beside the repo, a sibling repository — has its goal
+   * bound to THAT repo (`propose_loop_goal({repo})`), so asking the primary
+   * one answered "not approved" for work the user had signed off, and refused
+   * every ship from the checkout the work is actually in.
+   */
+  loopGoalConfirmed(root: string): boolean;
   /** D08: is a full precommit lane running for this repo right now? */
   precommitLaneRunning(root: string): boolean;
   /** D08: resolve once no lane is running for this repo (it has landed). */

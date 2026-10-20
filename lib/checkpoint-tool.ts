@@ -6,7 +6,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { resolve as pathResolve } from "node:path";
+import { isAbsolute as pathIsAbsolute, relative as pathRelative, resolve as pathResolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "./change-baseline.ts";
@@ -18,6 +18,8 @@ import {
   newDependencyNames,
 } from "./dependency-justification.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "./file-size-gate.ts";
+import { realDir } from "./fingerprint.ts";
+
 import type { GateState } from "./gate-state.ts";
 import { testsRan } from "./gate-state-transitions.ts";
 import { gitBaseEnv, gitFailureText, gitOrNull, gitRaw, gitText } from "./git-exec.ts";
@@ -29,6 +31,31 @@ import type { SessionCells } from "./session-cells.ts";
 import type { AppealKind } from "./text-appeal.ts";
 import type { ToolHost } from "./tool-host.ts";
 import { isProtectedBranch } from "./workspace-branch.ts";
+
+/**
+ * A path this session edited, in the ONE form `git ls-files --others` answers.
+ *
+ * The edit handler records absolute paths; git answers repo-relative ones. Both
+ * sides go through `realDir` first, because a checkout reached through a
+ * symlink (`/tmp` vs `/private/tmp` on macOS) is the same file under two names —
+ * and that is exactly the case this normalization was written for. `realDir` is
+ * the repo's ONE resolver (lib/fingerprint.ts exports it for the same reason);
+ * a local copy would be a third answer to "which file is this".
+ *
+ * WHAT FALLS INTO `leftOut` is therefore exactly "this path is not inside the
+ * repository" (or "the root itself could not be resolved") — the direction that
+ * never commits something we cannot place. A path that was deleted or renamed
+ * still resolves (`realDir` climbs to the nearest existing ancestor and
+ * re-attaches the missing segments), and an already TRACKED file is staged by
+ * `git add -A` rather than by this list in any case.
+ */
+export function repoRelativeTo(root: string, file: string): string {
+  const raw = (file ?? "").trim();
+  if (raw === "") return raw;
+  if (!pathIsAbsolute(raw)) return raw;
+  const rel = pathRelative(realDir(root), realDir(raw));
+  return rel === "" || rel.startsWith("..") ? raw : rel;
+}
 
 export interface CheckpointToolDeps {
   resolveToolRepo: SessionRepos["resolveToolRepo"];
@@ -228,7 +255,14 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
         // "nothing added to commit" failure. The empty-range review round
         // reads the same function, so the two cannot disagree.
         // Round-4 P2: refuse sensitive paths and report what is swept in.
-        const { paths, leftOut } = pendingCheckpoint(root, st.sessionEditedFiles ?? []);
+        // THE SESSION'S OWN PATHS MUST BE REPO-RELATIVE (measured 2026-10-20):
+        // `sessionEditedFiles` holds ABSOLUTE paths, while `git ls-files
+        // --others` answers repo-relative ones, so exact matching never hit —
+        // every file this session CREATED was classified as "not mine", left
+        // out and `git reset` before the commit. It never showed on a tracked
+        // file (those are staged by path), which is why it survived so long;
+        // it made every new module invisible to the reviewer's range.
+        const { paths, leftOut } = pendingCheckpoint(root, (st.sessionEditedFiles ?? []).map((file) => repoRelativeTo(root, file)));
         if (paths.length === 0) {
           return {
             content: [{ type: "text", text: "review-gate: review_checkpoint — nothing to commit (worktree is clean" +

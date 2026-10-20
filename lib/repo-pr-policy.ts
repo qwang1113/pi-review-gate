@@ -55,9 +55,10 @@
  *  - the LAST task is the DELIVERY task — conventionally the independent
  *    acceptance task (验收任务): no new requirement, no business code, it
  *    delivers (push, PR). It is the ONE task this cap never touches, because
- *    capping it would leave nobody who may publish at all. WHETHER it runs the
- *    acceptance round is not decided here: that is the task's own
- *    `stages.acceptance` (2026-09-27, lib/acceptance-round.ts).
+ *    capping it would leave nobody who may publish at all. It IS the task that
+ *    runs the plan's one acceptance round (2026-10-20), and that rule lives in
+ *    lib/acceptance-round.ts's `acceptanceTaskIdOf` — which reads THIS function,
+ *    so "which task delivers" and "which task accepts" cannot drift apart.
  *
  * Both of them still COUNT as tasks of their repo (2026-09-18): one repo
  * publishes ONE PR per requirement, so a last task that ships while a sibling
@@ -135,18 +136,19 @@ export function normalizeRepoPath(path: string): string {
  * plan's own, uncapped by the same-repo narrowing below, so somebody may push
  * and open the PR. `undefined` only for a plan with no tasks at all.
  *
- * STATION ONLY (2026-09-27). This used to be `acceptanceTaskId` and answered
- * "whose acceptance gate is open" too; that question is now the task's own
- * `stages.acceptance` (lib/acceptance-round.ts `acceptanceGateValue`), and a
- * name that still said "acceptance" would read as the answer to it. The
- * wrap-up task is the SECOND-to-last and is capped like any other task.
+ * STATION AND ACCEPTANCE (2026-10-20). This used to be `acceptanceTaskId`; the
+ * per-task `stages.acceptance` switch that replaced it is gone too, and the
+ * answer is position again — "the last task delivers" and "the last task
+ * accepts" are one fact, which is why lib/acceptance-round.ts reads this
+ * function instead of re-deriving it. The wrap-up task is the SECOND-to-last
+ * and is capped like any other task.
  *
  * Exported because the convention has more than one reader: the station rule
  * below, the summary the user approves (`formatPlanSummary` marks it) and the
  * plan audit's checklist. ONE function, so "which task delivers" cannot be
  * answered two ways.
  */
-export function deliveryTaskId(plan: RepoPrPlanInput): string | undefined {
+export function deliveryTaskId(plan: { tasks: readonly { id: string }[] }): string | undefined {
   return plan.tasks.length > 0 ? plan.tasks[plan.tasks.length - 1]!.id : undefined;
 }
 

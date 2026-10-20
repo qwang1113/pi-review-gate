@@ -40,6 +40,9 @@ import { registerOrchestratorSessionTools } from "../../lib/orchestrator-session
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
 import { beginApprovalLineage, snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
+import { deliveryTaskId } from "../../lib/repo-pr-policy.ts";
+import { childStagesRecord } from "../../lib/loop-stages.ts";
+import { childSessionId } from "../../lib/orchestrator-delivery.ts";
 import { restatementHash, type RestatementRecord } from "../../lib/restatement.ts";
 import type { DeliveryStation } from "../../lib/delivery-station.ts";
 
@@ -498,6 +501,25 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       scratch.set(path, content);
       return { ok: true, path };
     },
+    writeChildGateRecord: (input) => {
+      // Kept in the same in-memory scratch as the task file, so a test can read
+      // back exactly what the child's gate would see.
+      const path = `${input.repo}/.pi/review-gate-state.${input.variant}.json`;
+      scratch.set(path, JSON.stringify({
+        // The real record carries the child's OWN session id (its restore path
+        // adopts a sidecar only on an exact match), so the fake does too.
+        sessionId: childSessionId(input.variant),
+        // Same rule and same constructor as production: the plan's LAST task
+        // accepts, and every other switch is the dispatcher's default.
+        stages: childStagesRecord({ accepts: input.taskId === deliveryTaskId(input.plan), at: input.at }).stages,
+        childContext: {
+          planIntent: input.plan.intent,
+          acceptancePlan: input.plan.acceptancePlan,
+          taskBrief: input.taskBrief,
+        },
+      }));
+      return { ok: true, path };
+    },
     childGateState: (cwd) => sidecars.get(cwd),
     sleep: async () => { /* the fake has no latency */ },
     resolveTaskRepo: (repo) =>
@@ -846,7 +868,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     call: async (name, params = {}) => {
       const run = tools.get(name);
       assert.ok(run, `tool ${name} is not registered`);
-      return run!(params);
+      return run!(completePlanPayload(name, params));
     },
     planAudits: () => planAudits,
     tmuxCalls,
@@ -857,14 +879,50 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
   };
 }
 
+/**
+ * THE PLAN FIXTURE'S OWN ACCEPTANCE CHECKLIST.
+ *
+ * A plan must carry `acceptancePlan` (`parsePlan` requires it on the write
+ * path, 2026-10-20). Tests about approval budgets, scheduling or tmux have
+ * nothing to say about the checklist, so the FAKE WORLD supplies the default
+ * one — the same way it supplies a repository and a clock. The rule itself is
+ * pinned by `test/orchestrator-plan.test.ts` against the REAL `parsePlan`.
+ */
+export const TEST_ACCEPTANCE_PLAN = "起服务 → 调接口 → 比对返回数据 → 再验邻居路径";
+
+/** Fill in what a test does not care about, and nothing else. */
+function completePlanPayload(name: string, params: Record<string, unknown>): Record<string, unknown> {
+  if (name !== "orchestrator_plan" || params.action !== "write") return params;
+  const plan = params.plan;
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)) return params;
+  const payload = plan as Record<string, unknown>;
+  const given = payload.acceptancePlan;
+  const filled = {
+    ...payload,
+    // A fixture built by `parsePlan` off the WRITE path carries "" (the read
+    // path is lenient), so the fake supplies the default checklist the way it
+    // supplies a repo and a clock. NOTE: this also fills an EMPTY string, so a
+    // test that wants the refusal must call `parsePlan` / `handlePlanAction`
+    // directly rather than going through the fake's tool dispatch.
+    acceptancePlan: typeof given === "string" && given.trim() !== "" ? given : TEST_ACCEPTANCE_PLAN,
+  };
+  return { ...params, plan: filled };
+}
+
 /** A minimal two-task plan, both tasks touching different files. */
 export function twoTaskPlan(): OrchestratorPlan {
   const parsed = parsePlan({
     title: "测试计划",
     intent: "两个互不重叠的任务",
+    acceptancePlan: TEST_ACCEPTANCE_PLAN,
     tasks: [
       { id: "t1", title: "任务一" },
       { id: "t2", title: "任务二" },
+      // The plan LAST task accepts and may only start once every other task
+      // is done (2026-10-20), so a fixture used to spawn IMPLEMENTATION tasks
+      // needs a tail nobody dispatches. No other rule moves: t1/t2 keep their
+      // repos, their parallelism and their statuses.
+      { id: "acc", title: "统一验收" },
     ],
   });
   assert.ok(parsed.plan, `plan fixture must parse: ${parsed.problems.join("; ")}`);

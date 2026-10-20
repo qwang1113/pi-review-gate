@@ -1222,6 +1222,12 @@ one fact:
 - **Unapproved ⇒ blocked and unquoted.** In loop mode an unapproved goal blocks
   `git commit` / `git push` / `gh pr` at **L1**, and its body is *withheld* from
   the prompt (only a "a draft exists, renegotiate it" note is injected).
+  WHICH goal: one **per repo** — a goal binds to the repo it was approved for
+  (`propose_loop_goal({repo})`), so a ship from a checkout this round actually
+  changed is judged against THAT checkout's approval, and a round that changed
+  nothing in any other repo falls back to the primary's (2026-10-20). The same
+  per-repo answer decides `declare_done`, and it is asked in one place
+  (`lib/loop-goal-host.ts` `goalSatisfiedForWork`).
   Blocking at ship time is the point: by `declare_done` the code is already
   pushed and agreeing on the goal would be theatre.
 - **Edits are gated too (since 2026-08-23).** In loop mode (and while the mode

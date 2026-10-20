@@ -38,6 +38,29 @@ import type {
   RoundRecord,
 } from "./gate-state-records.ts";
 
+/**
+ * WHAT THE DISPATCHER HANDED AN ORCHESTRATION CHILD (2026-10-20, user decision).
+ *
+ * A child has no loop goal of its own: its contract is the task book the gate
+ * wrote, and the plan's own acceptance checklist. Both travel in the sidecar
+ * rather than through the pane's argv, because the child may run in its own
+ * git worktree under /tmp where the manager's `.pi/orchestrator-plan.json`
+ * does not exist — and because the sidecar is the one file the child's gate
+ * already reads for every decision.
+ *
+ *  - `taskBrief`      — the assignment, in full. What the reviewer and the
+ *                       quality auditor judge the change against.
+ *  - `planIntent`     — one line from the approved plan, so the judges see
+ *                       what the whole orchestration is for.
+ *  - `acceptancePlan` — the plan's overall 真实验收方案; the acceptance round
+ *                       takes its checklist from HERE when no loop goal exists.
+ */
+export interface ChildGateContext {
+  planIntent: string;
+  acceptancePlan: string;
+  taskBrief: string;
+}
+
 export interface GateState {
   schema: 1;
   /**
@@ -266,6 +289,13 @@ export interface GateState {
    * simply have none.
    */
   orchestrator?: import("./orchestrator-registry.ts").OrchestratorRuntime;
+  /**
+   * The dispatch record an orchestration child carries — see
+   * {@link ChildGateContext}. Absent in every other session, and absent for a
+   * child whose dispatcher wrote no record (an older manager), in which case
+   * the judges simply have no plan text to judge against.
+   */
+  childContext?: ChildGateContext;
   /**
    * sd0x-dev-flow R10 ("Think Harder") port: whether the one-shot strategic
    * reset checklist has fired for this state lifetime. Optional so schema-1

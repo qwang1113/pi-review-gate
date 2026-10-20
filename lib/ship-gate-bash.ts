@@ -474,8 +474,24 @@ export async function evaluateShipCommand(
   // L1 only, deliberately: the git hooks judge code facts from the sidecar
   // and cannot see a dialog, so this requirement never enters
   // unmetRequirements() (the ship authority they share).
-  if (deps.taskMode() === "loop" && !deps.loopGoalConfirmed()) {
-    problems.push(multiRepo ? `[${deps.repoLabel(primaryRepoRoot)}] ${LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK}` : LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+  if (deps.taskMode() === "loop") {
+    // (the per-repo test lives OUTSIDE this call body on purpose: the window
+    // guard in test/extension-structure.test.ts forbids any early exit between
+    // the exemption and the last check it must not skip.)
+    // WHICH REPOS THIS QUESTION IS ASKED ABOUT (2026-10-20): the ones this
+    // round actually changed. A goal binds to a repo (`propose_loop_goal`
+    // takes one), so asking only the primary refused every ship from a
+    // checkout the session had been working in — measured on a session whose
+    // work lived in a `git worktree` beside the repo: review READY, precommit
+    // PASS, and a push that could never go through.
+    const targets = [...deps.sessionRepos()].filter((root) => repoHasWork(deps, root));
+    const unchecked = (targets.length > 0 ? targets : [primaryRepoRoot])
+      .filter((root) => !deps.loopGoalConfirmed(root));
+    if (unchecked.length > 0) {
+      problems.push(multiRepo
+        ? `[${deps.repoLabel(unchecked[0]!)}] ${LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK}`
+        : LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
+    }
   }
 
   if (problems.length === 0 && stationProblems.length === 0) return undefined;
@@ -522,6 +538,19 @@ export async function evaluateShipCommand(
  * and "your READY is on another repo" is the single most relevant of them
  * when a multi-repo block is being contested.
  */
+/**
+ * Did this round change anything in this repo? (2026-10-20)
+ *
+ * The loop-goal check asks it per repo, because a goal binds to ONE repo — a
+ * session whose work lives in another checkout has it approved there and
+ * nowhere else. It lives outside the ship-gate body so the window guard in
+ * test/extension-structure.test.ts still describes the call site.
+ */
+function repoHasWork(deps: ShipGateBashDeps, root: string): boolean {
+  const st = deps.enforcementStateFor(root);
+  return st !== undefined && (st.hasCodeChange || st.hasDocChange);
+}
+
 function refuseShip(
   deps: ShipGateBashDeps,
   { command, ships, problems, stationProblems, blockedUnreviewed }: {

@@ -132,13 +132,15 @@ reviewer over the WHOLE change:
 
 - **验收轮是完成时刻的第六个 judge，由门禁自己派（2026-09-22，L9）.** 它不是
   `judge_submit` 的产物：本轮有代码改动、有一份**用户批准的**验收方案（goal 的
-  「真实验收方案」段——goal 环节关闭或 goal 未批准时就没有方案，该轮会被记录成
-  SKIPPED 跳过），且没有绑定当前内容的验收结论时，`declare_done` 内部**自己**派出 `acceptance`
+  「真实验收方案」段；编排子会话没有 goal，那一份来自 plan 的 `acceptancePlan`，由派发写进
+  它的 sidecar），且没有绑定当前内容的验收结论时，`declare_done` 内部**自己**派出 `acceptance`
   （agent 叫不动它 —— `judge_submit`
   不接受这个名字），并把下一步写成 `judge_wait({role:"acceptance"})`；非 READY、
   或那份 READY 绑定的内容已经移动 ⇒ 拒绝完成。它**不进 `unmetRequirements`** ——
   修验收 finding 要 commit，而 commit 又要过 ship 门禁，进了那一层就是自我死锁
-  （理由写在 `lib/acceptance-round.ts` 的 docblock 里）。判据是 goal 的
+  （理由写在 `lib/acceptance-round.ts` 的 docblock 里）。**没有清单不跳**：goal 环节关闭且
+  goal 未批准、或编排子会话的 plan 清单为空 ⇒ 该轮被拒（子会话那条是 BLOCKED，由项目经理补
+  plan 的清单并重批）。判据是 goal 的
   「真实验收方案」段：真起、真调、比返回数据、再验邻居路径；没有真实执行证据不得
   READY，环境确实跑不起来时如实报 BLOCKED 而不是自我豁免。取消矩阵里没有它 ——
   矩阵裁的是同一时刻并行的三方，验收轮是完成时刻单独的一轮。
@@ -690,12 +692,13 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
 
 2. **子会话就是普通 loop 会话**：由 `orchestrator_spawn` 启动，带 `loop` 模式，
    只被多注入「有项目经理在管这轮任务」一句 + 任务书末尾门禁追加的
-   `TASK_GOAL_DIRECTIVE`（plan 批准 ≠ goal 批准，必须先协商自己的 loop goal，
-   2026-09-01）。**它的 goal 流程只有一步**（2026-09-28，用户决定）：不做需求反述
-   （`propose_restatement` 对子会话直接拒绝）、不跑 goal-auditor，直接 `propose_loop_goal`；
-   批准框照旧同时发给项目经理（它就是审核者，代批要 `crosscheck`）与子会话 pane，先答者
-   生效；站点缺省取 `RG_STATION_CAP`。子会话的判定是 `isOrchestrationChildEnv`
-   （`lib/session-inheritance.ts`），它看到的每一处文案都来自 `lib/child-goal-flow.ts`。
+   `TASK_GOAL_DIRECTIVE`。**它没有 goal 环节**（2026-10-20，用户决定，取代 2026-09-28 的
+   「直接 propose_loop_goal」）：派发时门禁就把它的五环节记录写成 `goal: false`
+   （`lib/child-gate-record.ts`），于是需求反述、goal 协商、goal 审计、goal 批准框、L8 的
+   goal 拦截在子会话里全都不成立；它的合同是门禁写进 `.pi/tasks/` 的**任务书**
+   （agent 不可编辑）+ 环境里的站点上界 `RG_STATION_CAP`，判据也换成了「plan 意图 +
+   任务书」。子会话的判定是 `isOrchestrationChildEnv`（`lib/session-inheritance.ts`），
+   它看到的每一处文案都来自 `lib/child-goal-flow.ts`。
    plan、调度细节一律不注入 —— 知道
    plan 会让它为 plan 而不是为自己的任务做优化。它在**任务声明的 repo** 里工作
    （plan 任务**必须**声明 `repo` 字段——子会话 cwd 就落在那里；2026-09-01 实测
@@ -770,18 +773,15 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
    展示与记录都不超过它；**`orchestrator_recover` 重开 pane 与 `session_handoff`
    接力都重新注入同一个上界**（一个新进程不该比原进程能做更多）。站点规则只有一处实现：
    `lib/repo-pr-policy.ts`（`deliveryTaskId` / `effectiveTaskStation`）。
-2c. **验收是每个任务自己的开关，不看位置**（2026-09-27，用户决定）：plan 任务可带
-   `stages: { acceptance: false }`（复用 `lib/loop-stages.ts` 的五环节词表，但只开放
-   `acceptance`；缺省全开）。建议实现与验收分开 —— 实现任务、收尾任务关掉验收，验收放在
-   实现都完成后的专门任务里，粒度由项目经理定。**关掉验收的任务必须被某个开着验收的任务
-   （传递）`dependsOn`**，否则 `parsePlan` 直接拒绝（因此「全部关闭」不可能）。`stages`
-   进 canonical plan 文本（只在关闭时出现，存量 plan 的 hash 不变）；关闭 = 扩权（重批），
-   重新打开 = 收紧（平移）。开关经 `RG_ACCEPTANCE_GATE` 注入子会话（spawn / recover /
-   handoff 同一个值）：开着写 `on`，关了写 `off:<接手任务 id>`；这样的子会话每轮提示写明
-   「本任务不验收，由 X 统一验收」，goal 审计不再要求「真实验收方案」，`declare_done` 回执
-   写明验收移交给谁 —— 不再有「批准过的验收方案被静默跳过」。Copilot 周期与此无关：谁真正
-   push / 开了 PR，谁就跑。判定只有一处：`lib/acceptance-round.ts`（`acceptanceGateValue` /
-   `acceptanceDelegatesOf`）。
+2c. **整个 plan 只跑一次统一验收，归最后一个任务**（2026-10-20，用户决定，取代 2026-09-27
+   的「每个任务自己的开关」）：`tasks[].stages` 整条删除（plan 里写了会被拒），验收轮只由
+   plan 的最后一个任务跑，其余子会话一律移交。**最后一个任务在其余任务全部 done 之前派不出来**
+   （`orchestrator_spawn` 直接拒绝）。开关经 `RG_ACCEPTANCE_GATE` 注入（spawn / recover /
+   handoff 同一个值）：最后那个写 `on`，其余写 `off:<最后任务 id>`，`declare_done` 回执
+   写明移交给谁。**验收清单写在 plan 顶层的 `acceptancePlan`**：进 canonical 文本与批准 hash、
+   随 plan 一起被 plan 审计、由用户批准；验收轮从子会话 sidecar 里的那份读（派发时写入，
+   见 `lib/child-gate-record.ts`）。Copilot 周期与此无关：谁真正 push / 开了 PR，谁就跑。
+   判定只有一处：`lib/acceptance-round.ts`（`acceptanceGateValue` / `acceptanceTaskIdOf`）。
 3. **寻址用 orchestration id**（`RG_ORCHESTRATION_ID`），不是 session id：接力
    换人后子会话无感，通知不失联（这正是手工编排那一晚 0 条送达的根因）。而「交棒」
    本身分**两个阶段**：开新 pane **之前**释放 worktree 占用（否则继任者被自己前任的

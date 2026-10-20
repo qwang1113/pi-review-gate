@@ -9,7 +9,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { checkpointCommitPaths, planCheckpointSweep } from "../lib/checkpoint-sweep.ts";
+import { repoRelativeTo } from "../lib/checkpoint-tool.ts";
+
+test("the session's own paths are compared in GIT'S form — absolute ones are made repo-relative (2026-10-20)", () => {
+  // The edit handler records ABSOLUTE paths; `git ls-files --others` answers
+  // repo-relative ones. Exact matching therefore never hit, and every file the
+  // session CREATED was left out of the checkpoint — invisible to the reviewer
+  // while the commit still went through.
+  const root = mkdtempSync(join(tmpdir(), "rg-sweep-"));
+  try {
+    mkdirSync(join(root, "lib"), { recursive: true });
+    writeFileSync(join(root, "lib", "new.ts"), "export const x = 1;\n");
+    // The macOS /tmp -> /private/tmp seam: the same file reached under two names.
+    const viaSymlink = root.replace(/^\/private/, "");
+    assert.equal(repoRelativeTo(root, join(root, "lib", "new.ts")), "lib/new.ts");
+    assert.equal(repoRelativeTo(realpathSync(root), join(viaSymlink, "lib/new.ts")), "lib/new.ts",
+      "a checkout reached through a symlink is the same file");
+    assert.equal(repoRelativeTo(root, "lib/trimmed.ts"), "lib/trimmed.ts", "a relative path is already right");
+    const outside = repoRelativeTo(root, join(tmpdir(), "elsewhere.txt"));
+    assert.ok(outside.startsWith("/"), "a path outside the repo is NOT silently re-based — it stays unmatched (left out)");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a seeded symlink nobody wrote is LEFT OUT — the measured case", () => {
   const plan = planCheckpointSweep({ untracked: ["node_modules", ".env"], own: [] });

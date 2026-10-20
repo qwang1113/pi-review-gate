@@ -23,7 +23,7 @@ import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 
 neutraliseGateEnv();
 
-import { makeFakeWorld, replyText, twoTaskPlan } from "./helpers/fake-orchestration.ts";
+import { TEST_ACCEPTANCE_PLAN, makeFakeWorld, replyText, twoTaskPlan } from "./helpers/fake-orchestration.ts";
 import {
   decideApprovalCarry,
   snapshotApprovedPlan,
@@ -41,6 +41,7 @@ function fileGrainPlan(): OrchestratorPlan {
     title: "重构计划",
     intent: "把三个工具搬进各自的模块",
     maxParallel: 2,
+    acceptancePlan: TEST_ACCEPTANCE_PLAN,
     tasks: [
       { id: "t1", title: "用户交互工具", repo: "/repo" },
       { id: "t2", title: "命令层", repo: "/repo", dependsOn: ["t1"] },
@@ -393,6 +394,7 @@ test("`write` ACCEPTS a note update for an existing task, and the approval survi
   const approved = parsePlan({
     title: "测试计划",
     intent: "两个互不重叠的任务",
+    acceptancePlan: TEST_ACCEPTANCE_PLAN,
     tasks: [
       { id: "t1", title: "任务一", repo: "/repo" },
       { id: "t2", title: "任务二", repo: "/repo" },
@@ -681,6 +683,17 @@ test("submit runs the audit FIRST, and a failed audit opens no dialog at all", a
   assert.equal(world.runtime().approvedPlanHash, undefined, "nothing was approved");
 });
 
+test("submit refuses a plan with no acceptance checklist — before any audit or dialog (2026-10-20)", async () => {
+  const world = makeFakeWorld({ plan: { ...twoTaskPlan(), acceptancePlan: "" } });
+  const reply = await world.call("orchestrator_plan", { action: "submit" });
+  assert.equal(reply.isError, true);
+  assert.match(replyText(reply), /真实验收方案/);
+  assert.match(replyText(reply), /正向真实调用/, "the refusal carries the shape to copy");
+  assert.equal(world.planAudits(), 0, "no minutes-long audit is spent on a plan that cannot be approved");
+  assert.equal(world.confirmAnswers.length, 0, "and no dialog is shown");
+  assert.equal(world.runtime().approvedPlanHash, undefined);
+});
+
 test("a passing audit is followed by the dialog, and approval records the snapshot", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan() });
   world.confirmAnswers.push(true);
@@ -691,7 +704,8 @@ test("a passing audit is followed by the dialog, and approval records the snapsh
   assert.equal(world.planAudits(), 1);
   const runtime = world.runtime();
   assert.equal(runtime.approvedPlanHash, planHash(world.plan()!));
-  assert.equal(runtime.approvedPlan?.tasks.length, 2, "WHAT was approved is recorded, not just its hash");
+  assert.equal(runtime.approvedPlan?.tasks.length, world.plan()!.tasks.length,
+    "WHAT was approved is recorded, not just its hash");
   assert.deepEqual(runtime.approvalAmendments, [], "a fresh approval starts with a clean trail");
 });
 
@@ -813,36 +827,37 @@ test("dropping a sibling can widen the survivor — the count is what capped it"
 // THE PER-TASK ACCEPTANCE SWITCH (2026-09-27): off is less supervision
 // ---------------------------------------------------------------------------
 
-test("switching a task's acceptance OFF revokes the approval; switching it back ON carries", () => {
+test("rewriting the acceptance checklist revokes the approval — even emptying it (2026-10-20)", () => {
   const plan = fileGrainPlan();
-  // t2 depends on t1, so t1 may hand its acceptance to it.
-  const off = withTask(plan, "t1", { stages: { acceptance: false } });
-  const revoked = decideApprovalCarry(approved(plan), off, REPO);
+  const rewritten = { ...plan, acceptancePlan: "再跑一遍测试" };
+  const revoked = decideApprovalCarry(approved(plan), rewritten, REPO);
   assert.equal(revoked.carries, false);
-  assert.match(revoked.widenings.join("\n"), /"t1" 关闭了验收环节/);
+  assert.match(revoked.widenings.join("\n"), /「真实验收方案」被改写/);
 
-  const back = decideApprovalCarry(approved(off), plan, REPO);
-  assert.equal(back.carries, true, back.widenings.join("\n"));
-  assert.match(back.amendments.join("\n"), /"t1" 重新打开了验收环节/);
+  // "Less checking" is NOT the reading here: an emptied checklist leaves the
+  // one acceptance round with nothing to verify, so it asks the user again.
+  const emptied = { ...plan, acceptancePlan: "" };
+  assert.equal(decideApprovalCarry(approved(plan), emptied, REPO).carries, false);
 
-  // A snapshot that predates the field reads as all ON — the strict side.
+  // A snapshot that predates the field reads as "" — the strict side.
   const legacy = approved(plan);
-  for (const t of legacy.tasks) delete (t as { stages?: unknown }).stages;
-  assert.equal(decideApprovalCarry(legacy, off, REPO).carries, false);
+  delete (legacy as { acceptancePlan?: string }).acceptancePlan;
+  assert.equal(decideApprovalCarry(legacy, plan, REPO).carries, false);
 });
 
-test("the switch SURVIVES the runtime round trip — a recovered child recomputes from it", () => {
-  const plan = withTask(fileGrainPlan(), "t1", { stages: { acceptance: false } });
+test("the acceptance checklist SURVIVES the runtime round trip", () => {
+  const plan = fileGrainPlan();
   const runtime = normalizeRuntime({
     orchestrationId: "orch-deadbeef-abc",
     children: [],
     notify: { sentAt: [], lastByKey: {} },
     approvedPlanHash: planHash(plan),
-    approvedPlanAt: "2026-09-27T10:00:00.000Z",
-    approvedPlan: snapshotApprovedPlan(plan, planHash(plan), "2026-09-27T10:00:00.000Z"),
+    approvedPlanAt: "2026-10-20T10:00:00.000Z",
+    approvedPlan: snapshotApprovedPlan(plan, planHash(plan), "2026-10-20T10:00:00.000Z"),
   }, "orch-deadbeef-abc");
   assert.ok(runtime);
-  assert.deepEqual(runtime.approvedPlan?.tasks.find((t) => t.id === "t1")?.stages, { acceptance: false });
+  // Dropped in the round trip, a rewritten plan would look unchanged.
+  assert.equal(runtime.approvedPlan?.acceptancePlan, plan.acceptancePlan);
 });
 
 // ---------------------------------------------------------------------------

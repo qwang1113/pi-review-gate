@@ -31,6 +31,9 @@ function planOf(overrides: Record<string, unknown> = {}): OrchestratorPlan {
   const parsed = parsePlan({
     title: "拆分 review-gate",
     intent: "把 8659 行的扩展拆成模块",
+    // REQUIRED since 2026-10-20: the plan's own acceptance checklist, which the
+    // LAST task's acceptance round works through.
+    acceptancePlan: "起服务 → 调接口 → 比对返回数据 → 再验邻居路径",
     tasks: [
       { id: "a", title: "抽 plan 模块" },
       { id: "b", title: "抽 tmux 模块" },
@@ -78,6 +81,7 @@ test("CONSTRAINT 6 (write path): a task with no declared repo is refused when st
 test("CONSTRAINT 6 (write path): a task WITH a repo passes strictRepo", () => {
   const parsed = parsePlan({
     title: "t", intent: "i",
+    acceptancePlan: "起服务、调接口、比数据",
     tasks: [{ id: "a", title: "BFF proxy", repo: "/work/server-service-dashboard" }],
   }, NOW, true);
   assert.equal(parsed.ok, true);
@@ -519,7 +523,7 @@ test("the summary names the repo whose tasks are held at commit — and stays qu
 // the wrap-up (merge → one review → commit), the last is the INDEPENDENT
 // acceptance task (real acceptance → push → PR) — and only the latter keeps the
 // plan's own station.
-test("the summary marks WHICH task delivers — and only that one; acceptance is per task", () => {
+test("the summary marks WHICH task delivers — and only that one; acceptance is the last task's", () => {
   const tasks = [
     { id: "work", title: "做事", repo: "/repo" },
     { id: "wrap", title: "收尾", repo: "/repo" },
@@ -533,9 +537,9 @@ test("the summary marks WHICH task delivers — and only that one; acceptance is
   assert.match(accept!, /交付任务/, "the user approves the station — they must see who carries it out");
   assert.doesNotMatch(wrap!, /交付任务/, "the wrap-up merges and commits — it is not the exempt one");
   assert.doesNotMatch(work!, /交付任务/);
-  // WHO ACCEPTS is no longer the position (2026-09-27): no `stages` ⇒ every
-  // task's line says acceptance is on.
-  assert.equal(lines.filter((l) => l.trim() === "验收：开").length, 3);
+  // WHO ACCEPTS IS THE POSITION (2026-10-20): exactly one task runs the round.
+  assert.equal(lines.filter((l) => l.includes("验收：开（统一验收任务")).length, 1);
+  assert.equal(lines.filter((l) => l.includes("验收：关（由 accept 统一验收）")).length, 2);
 });
 
 test("D25: a one-task plan marks no delivery task, and the mark follows the plan's station", () => {
@@ -550,6 +554,19 @@ test("D25: a one-task plan marks no delivery task, and the mark follows the plan
   assert.doesNotMatch(mark, /开 PR；|push →/, "a precommit plan does not push");
   const pr = formatPlanSummary(planOf({ deliveryStation: "pr", tasks }), "/repo");
   assert.match(pr.split("\n").find((l) => l.startsWith("- [pending] a"))!, /PR 开出来/);
+});
+
+test("a plan written BEFORE acceptancePlan existed keeps its hash — the field is only hashed when present", () => {
+  const legacy = parsePlan({
+    title: "t", intent: "i",
+    tasks: [{ id: "a", title: "A", repo: "/repo" }],
+  }, NOW).plan!;
+  assert.equal(legacy.acceptancePlan, "", "the read path is lenient");
+  assert.doesNotMatch(canonicalPlanText(legacy), /acceptancePlan/,
+    "an empty checklist adds no term, so a running orchestration's approval still matches");
+  const modern = { ...legacy, acceptancePlan: "起服务 → 调接口" };
+  assert.match(canonicalPlanText(modern), /"acceptancePlan":"起服务/, "…and a real one IS hashed");
+  assert.notEqual(planHash(modern), planHash(legacy));
 });
 
 test("the canonical text is order-independent for sets", () => {
@@ -599,71 +616,48 @@ test("the summary renders the TASK BOOK — the plan the auditor and the user ac
 });
 
 // ---------------------------------------------------------------------------
-// tasks[].stages — the per-task acceptance switch (2026-09-27)
+// acceptancePlan + the position rule (2026-10-20)
 // ---------------------------------------------------------------------------
 
-test("stages: only `acceptance` may be set, and only as a boolean", () => {
-  const bad = parsePlan({
+test("acceptancePlan is REQUIRED, and the refusal carries the shape to copy", () => {
+  const missing = parsePlan({
     title: "t", intent: "i",
-    tasks: [
-      { id: "a", title: "A", stages: { goal: false } },
-      { id: "b", title: "B", stages: { acceptance: "no" } },
-      { id: "c", title: "C", stages: [false] },
-    ],
-  }, NOW);
-  assert.equal(bad.ok, false);
-  const text = bad.problems.join("\n");
-  assert.match(text, /tasks\[0\]\.stages\.goal 不可设置 —— plan 任务只开放 acceptance/);
-  assert.match(text, /tasks\[1\]\.stages\.acceptance 必须是布尔值/);
-  assert.match(text, /tasks\[2\]\.stages 必须是对象/);
+    tasks: [{ id: "a", title: "A", repo: "/repos/one" }],
+  }, NOW, true);
+  assert.equal(missing.ok, false);
+  assert.match(missing.problems.join("\n"), /plan\.acceptancePlan 不能为空/);
+  assert.match(missing.problems.join("\n"), /本轮无真实验收（理由）/);
 });
 
-test("stages: absent and `{acceptance:true}` are the SAME plan — and hash as before the field existed", () => {
-  const plain = planOf();
-  const explicit = planOf({
+test("tasks[].stages is GONE: a plan still carrying it is refused, not silently ignored", () => {
+  const legacy = parsePlan({
+    title: "t", intent: "i",
+    acceptancePlan: "起服务、调接口、比数据",
     tasks: [
-      { id: "a", title: "抽 plan 模块", stages: { acceptance: true } },
-      { id: "b", title: "抽 tmux 模块" },
+      { id: "a", title: "A", repo: "/repos/one", stages: { acceptance: false } },
+      { id: "b", title: "B", repo: "/repos/one", dependsOn: ["a"] },
     ],
-  });
-  assert.equal(explicit.tasks[0]!.stages, undefined, "an all-on switch is not stored");
-  assert.equal(planHash(explicit), planHash(plain));
-  assert.doesNotMatch(canonicalPlanText(plain), /stages/, "a plan that never wrote it carries no new term");
+  }, NOW, true);
+  assert.equal(legacy.ok, false);
+  assert.match(legacy.problems.join("\n"), /tasks\[0\]\.stages 已删除/);
 });
 
-test("stages: switched OFF is approved content, and needs an accepting task that runs after it", () => {
-  const ok = planOf({
+test("the acceptance round belongs to the LAST task, and the summary says so", () => {
+  const plan = planOf({
     tasks: [
-      { id: "a", title: "实现", stages: { acceptance: false } },
-      { id: "w", title: "收尾", dependsOn: ["a"], stages: { acceptance: false } },
+      { id: "a", title: "实现" },
+      { id: "w", title: "收尾", dependsOn: ["a"] },
       { id: "acc", title: "验收", dependsOn: ["w"] },
     ],
   });
-  assert.deepEqual(ok.tasks[0]!.stages, { acceptance: false });
-  assert.match(canonicalPlanText(ok), /"stages":\{"acceptance":false\}/);
-  assert.notEqual(planHash(ok), planHash({ ...ok, tasks: ok.tasks.map((t) => ({ ...t, stages: undefined })) }));
-  const summary = formatPlanSummary(ok);
-  assert.match(summary, /验收：关（由 acc 统一验收）/, "the approval text says who accepts");
-  assert.match(summary, /验收：开/);
-
-  const orphan = parsePlan({
-    title: "t", intent: "i",
-    tasks: [
-      { id: "a", title: "实现", stages: { acceptance: false } },
-      { id: "acc", title: "验收（但不依赖 a）" },
-    ],
-  }, NOW);
-  assert.equal(orphan.ok, false);
-  assert.match(orphan.problems.join("\n"), /任务 "a" 关闭了验收，但没有任何开着验收、且（传递）dependsOn 它的任务来接手/);
-
-  const allOff = parsePlan({
-    title: "t", intent: "i",
-    tasks: [
-      { id: "a", title: "A", stages: { acceptance: false } },
-      { id: "b", title: "B", dependsOn: ["a"], stages: { acceptance: false } },
-    ],
-  }, NOW);
-  assert.equal(allOff.ok, false, "a plan in which nobody accepts is refused");
+  const summary = formatPlanSummary(plan);
+  assert.match(summary, /验收：开（统一验收任务，整个 plan 只有它跑一次验收轮）/);
+  assert.match(summary, /验收：关（由 acc 统一验收）/);
+  assert.match(summary, /真实验收方案（plan 的最后一个任务按它跑统一验收轮）：/);
+  assert.match(summary, /起服务 → 调接口 → 比对返回数据 → 再验邻居路径/, "the checklist reaches the approval box");
+  // Approved content: rewriting the checklist moves the hash.
+  assert.notEqual(planHash(plan), planHash({ ...plan, acceptancePlan: "再跑一遍测试" }));
+  assert.match(canonicalPlanText(plan), /"acceptancePlan":"起服务/);
 });
 
 test("D30: `isolated` parses as a boolean, is stored only when true, and hashes only when true", () => {

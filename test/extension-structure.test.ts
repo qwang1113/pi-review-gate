@@ -2049,9 +2049,19 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   assert.equal(calls, 1, "exactly one call site — a second reading would be a second contract");
   const body = toolBodyOf("declare_done");
   assert.match(body, /stationArrivalProblems\(/, "…and it is inside declare_done");
-  assert.match(body, /isEnforcedMode\(state\.taskMode\) && deps\.goalStageSatisfied\(\)/,
+  // PER REPO since 2026-10-20: a goal binds to the repo the work landed in, so
+  // the answer is `goalSatisfied`, computed over the repos this round changed
+  // (the primary's own confirmation is the no-work fallback).
+  assert.match(body, /isEnforcedMode\(state\.taskMode\) && goalSatisfied/,
     "the station is only known once the user approved a goal that carries one — or switched the goal stage off; " +
     "the loop question is isEnforcedMode's, so an UNDECIDED session is judged too (real-session P1, 2026-09-22)");
+  // …and that answer is per repo under the hood: lib/loop-goal-host.ts's
+  // `goalSatisfiedForWork` (the one implementation every reader shares).
+  const hostSrc = readFileSync(join(ROOT, "lib", "loop-goal-host.ts"), "utf8");
+  assert.match(hostSrc, /function goalSatisfiedForWork\(\): boolean \{/,
+    "the session-level answer is one function, not a per-reader rule");
+  assert.match(hostSrc, /scope\.every\(\(root\) => goalStageSatisfied\(root\)\)/,
+    "…asked of the repos that actually changed");
   assert.match(body, /changedFiles\(root\)/, "committed-ness is measured, not asserted by the agent");
   assert.match(body, /st\.shippedKinds\?\.includes\("pr-create"\)/,
     "a `pr` round arrives on a `gh pr create` the GATE watched succeed — not on a claim");
@@ -4204,7 +4214,10 @@ test("completion arrives as a channel report consumed by the wait — no process
 test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", () => {
   // If the check were "a confirmation exists", the agent could approve a
   // one-line goal and then rewrite the file into whatever it wanted to ship.
-  assert.match(SRC, /function loopGoalConfirmed\(root: string = cells\.primaryRepoRoot, st: GateState = cells\.state\)/);
+  // The state must be resolved FROM the root (2026-10-20): defaulting it to the
+  // primary compared another repo's goal FILE against the primary's approval
+  // RECORD, which is always "not approved" — silently.
+  assert.match(SRC, /function loopGoalConfirmed\(root: string = cells\.primaryRepoRoot, st: GateState = stateOf\(root\)\)/);
   assert.match(SRC, /isLoopGoalConfirmed\(goal, st\.loopGoal, raw\)/);
   assert.match(SRC, /return false; \/\/ unreadable/, "an unreadable goal file must fail closed");
 });
@@ -7324,7 +7337,11 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
 
 test("F3: the checkpoint commits this session's own files, and NAMES what it leaves", () => {
   const body = windowOf('name: "review_checkpoint"', "\n  });", "review_checkpoint tool");
-  assert.match(body, /pendingCheckpoint\(root, st\.sessionEditedFiles \?\? \[\]\)/,
+  // The paths arrive repo-relative (2026-10-20): `sessionEditedFiles` holds
+  // ABSOLUTE paths while `git ls-files --others` answers relative ones, so the
+  // exact match never hit and every file this session CREATED stayed out of the
+  // reviewed range while the commit still went through.
+  assert.match(body, /pendingCheckpoint\(root, \(st\.sessionEditedFiles \?\? \[\]\)\.map\(\(file\) => repoRelativeTo\(root, file\)\)\)/,
     "the checkpoint reads what it commits through lib/checkpoint-sweep.ts (N1 residual: one implementation)");
   const sweepSrc = readFileSync(join(ROOT, "lib", "checkpoint-sweep.ts"), "utf8");
   assert.match(sweepSrc, /"ls-files", "--others", "--exclude-standard", "-z"/,
@@ -7382,11 +7399,16 @@ test("F3: every path the edit tools wrote is recorded, code or not", () => {
   // new file out of its own checkpoint — and an in-repo file outside that cwd
   // was recorded absolute, which `lib/out-of-repo-paths.ts` reads as a
   // violation.
+  // …AND THE SAME FILE UNDER TWO SPELLINGS IS ONE PATH (2026-10-20): the repo
+  // root can be logical (`/tmp/…`) while git answers physical
+  // (`/private/tmp/…`), and a plain prefix test then recorded every path
+  // ABSOLUTE — which the checkpoint's exact match reads as "not mine".
   assert.match(
     SRC,
-    /const root = cells\.primaryRepoRoot;\n\s*return abs\.startsWith\(root \+ "\/"\) \? abs\.slice\(root\.length \+ 1\) : abs;/,
-    "recorded paths are REPO-root-relative, never cwd-relative",
+    /for \(const candidate of new Set\(\[cells\.primaryRepoRoot, root\]\)\) \{\n\s*if \(abs\.startsWith\(candidate \+ "\/"\)\) return abs\.slice\(candidate\.length \+ 1\);/,
+    "recorded paths are REPO-root-relative (both spellings), never cwd-relative",
   );
+  assert.match(SRC, /const physical = realDir\(abs\);/, "the physical spelling is tried too — through the repo's ONE resolver");
 });
 
 test("F4: the round's receipt names the checkpoint and the files in it", () => {

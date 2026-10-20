@@ -198,6 +198,25 @@ export interface OrchestratorDeps {
   writeTaskFile(name: string, content: string, repoRoot?: string): { ok: true; path: string } | { ok: false; error: string };
 
   /**
+   * Write the dispatching child's OWN gate sidecar (2026-10-20): its five
+   * switches (goal off; acceptance on for the plan's last task only) plus the
+   * plan intent, the task book and the acceptance checklist the judges read.
+   *
+   * A dependency rather than a direct call because the dispatcher must be pure
+   * enough to test: the real implementation writes into the child's checkout
+   * (lib/child-gate-record.ts), while a test drives the same decision without a
+   * filesystem. A record that cannot be written REFUSES the spawn.
+   */
+  writeChildGateRecord(input: {
+    repo: string;
+    variant: string;
+    at: string;
+    plan: { intent: string; acceptancePlan: string; tasks: readonly { id: string }[] };
+    taskId: string;
+    taskBrief: string;
+  }): { ok: true; path: string } | { ok: false; error: string };
+
+  /**
    * Read a child's OWN gate sidecar as parsed JSON (F10's channel).
    *
    * `undefined` when there is none yet — which is itself evidence: a child

@@ -668,10 +668,13 @@ plan，把每一处差异归入两类之一：
 **位置约定**，不是 plan 的新字段；哪个任务能越过收窄，只由
 `lib/repo-pr-policy.ts` 的 `deliveryTaskId` / `effectiveTaskStation` 回答（散文副本在
 `AGENTS.md` §2b 与 `README.md` 的「One requirement, one PR per repo」那段）。**谁跑验收轮
-不看位置**（2026-09-27）：是每个任务自己的 `stages.acceptance`（缺省开），dispatcher 写
-`RG_ACCEPTANCE_GATE=on` 或 `off:<接手任务 id>`，重开 pane 与接力也重新注入同一个值
-（`lib/acceptance-round.ts` 的 `acceptanceGateValue`）；关掉验收的任务必须被开着验收的
-任务传递依赖，否则 plan 被拒（见 `AGENTS.md` §2c）。
+由位置决定**（2026-10-20 用户决定，取代 2026-09-27 的逐任务开关）：plan 的最后一个任务跑那
+唯一一次验收轮，其余任务一律移交 —— `tasks[].stages` 已删除，plan 里写了会被拒；它也没资格
+提前开跑，其余任务全部 done 之后 `orchestrator_spawn` 才放行。dispatcher 写
+`RG_ACCEPTANCE_GATE=on` 或 `off:<最后任务 id>`，重开 pane 与接力重新注入同一个值
+（`lib/acceptance-round.ts` 的 `acceptanceGateValue`）。**验收清单是 plan 顶层的
+`acceptancePlan`**：进 canonical 文本与批准 hash、随 plan 一起送到审计者面前、由用户批准，
+并由 dispatcher 写进子会话的 sidecar（`lib/child-gate-record.ts`）。
 
 **PM 条（2026-09-17，PM=产品经理）**：需求是否已澄清、goal 是否可派生——逐任务核对
 `plan.decisions` 有无未解决（缺 `resolvedAt`）的需求决策、任务书是否达到『子会话拿到
@@ -689,7 +692,7 @@ PM 的 transcript 里 ask_user/grillme 的 Q&A 段验证澄清结论真的落进
 进 canonical 文本因此进批准 hash）。
 
 **代批不是橡皮图章（2026-09-06，用户要求）**：代用户批准子会话的 goal
-（2026-09-28 起子会话不做需求反述、不跑 goal-auditor，项目经理就是它 goal 的审核者），
+（2026-10-20 起子会话**没有 goal 环节**，这条路只在旧会话/旧 plan 上还会出现），
 `orchestrator_answer` 必须带 `crosscheck` —— 写出该 plan 任务 id，并对
 「任务目标 / 交付站点」两项各给一句判断（词表与判定在
 `lib/orchestrator-answer-rules.ts`，接受的写法逐条列在 `PROXY_CROSSCHECK_TOKENS`；
@@ -830,11 +833,10 @@ report（新 review 对象不该被上一个对象的结论终结）。原来的
 `buildTaskDocument` 生成的任务书，在项目经理的 brief **之后**由门禁追加一段
 **硬指示**（`TASK_GOAL_DIRECTIVE`，2026-09-01）：
 
-> 本会话的退出条约是你自己的 loop goal。任务书只是 plan 的任务边界，不是你的 goal；
-> plan 批准 ≠ goal 批准。编排子会话的 goal 流程只有一步：**不做**需求反述（`propose_restatement`
-> 会被拒），也**不跑** goal-auditor 审计 —— 直接写好自己的 loop goal 调 `propose_loop_goal`，
-> 批准框同时经通道交给项目经理审核，谁先答算谁的；…（全文见 `lib/child-goal-flow.ts` 的
-> `CHILD_GOAL_FLOW`）
+> 本任务书就是你这一轮的合同：门禁已经在派发时把你的环节配好了，没有 goal 要谈。
+> 编排子会话**没有 loop goal 环节**（`propose_restatement` 与 `propose_loop_goal` 都会被拒），
+> 合同是任务书加交付站点上界，整个 plan 的真实验收由最后一个任务统一做。
+> …（全文见 `lib/child-goal-flow.ts` 的 `CHILD_GOAL_FLOW`）
 
 （这段引文与 `lib/orchestrator-delivery.ts` 的 `TASK_GOAL_DIRECTIVE` 是同一份文本的摘录，
 改那个常量时同轮改这里——两处说法不一致时，以常量为准。）
