@@ -42,11 +42,12 @@ import { isProtectedBranch } from "./workspace-branch.ts";
  * the repo's ONE resolver (lib/fingerprint.ts exports it for the same reason);
  * a local copy would be a third answer to "which file is this".
  *
- * WHEN IT CANNOT PLACE THE PATH (the file is already gone, the root moved) the
- * relative computation does not match, so the path falls into `leftOut` — the
- * direction that never commits something we cannot place. A deletion or rename
- * of an already TRACKED file is unaffected: that half is staged by `git add -A`,
- * not by this list.
+ * WHAT FALLS INTO `leftOut` is therefore exactly "this path is not inside the
+ * repository" (or "the root itself could not be resolved") — the direction that
+ * never commits something we cannot place. A path that was deleted or renamed
+ * still resolves (`realDir` climbs to the nearest existing ancestor and
+ * re-attaches the missing segments), and an already TRACKED file is staged by
+ * `git add -A` rather than by this list in any case.
  */
 export function repoRelativeTo(root: string, file: string): string {
   const raw = (file ?? "").trim();
