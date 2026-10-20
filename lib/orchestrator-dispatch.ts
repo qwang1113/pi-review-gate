@@ -36,6 +36,7 @@ import { applyTaskStatus, scheduleNextTasks } from "./orchestrator-plan-progress
 import { deliveryStationLine } from "./delivery-station.ts";
 import { effectiveTaskStation, narrowingReasonFor } from "./repo-pr-policy.ts";
 import { acceptanceGateValue } from "./acceptance-round.ts";
+import { deliveryTaskId } from "./repo-pr-policy.ts";
 import { spawnAuthorization } from "./orchestrator-gate.ts";
 import { buildTakeoverRoute, discoverOrchestrations } from "./orchestrator-takeover.ts";
 import {
@@ -254,9 +255,25 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     task = plan.tasks.find((t) => t.id === taskId)!;
   }
 
+  // ONE ACCEPTANCE ROUND PER PLAN, RUN BY THE LAST TASK (2026-10-20). That
+  // task accepts EVERYBODY's work, so it may not start while any other task is
+  // unfinished: it would verify half a plan, and the READY it earns would stop
+  // describing the finished thing the moment the next child touches the branch.
+  // Checked HERE rather than through `dependsOn` because the plan is not
+  // required to spell the dependency out, and this rule is the plan's own.
+  if (deliveryTaskId(plan!) === taskId) {
+    const unfinished = plan!.tasks.filter((t) => t.id !== taskId && t.status !== "done");
+    if (unfinished.length > 0) {
+      return fail(
+        `review-gate: 现在还不能开 "${taskId}" —— 它是**统一验收任务**（plan 的最后一环），` +
+        `要等其余任务全部 done 才派得出来；还没完成：${unfinished.map((t) => `${t.id}（${t.status}）`).join("、")}。` +
+        "验收的是整份 plan 的成果，先派它就是验半成品。",
+      );
+    }
+  }
+
   const verdict = schedulingVerdict(deps, task, panes.panes);
   if (!verdict.ok) return fail(`review-gate: 现在还不能开 "${taskId}" —— ${verdict.reason}`);
-
   // 2026-09-07 (user decision): no isolated worktrees anymore. Children
   // share the main worktree and run SERIALLY within a repo (see
   // schedulingVerdict); the only parallelism left is across repos, so a
@@ -365,6 +382,26 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
   if (!written.ok) {
     return fail(`review-gate: 任务书写不出来（${written.error}）—— 一个 pane 都没开。`);
   }
+  // THE CHILD'S GATE RECORD (2026-10-20): the five switches (goal off; the
+  // acceptance round only for the plan's last task) and the two plan texts the
+  // judges work from. Written by the GATE into the child's OWN sidecar, so the
+  // box is never shown to a child and the record survives in its checkout.
+  // A record that cannot be written REFUSES the spawn: opening a pane whose
+  // gate would then ask it to negotiate a goal is the defect this replaces.
+  const gateRecord = deps.writeChildGateRecord({
+    repo: cwd,
+    variant: childId,
+    at: new Date(deps.now()).toISOString(),
+    plan: plan!,
+    taskId,
+    taskBrief: brief,
+  });
+  if (!gateRecord.ok) {
+    return fail(
+      `review-gate: 子会话的环节记录写不出来（${gateRecord.error}）—— 一个 pane 都没开。` +
+      "没有这份记录，子会话的 gate 会要求它协商自己的 goal，正是本轮要消灭的那条路径。",
+    );
+  }
 
   const decor = childPaneDecor(taskId, task.title, childId);
   let evidence: DeliveryEvidence | undefined;
@@ -468,6 +505,8 @@ export async function dispatchSpawn(deps: OrchestratorDeps, params: Record<strin
     (worktree?.note ? `隔离 checkout 已带上本地资源：\n${worktree.note}\n` : "") +
     `子会话工作目录（cwd）：${cwd} —— 它的 gate 绑定这个仓库，goal 也绑这里。\n` +
     `任务 ${taskId} 已置为 running，任务书已随 \`pi @${taskFileRelPath(taskFileName(marker))}\` 带进去（落盘：${written.path}）。\n` +
+    `环节记录已写入它的 sidecar（${gateRecord.path}）：goal 环节关（不反述、不协商 goal），验收 ` +
+    `${deliveryTaskId(plan!) === taskId ? "开（它是统一验收任务）" : `关（移交给 ${deliveryTaskId(plan!) ?? "最后一环"}）`}。\n` +
     `投递已核实：${opened.deliveryNote ?? "（本次没有核实项）"}。\n` +
     `${decorNote(decor.label, childId, opened.decorWarning)}\n` +
 

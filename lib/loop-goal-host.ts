@@ -29,7 +29,7 @@ import {
   type LoopGoal,
 } from "./loop-goal.ts";
 import { buildGoalStageOffDirective, buildLoopGoalDirective } from "./loop-goal-directives.ts";
-import { CHILD_GOAL_MISSING_DIRECTIVE, childGoalEditBlock } from "./child-goal-flow.ts";
+import { buildChildTaskBookDirective, childGoalEditBlock } from "./child-goal-flow.ts";
 import { isOrchestrationChildEnv } from "./session-inheritance.ts";
 import {
   ensureLoopStages,
@@ -222,10 +222,12 @@ export function createLoopGoalHost(
    * that wording, like every other goal paragraph).
    */
   function loopGoalDirectiveText(): string {
+    // A child has NO goal stage at all (2026-10-20): its contract is the task
+    // book, so neither the missing-goal text nor the stage-off text (both send
+    // a session to negotiate or to re-tick a box) is right for it.
+    if (isOrchestrationChildEnv()) return buildChildTaskBookDirective({});
     if (!stageIsOn("goal")) return buildGoalStageOffDirective();
     const confirmed = goalStageSatisfied();
-    // A child's Step 0 has no restatement and no audit (lib/child-goal-flow.ts).
-    if (!confirmed && isOrchestrationChildEnv()) return CHILD_GOAL_MISSING_DIRECTIVE;
     return buildLoopGoalDirective(readSessionLoopGoal(cells.primaryRepoRoot), confirmed);
   }
 
@@ -310,10 +312,13 @@ export function createLoopGoalHost(
       return state.orchestrator?.approvedPlan?.deliveryStation ?? DEFAULT_DELIVERY_STATION;
     }
     if (!isEnforcedMode(state.taskMode)) return undefined;
-    // A stage that is off has no contract to read a station from — the same
-    // `undefined` ("no ceiling beyond the ordinary gates") a session that
-    // never negotiated a goal has always got.
-    if (!stageIsOn("goal", root)) return undefined;
+    // A stage that is off has no GOAL to read a station from — but an
+    // orchestration child still has a CEILING, and it is the plan's
+    // (2026-10-20). Answering `undefined` here told the ship gate "no contract
+    // at all", so a child narrowed to `commit` could push and open its own PR.
+    // The cap is the dispatcher's own environment fact; a standalone session
+    // with the goal stage off has none, and keeps the old `undefined`.
+    if (!stageIsOn("goal", root)) return isOrchestrationChildEnv() ? stationCapFromEnv() : undefined;
     const st = root === cells.primaryRepoRoot ? state : deps.stateForRepo(root);
     if (!loopGoalConfirmed(root, st)) return undefined;
     return st.loopGoal?.station ?? DEFAULT_DELIVERY_STATION;
@@ -383,6 +388,19 @@ export function createLoopGoalHost(
    * truncated goal appends the REAL file path instead.
    */
   function goalTextForReviewers(root: string): { text: string; truncated: boolean } | undefined {
+    // AN ORCHESTRATION CHILD IS JUDGED AGAINST ITS TASK BOOK (2026-10-20). It
+    // has no goal of its own, and the plan it belongs to may live in another
+    // checkout entirely — so the dispatcher copied the two texts it needs into
+    // its sidecar, and they are what the reviewer and the quality auditor read.
+    const st = root === cells.primaryRepoRoot ? cells.state : deps.stateForRepo(root);
+    const ctx = st.childContext;
+    if (ctx !== undefined) {
+      return {
+        text: "## 本轮所属 plan 的意图\n" + ctx.planIntent +
+          "\n\n## 本任务书（门禁派发时写入，agent 不可编辑）\n" + ctx.taskBrief,
+        truncated: false,
+      };
+    }
     const goal = readSessionLoopGoal(root);
     if (!goal.present) return undefined;
     // Use readLoopGoal's OWN truncated boolean — never sniff the display

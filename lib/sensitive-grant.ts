@@ -89,6 +89,11 @@ export function normalizeSensitivePath(raw: string, cwd: string): string {
  */
 export function isGateIntegrityPath(filePath: string): boolean {
   return /(^|\/)\.git(\/|$)/i.test(filePath) ||
+    // The dispatch surface: a child's task book is what its gate handed it, and
+    // rewriting it after the fact is rewriting the contract from the inside
+    // (2026-10-20). Written by fs calls in lib/orchestrator-wiring.ts, never by
+    // a tool, so a human can still edit one by hand.
+    /(^|\/)\.pi\/tasks\//i.test(filePath) ||
     /(^|\/)\.pi\/(review-gate-state\.json(\.blocked)?|precommit-cache\.json|verified-branches\.json)$/i.test(filePath);
 }
 

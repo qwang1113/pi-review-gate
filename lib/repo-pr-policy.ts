@@ -146,7 +146,7 @@ export function normalizeRepoPath(path: string): string {
  * plan audit's checklist. ONE function, so "which task delivers" cannot be
  * answered two ways.
  */
-export function deliveryTaskId(plan: RepoPrPlanInput): string | undefined {
+export function deliveryTaskId(plan: { tasks: readonly { id: string }[] }): string | undefined {
   return plan.tasks.length > 0 ? plan.tasks[plan.tasks.length - 1]!.id : undefined;
 }
 

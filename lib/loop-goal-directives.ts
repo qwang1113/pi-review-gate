@@ -11,7 +11,7 @@
 import { randomBytes } from "node:crypto";
 import { DELIVERY_STATION_CHOICES_EN } from "./delivery-station.ts";
 import { LOOP_GOAL_RELPATH, type LoopGoal } from "./loop-goal.ts";
-import { buildChildGoalForceNegotiateDirective } from "./child-goal-flow.ts";
+import { buildChildTaskBookDirective } from "./child-goal-flow.ts";
 import { isOrchestrationChildEnv } from "./session-inheritance.ts";
 
 // ---------------------------------------------------------------------------
@@ -308,7 +308,7 @@ export function buildGoalForceNegotiateDirective(
     ? `已达 ${turns ?? 0} 轮（阈值 ${threshold}）`
     : `已 ${turns ?? 0}/${threshold} 轮`;
   // A CHILD has no restatement and no audit to be sent to (lib/child-goal-flow.ts).
-  if (child) return buildChildGoalForceNegotiateDirective(shown);
+  if (child) return buildChildTaskBookDirective({});
   return (
     "## 强制协商 loop goal（门禁，2026-09-17）\n" +
     `你已 ${shown} 未获批 loop goal。` +

@@ -44,6 +44,11 @@ test("SECURITY: gate-integrity paths are git internals only, never .gitignore/.g
   assert.equal(isGateIntegrityPath("/repo/.gitignore"), false);
   assert.equal(isGateIntegrityPath("/repo/.github/workflows/ci.yml"), false);
   assert.equal(isGateIntegrityPath("/repo/.env"), false);
+  // The dispatch surface (2026-10-20): a child's task book is the contract its
+  // gate handed it, so rewriting it is rewriting the contract from inside.
+  assert.equal(isGateIntegrityPath("/repo/.pi/tasks/rg-task-t1-abc.md"), true);
+  assert.equal(isGateIntegrityPath("/repo/.pi/tasks/"), true);
+  assert.equal(isGateIntegrityPath("/repo/.pi/tasks-notes.md"), false, "only the directory is the gate's");
 });
 
 test("SECURITY: everything non-grantable is also blocked by the sensitive-file guard", () => {

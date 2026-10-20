@@ -45,7 +45,7 @@
 
 import { needsAcceptance } from "./acceptance-scope.ts";
 import { JUDGE_COMPLETION_DISCIPLINE } from "./gate-modes.ts";
-import type { PlanTaskStages } from "./loop-stages.ts";
+import { deliveryTaskId } from "./repo-pr-policy.ts";
 import { composeWithUntrustedData } from "./untrusted-data.ts";
 
 /* ───────────────────────────── the gate switch ───────────────────────────── */
@@ -57,9 +57,10 @@ import { composeWithUntrustedData } from "./untrusted-data.ts";
  * It rides the environment for the same reason `RG_STATION_CAP` does
  * (lib/repo-pr-policy.ts): the task document is text the orchestrator writes,
  * while an environment variable is set by the gate — the one channel a child's
- * own prompt cannot forge. An orchestration child whose plan task switched
- * acceptance off gets `off:<ids>` (the tasks that accept for it); a standalone
- * loop session gets no variable at all.
+ * own prompt cannot forge. Every orchestration child gets `on` (it is the
+ * plan's LAST task, the one that accepts) or `off:<id>` (one acceptance round
+ * per plan, owned by that task — 2026-10-20); a standalone loop session gets no
+ * variable at all.
  */
 export const ACCEPTANCE_GATE_ENV = "RG_ACCEPTANCE_GATE";
 
@@ -96,56 +97,38 @@ export function acceptanceDelegates(env: Readonly<Record<string, string | undefi
   return at < 0 ? [] : raw.slice(at + 1).split(",").map((id) => id.trim()).filter(Boolean);
 }
 
-/** The slice of a plan task the acceptance switch reads. */
+/** The slice of a plan the acceptance switch reads: the tasks, in plan order. */
 export interface AcceptanceTaskShape {
   id: string;
-  dependsOn: readonly string[];
-  stages?: PlanTaskStages;
-}
-
-/** Is acceptance on for this task? Absent ⇒ on (the plan's default). */
-export function taskAcceptanceOn(task: { stages?: PlanTaskStages }): boolean {
-  return task.stages?.acceptance !== false;
 }
 
 /**
- * WHO ACCEPTS FOR A TASK THAT SWITCHED ACCEPTANCE OFF: every task that has
- * acceptance ON and (transitively) depends on it — i.e. runs after it and so
- * sees its work. Plan order. `parsePlan` refuses a plan in which this is empty
- * for any switched-off task, so a plan the user can approve never delegates
- * acceptance to nobody.
+ * WHO ACCEPTS FOR THIS PLAN: its LAST task, by position — the same task
+ * `deliveryTaskId` marks as the delivery (lib/repo-pr-policy.ts). ONE plan,
+ * ONE acceptance round (2026-10-20, user decision): a per-task switch let every
+ * implementation task accept itself and left the question with two answers.
  */
-export function acceptanceDelegatesOf(tasks: readonly AcceptanceTaskShape[], taskId: string): string[] {
-  const byId = new Map(tasks.map((t) => [t.id, t]));
-  const dependsOnTarget = (id: string, seen: Set<string>): boolean => {
-    if (seen.has(id)) return false;
-    seen.add(id);
-    return (byId.get(id)?.dependsOn ?? []).some((dep) => dep === taskId || dependsOnTarget(dep, seen));
-  };
-  return tasks
-    .filter((t) => t.id !== taskId && taskAcceptanceOn(t) && dependsOnTarget(t.id, new Set()))
-    .map((t) => t.id);
+export function acceptanceTaskIdOf(tasks: readonly AcceptanceTaskShape[]): string | undefined {
+  return deliveryTaskId({ tasks });
 }
 
 /**
  * THE VALUE THE DISPATCHER WRITES for one plan task (spawn, recover — and
- * handoff forwards it verbatim): `on` when the task's own `stages` leave
- * acceptance on, `off:<ids>` naming who accepts in its place otherwise
- * (2026-09-27: the plan's per-task switch replaced the "last task accepts"
- * position rule). A task the plan does not know answers `off` — fail-closed,
- * the flag only ever removes an entitlement.
+ * handoff forwards it verbatim): `on` for the plan's last task, `off:<last>`
+ * for every other one, naming who accepts in its place. A task the plan does
+ * not know answers `off` — fail-closed, the flag only ever removes an
+ * entitlement.
  */
 export function acceptanceGateValue(tasks: readonly AcceptanceTaskShape[], taskId: string): string {
-  const task = tasks.find((t) => t.id === taskId);
-  if (!task) return ACCEPTANCE_GATE_OFF;
-  if (taskAcceptanceOn(task)) return "on";
-  const delegates = acceptanceDelegatesOf(tasks, taskId);
-  return delegates.length > 0 ? `${ACCEPTANCE_GATE_OFF}:${delegates.join(",")}` : ACCEPTANCE_GATE_OFF;
+  const acceptor = acceptanceTaskIdOf(tasks);
+  if (acceptor === undefined) return ACCEPTANCE_GATE_OFF;
+  if (taskId === acceptor) return "on";
+  return `${ACCEPTANCE_GATE_OFF}:${acceptor}`;
 }
 
-/** "由 a1、a2 统一验收" — the one phrase every surface uses for the handover. */
+/** "由 a1 统一验收" — the one phrase every surface uses for the handover. */
 export function acceptanceHandoverPhrase(delegates: readonly string[]): string {
-  return delegates.length > 0 ? `由 ${delegates.join("、")} 统一验收` : "由 plan 里开着验收的任务统一验收";
+  return delegates.length > 0 ? `由 ${delegates.join("、")} 统一验收` : "由 plan 最后一个任务统一验收";
 }
 
 /**
@@ -156,8 +139,7 @@ export function acceptanceHandoverPhrase(delegates: readonly string[]): string {
 export function buildAcceptanceDelegatedDirective(delegates: readonly string[]): string {
   const who = acceptanceHandoverPhrase(delegates);
   return `## 验收环节：本任务关闭（plan 设定）\n本任务不做真实验收，${who}。` +
-    `goal 的「真实验收方案」段只写一行「本轮无真实验收（验收移交 ${delegates.join("、") || "验收任务"}）」，` +
-    "不要写验收方案、不要搭验收现场；declare_done 不会派验收轮。";
+    "不要搭验收现场；declare_done 不会派验收轮，回执会写明移交给谁。";
 }
 
 /* ──────────────────────────── the recorded state ─────────────────────────── */

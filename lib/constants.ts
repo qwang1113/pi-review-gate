@@ -102,6 +102,12 @@ export const SENSITIVE_FILE_PATTERNS: readonly RegExp[] = Object.freeze([
   // plain fs calls, which this guard does not touch; a human can still edit
   // them by hand.
   /(^|\/)\.pi\/(review-gate-state\.json(\.blocked)?|precommit-cache\.json|verified-branches\.json)$/i,
+  // THE CHILD'S TASK BOOK (2026-10-20). It is the assignment the gate handed
+  // an orchestration child — its whole contract now that children have no goal
+  // — so rewriting it after dispatch would rewrite the contract from the
+  // inside. Written by lib/orchestrator-wiring.ts with plain fs calls, which
+  // this guard does not touch; a human can still edit one by hand.
+  /(^|\/)\.pi\/tasks\//i,
 ]);
 
 export function isSensitiveFile(filePath: string): boolean {

@@ -121,6 +121,21 @@ test("an empty name, a bad name and an empty body are refused before any file is
 });
 
 test("a pane id minted by another tmux server never counts as a live session", () => {
+  // The probe reads $TMUX FIRST, so a run from inside a real tmux pane would
+  // compare against THAT server and never reach the fake one (measured: this
+  // test is green in CI and red in a tmux session). The variable is process
+  // state, so it is isolated here rather than threaded through the API.
+  const savedTmux = process.env.TMUX;
+  delete process.env.TMUX;
+  try {
+    return checkPaneServerMismatch();
+  } finally {
+    if (savedTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = savedTmux;
+  }
+});
+
+function checkPaneServerMismatch(): void {
   const home = scratchHome();
   // A stale registration whose pane id EXISTS on the server we are talking to —
   // but was minted by a different one (a restarted server reuses `%1`).
@@ -153,8 +168,9 @@ test("a pane id minted by another tmux server never counts as a live session", (
     heartbeatAt: new Date(Date.now() - 10 * 60_000).toISOString(),
     tmux: { session: "rg-old", window: "@1", pane: "%1", server: "/private/tmp/tmux-501/default,22388" },
   }));
-  assert.equal(sendSessionMessage({ home, userHome: home, runTmux: runner }, { to: "old-one", text: "hi" }).ok, true);
-});
+  const same = sendSessionMessage({ home, userHome: home, runTmux: runner }, { to: "old-one", text: "hi" });
+  assert.equal(same.ok, true, same.problem ?? "");
+}
 
 test("a body too long for one line spills to a side file the record points at", () => {
   const home = scratchHome();

@@ -135,8 +135,7 @@ export function buildTaskDocument(opts: {
  * makes the child's first turn say it out loud.
  */
 export const TASK_GOAL_DIRECTIVE =
-  "本会话的退出条约是你自己的 loop goal。任务书只是 plan 的任务边界，不是你的 goal；" +
-  "plan 批准 ≠ goal 批准。" + CHILD_GOAL_FLOW;
+  "本任务书就是你这一轮的合同：门禁已经在派发时把你的环节配好了，没有 goal 要谈。" + CHILD_GOAL_FLOW;
 
 /**
  * The one naming rule, quoted wherever a branch actually has to be CREATED.

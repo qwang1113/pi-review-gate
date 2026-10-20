@@ -73,6 +73,12 @@ export function createAcceptanceHost(
    * contract for this round, and then there is no plan to work either.
    */
   function acceptanceGoalText(root: string, st: GateState): string | undefined {
+    // AN ORCHESTRATION CHILD HAS NO GOAL (2026-10-20): its checklist is the
+    // plan's own `acceptancePlan`, copied into its sidecar at dispatch because
+    // the plan file lives in the MANAGER's checkout (the child may be in a
+    // /tmp worktree that has never seen it).
+    const dispatched = st.childContext;
+    if (dispatched !== undefined) return dispatched.acceptancePlan;
     const goal = readSessionLoopGoal(root);
     if (!goal.present || !loopGoalConfirmed(root, st)) return undefined;
     // THE RAW FILE, NOT THE PROMPT COPY (real-session P1, 2026-09-22).
@@ -322,7 +328,13 @@ export function createAcceptanceHost(
       // a standalone session whose USER switched the acceptance stage off. The
       // STATUS stays the module's (semantics untouched); only the recorded
       // reason is composed here, where the switch is known.
-      const skippedReason = !stageIsOn("acceptance", root)
+      // WHICH WAY THE STAGE IS OFF decides the sentence (2026-10-20): a
+      // standalone session's USER threw the switch; an orchestration child's
+      // dispatcher did (one acceptance round per plan), and for that case the
+      // decision's own reason — the handover to the plan's last task — is the
+      // true one.
+      const userThrewTheSwitch = !stageIsOn("acceptance", root) && acceptanceGateOpen(process.env);
+      const skippedReason = userThrewTheSwitch
         ? "验收环节已关闭（用户设定的环节开关）—— 跳过真实验收。"
         : decision.reason;
       if (st.acceptance?.status !== decision.status || st.acceptance.reason !== skippedReason) {
@@ -343,7 +355,11 @@ export function createAcceptanceHost(
       // `skippedReason`, the module's word for THIS skip.
       // A PLAN HANDOVER IS ALWAYS SAID (2026-09-27): the child has to be able
       // to read in its own receipt who accepts for it, code or no code.
-      if (stageIsOn("acceptance", root) && (st.hasCodeChange || decision.status === "DISABLED")) {
+      // A PLAN HANDOVER IS ALWAYS SAID (2026-09-27), and since 2026-10-20 the
+      // plan — not the user — is what switched this child's round off, so the
+      // handover reaches the receipt even though the stage reads off here.
+      if ((stageIsOn("acceptance", root) || decision.status === "DISABLED") &&
+        (st.hasCodeChange || decision.status === "DISABLED")) {
         notes.push(skippedReason);
         // THE LINE STAYS GENERIC, THE REASON RIDES THE NOTE (reviewer Nit,
         // 2026-09-22): this branch is reached by THREE skips — no plan, the

@@ -427,7 +427,7 @@ export function createL2Continuation(cells: SessionCells, deps: L2ContinuationDe
             SETTLED_TOOL_REMINDER + " Do not summarize; execute."
           : `\n(completion continuation ${cells.completionContinuations}/${COMPLETION_CONTINUATION_CAP}) ` +
             (goalOnly && isOrchestrationChildEnv()
-              ? "The only open item is the unapproved loop goal. " + CHILD_GOAL_FLOW + " Do not summarize; execute."
+              ? "There is no goal to negotiate for this child. " + CHILD_GOAL_FLOW + " Do not summarize; execute."
               : goalOnly
               ? "The only open item is the unapproved loop goal. Interview the user with ask_user " +
                 "(the gate runs the interview and pauses for their answers), draft the goal in " +

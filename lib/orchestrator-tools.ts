@@ -62,10 +62,13 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
       "siblings' branches, takes the whole through one review and commits — it is capped like any " +
       "other task — and the LAST one (the independent acceptance task) runs the real acceptance, " +
       "pushes and opens that PR; only that task is never capped. " +
-      "ACCEPTANCE IS A PER-TASK SWITCH: every task runs the real-acceptance round unless its " +
-      "`stages` says `{ acceptance: false }` (the only stage a plan may switch off); a task that " +
-      "switches it off must be (transitively) depended on by a task that keeps it on — the gate " +
-      "refuses the plan otherwise and tells the child who accepts for it. " +
+      "ONE ACCEPTANCE ROUND PER PLAN: the plan's LAST task runs the real acceptance (its " +
+      "`acceptancePlan` below is the checklist); every other child is released at that checkpoint " +
+      "with the handover named, and it cannot be spawned until every other task is done. There is " +
+      "no per-task `stages` switch any more — a plan that still carries one is refused. " +
+      "REQUIRED: `acceptancePlan` (the plan's overall 真实验收方案: what to start, what to call, " +
+      "what it must return, which neighbouring paths to re-check afterwards). It is approved " +
+      "content — rewriting it asks the user again. " +
       "`allowMultiplePrs` names the repos the USER allowed to split; it is the " +
       "ONLY way out of that rule, so never fill it in on your own initiative. " +
       // The manager reads THIS description while writing tasks, so the task
@@ -87,21 +90,19 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
             "Where this orchestration stops: " + DELIVERY_STATION_CHOICES +
             " (default precommit — the user commits). Ask the user; do not pick for them.",
         })),
+        acceptancePlan: Type.String({
+          description:
+            "The plan's own 真实验收方案 — the checklist the LAST task's acceptance judge works " +
+            "through: what to start for real, what to call, what it must return, then which " +
+            "neighbouring paths to re-check. Required, approved content (rewriting it asks the user " +
+            "again) and shown to the user in the approval box.",
+        }),
         tasks: Type.Array(Type.Object({
           id: Type.String({ description: "Task id, [A-Za-z0-9._-] 1-64 chars" }),
           title: Type.String({ description: "Task title" }),
           repo: Type.String({ description: "ABSOLUTE path of the repo this task works in (the child's cwd) — REQUIRED since 2026-09-02; a missing repo silently lands the child in the orchestrator's own repo" }),
           dependsOn: Type.Optional(Type.Array(Type.String())),
           execution: Type.Optional(Type.Union([Type.Literal("serial"), Type.Literal("parallel")])),
-          stages: Type.Optional(Type.Object({
-            acceptance: Type.Optional(Type.Boolean()),
-          }, {
-            description:
-              "Stages this task switches OFF — only `acceptance` (default on). " +
-              "`{ acceptance: false }` for implementation / wrap-up tasks whose work a later " +
-              "acceptance task (one that dependsOn them) accepts. Switching it off revokes the " +
-              "approval; switching it back on does not.",
-          })),
           isolated: Type.Optional(Type.Boolean({
             description:
               "true ⇒ the gate creates and seeds a separate git worktree for this task even when no " +
@@ -136,9 +137,10 @@ export function registerOrchestratorStateTools(host: ToolHost, deps: Orchestrato
         }))),
       }, {
         description:
-          "For action=\"write\": { title, intent, maxParallel?, tasks: [{ id, title, " +
+          "For action=\"write\": { title, intent, maxParallel?, acceptancePlan: \"<整体真实验收方案>\", " +
+          "tasks: [{ id, title, " +
           "repo: \"/abs/path/to/repo\", dependsOn?: [], execution?: \"serial\"|\"parallel\", " +
-          "stages?: { acceptance: false }, isolated?: true }], " +
+          "isolated?: true }], " +
           "allowMultiplePrs?: [\"/abs/repo\"] (only repos the USER agreed may split into " +
           "several PRs) }. " +
           "Do NOT send `status`: existing tasks keep the status execution gave them (use " +

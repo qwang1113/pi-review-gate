@@ -37,6 +37,7 @@ import type { SafeTmuxOptions, TmuxRunResult } from "./orchestrator-tmux.ts";
 import { runTmuxArgv } from "./tmux-exec.ts";
 import type { UserNotifyKind, UserNotifyOutcome } from "./user-notify.ts";
 import { TASK_FILE_DIRNAME } from "./orchestrator-delivery.ts";
+import { writeChildGateRecord } from "./child-gate-record.ts";
 import { sidecarPath } from "./gate-state-io.ts";
 import { orchestrationIdFromEnv } from "./orchestration-id.ts";
 import type { TmuxScope } from "./session-tmux-scope.ts";
@@ -503,6 +504,7 @@ export function createOrchestratorDeps(host: OrchestratorHostBindings): Orchestr
     askChoice: host.askChoice,
     showToUser: host.showToUser,
     writeTaskFile: (name, content, repoRoot) => writeTaskFile(repoRoot ?? host.repoRoot, name, content),
+    writeChildGateRecord: (input) => writeChildGateRecord(input),
     childGateState: (childCwd, variant) => readChildGateState(childCwd, variant),
     sleep: (ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }),
 

@@ -72,6 +72,18 @@ export function loadSidecar(path: string, out?: { migrated: boolean }): GateStat
         !(TEST_SCOPES as readonly string[]).includes(parsed.precommit.testScope as string)) {
       delete parsed.precommit.testScope;
     }
+    // THE DISPATCH RECORD (2026-10-20): all three fields or nothing. A partial
+    // record is dropped rather than completed — the judges would otherwise be
+    // handed a blank checklist that reads like an approved one, and the
+    // acceptance round would dispatch against it.
+    if (parsed.childContext !== undefined) {
+      const ctx = parsed.childContext as Partial<import("./gate-state.ts").ChildGateContext> | null;
+      const usable = ctx !== null && typeof ctx === "object" &&
+        typeof ctx.planIntent === "string" &&
+        typeof ctx.acceptancePlan === "string" &&
+        typeof ctx.taskBrief === "string";
+      if (!usable) delete parsed.childContext;
+    }
     // The recorded pass-coverage tree: a CONTENT IDENTITY, and the only thing
     // that lets a READY be recorded after the live binding was invalidated by
     // the next round's own edits. Anything that is not a real object id is

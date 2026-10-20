@@ -200,44 +200,37 @@ export function buildStagesDirective(record: LoopStagesRecord | undefined): stri
 }
 
 /**
- * THE STAGES A PLAN TASK MAY SWITCH OFF (2026-09-27, user decision).
+ * THE FIVE SWITCHES AN ORCHESTRATION CHILD RUNS WITH (2026-10-20, user decision).
  *
- * The project manager sets stages per task, from the SAME vocabulary — but
- * only `acceptance` is open: the other four are the child's own supervision,
- * and a manager that could switch off a child's review would be deciding how
- * much of its own plan nobody checks. Widening this list is a user decision.
- */
-export const PLAN_TASK_STAGES_OPEN: readonly LoopStage[] = ["acceptance"];
-
-/** A plan task's stage switches — only the ones that are OFF are kept. */
-export type PlanTaskStages = Partial<Record<LoopStage, false>>;
-
-/**
- * Read `tasks[].stages` from untrusted plan input.
+ * A child works ONE task of a plan the user already approved. Its contract is
+ * the task book the GATE wrote, not a goal it negotiates, and the real
+ * acceptance round belongs to the plan's LAST task once every other task is
+ * done. So the DISPATCHER — not the user, not the child — writes the child's
+ * record at spawn time, and every checkpoint keeps reading it through the same
+ * `stageOpen` it has always used: the goal stage off means no restatement, no
+ * goal negotiation, no goal audit and no L8 goal block; the acceptance stage
+ * off means `declare_done` never dispatches a round for that child.
  *
- * `{acceptance: true}` and an absent field are the SAME plan (everything on),
- * so both normalize to no field at all — which is what keeps a plan that never
- * wrote it hashing exactly as it did before the field existed.
+ * WHY THIS REPLACED PER-TASK `stages` (哲学三): a plan used to carry its own
+ * `tasks[].stages` switch, which let every implementation task accept itself
+ * and left the "who accepts" question with two answers. One plan, one
+ * acceptance round: the position decides, and nothing else is configurable.
+ *
+ * The record is WRITTEN BY THE GATE into the child's own sidecar, so the box is
+ * never shown to a child (`ensureLoopStages` sees a record already there) and
+ * `choose_loop_stages` stays refused there.
  */
-export function parsePlanTaskStages(raw: unknown, label: string): { stages?: PlanTaskStages; problems: string[] } {
-  if (raw === undefined) return { problems: [] };
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return { problems: [`${label}.stages 必须是对象（如 { "acceptance": false }）`] };
-  }
-  const problems: string[] = [];
-  const stages: PlanTaskStages = {};
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!(PLAN_TASK_STAGES_OPEN as readonly string[]).includes(key)) {
-      problems.push(`${label}.stages.${key} 不可设置 —— plan 任务只开放 ${PLAN_TASK_STAGES_OPEN.join("、")}，其余环节对编排子会话一律全开`);
-      continue;
-    }
-    if (typeof value !== "boolean") {
-      problems.push(`${label}.stages.${key} 必须是布尔值（false = 关闭）`);
-      continue;
-    }
-    if (value === false) stages[key as LoopStage] = false;
-  }
-  return { ...(Object.keys(stages).length > 0 ? { stages } : {}), problems };
+export function childStagesRecord(opts: { accepts: boolean; at: string }): LoopStagesRecord {
+  return {
+    stages: {
+      goal: false,
+      review: true,
+      quality: true,
+      acceptance: opts.accepts,
+      precommit: true,
+    },
+    at: opts.at,
+  };
 }
 
 /** The stages the user switched OFF, in dialog order. */

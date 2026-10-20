@@ -152,7 +152,9 @@ async function doPrepareAdviser(
   // long goals must not share one conclusion artifact (round-5 P1).
   const fullGoalRaw = deps.readText(deps.loopGoalPath(target.root));
 
-  const goalForReview = confirmed ? deps.goalTextForReviewers(target.root) : undefined;
+  const goalForReview = confirmed || deps.stateFor(target.root).childContext !== undefined
+    ? deps.goalTextForReviewers(target.root)
+    : undefined;
   const goalText = goalForReview?.text;
   const goalHash = confirmed && fullGoalRaw
     ? goalTextHash(fullGoalRaw)
