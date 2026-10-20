@@ -27,10 +27,17 @@ test("who is a child: spawned by a manager, or a `child` handoff — never the m
 
 test("every child surface points at the task book, never at a goal it would negotiate", () => {
   const force = buildGoalForceNegotiateDirective(5, 3, true);
-  for (const text of [TASK_GOAL_DIRECTIVE, CHILD_TASK_BOOK_DIRECTIVE, CHILD_GOAL_REMINDER_TEXT, childGoalEditBlock("/repos/b"), force]) {
+  for (const text of [TASK_GOAL_DIRECTIVE, CHILD_TASK_BOOK_DIRECTIVE, CHILD_GOAL_REMINDER_TEXT, force]) {
     assert.match(text, /\.pi\/tasks\//, "the task book is named");
     assert.doesNotMatch(text, /directly call .?propose_loop_goal|调 `propose_loop_goal`/, "no goal to submit");
   }
+  // The L8 refusal is the one child surface that must NOT send it to the task
+  // book: reaching it means the dispatch record is missing, and the only way
+  // out is the manager re-opening the task (2026-10-20).
+  const blocked = childGoalEditBlock("/repos/b");
+  assert.match(blocked, /派发记录没落到 sidecar/);
+  assert.match(blocked, /项目经理/);
+  assert.doesNotMatch(blocked, /propose_loop_goal/);
   assert.ok(TASK_GOAL_DIRECTIVE.includes(CHILD_GOAL_FLOW));
   assert.match(childGoalEditBlock("/repos/b"), /\/repos\/b/);
   // The standalone form is untouched: it still walks a session to the restatement.

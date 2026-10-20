@@ -42,6 +42,7 @@ import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrat
 import { beginApprovalLineage, snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
 import { deliveryTaskId } from "../../lib/repo-pr-policy.ts";
 import { childStagesRecord } from "../../lib/loop-stages.ts";
+import { childSessionId } from "../../lib/orchestrator-delivery.ts";
 import { restatementHash, type RestatementRecord } from "../../lib/restatement.ts";
 import type { DeliveryStation } from "../../lib/delivery-station.ts";
 
@@ -507,7 +508,7 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       scratch.set(path, JSON.stringify({
         // The real record carries the child's OWN session id (its restore path
         // adopts a sidecar only on an exact match), so the fake does too.
-        sessionId: `rg-child-${input.variant}`,
+        sessionId: childSessionId(input.variant),
         // Same rule and same constructor as production: the plan's LAST task
         // accepts, and every other switch is the dispatcher's default.
         stages: childStagesRecord({ accepts: input.taskId === deliveryTaskId(input.plan), at: input.at }).stages,

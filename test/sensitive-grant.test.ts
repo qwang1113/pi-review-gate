@@ -49,6 +49,14 @@ test("SECURITY: gate-integrity paths are git internals only, never .gitignore/.g
   assert.equal(isGateIntegrityPath("/repo/.pi/tasks/rg-task-t1-abc.md"), true);
   assert.equal(isGateIntegrityPath("/repo/.pi/tasks/"), true);
   assert.equal(isGateIntegrityPath("/repo/.pi/tasks-notes.md"), false, "only the directory is the gate's");
+  // A child's OWN sidecar carries its five switches and the plan's acceptance
+  // checklist, so writing it from a tool would rewrite the criteria it is
+  // judged by (2026-10-20).
+  assert.equal(isGateIntegrityPath("/repo/.pi/review-gate-state.t1-abc.json"), true);
+  assert.equal(isGateIntegrityPath("/repo/.pi/review-gate-state.t1-abc.json.blocked"), true);
+  assert.equal(isGateIntegrityPath("/repo/.pi/review-gate-state.json"), true);
+  assert.equal(isGateIntegrityPath("/repo/.pi/review-gate-state.json.bak"), false, "a backup is not the file");
+  assert.equal(isGateIntegrityPath("/repo/.pi/review-notes.json"), false);
 });
 
 test("SECURITY: everything non-grantable is also blocked by the sensitive-file guard", () => {

@@ -7324,7 +7324,11 @@ test("F1: arming and its reconciliation ask the SAME question, of both facts", (
 
 test("F3: the checkpoint commits this session's own files, and NAMES what it leaves", () => {
   const body = windowOf('name: "review_checkpoint"', "\n  });", "review_checkpoint tool");
-  assert.match(body, /pendingCheckpoint\(root, st\.sessionEditedFiles \?\? \[\]\)/,
+  // The paths arrive repo-relative (2026-10-20): `sessionEditedFiles` holds
+  // ABSOLUTE paths while `git ls-files --others` answers relative ones, so the
+  // exact match never hit and every file this session CREATED stayed out of the
+  // reviewed range while the commit still went through.
+  assert.match(body, /pendingCheckpoint\(root, \(st\.sessionEditedFiles \?\? \[\]\)\.map\(\(file\) => repoRelativeTo\(root, file\)\)\)/,
     "the checkpoint reads what it commits through lib/checkpoint-sweep.ts (N1 residual: one implementation)");
   const sweepSrc = readFileSync(join(ROOT, "lib", "checkpoint-sweep.ts"), "utf8");
   assert.match(sweepSrc, /"ls-files", "--others", "--exclude-standard", "-z"/,

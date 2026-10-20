@@ -5,8 +5,8 @@
  * `extensions/review-gate.ts` (t8, 2026-09-26, wave 4 of the split).
  */
 
-import { readFileSync } from "node:fs";
-import { resolve as pathResolve } from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
+import { isAbsolute as pathIsAbsolute, relative as pathRelative, resolve as pathResolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "./change-baseline.ts";
@@ -18,6 +18,28 @@ import {
   newDependencyNames,
 } from "./dependency-justification.ts";
 import { fileSizeVerdict, formatFileSizeVerdict, isSizeJudgedFile } from "./file-size-gate.ts";
+
+/**
+ * A path this session edited, in the ONE form `git ls-files --others` answers.
+ *
+ * The edit handler records absolute paths; git answers repo-relative ones.
+ * Both sides are realpath'd first, because a checkout reached through a symlink
+ * (`/tmp` vs `/private/tmp` on macOS) is the same file under two names — and
+ * that is exactly the case this normalization was written for.
+ */
+function realpathOf(path: string): string {
+  try { return realpathSync(path); } catch { return path; }
+}
+
+export function repoRelativeTo(root: string, file: string): string {
+  const raw = (file ?? "").trim();
+  if (raw === "") return raw;
+  if (!pathIsAbsolute(raw)) return raw;
+  const base = realpathOf(root);
+  const abs = realpathOf(raw);
+  const rel = pathRelative(base, abs);
+  return rel === "" || rel.startsWith("..") ? raw : rel;
+}
 import type { GateState } from "./gate-state.ts";
 import { testsRan } from "./gate-state-transitions.ts";
 import { gitBaseEnv, gitFailureText, gitOrNull, gitRaw, gitText } from "./git-exec.ts";
@@ -228,7 +250,14 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
         // "nothing added to commit" failure. The empty-range review round
         // reads the same function, so the two cannot disagree.
         // Round-4 P2: refuse sensitive paths and report what is swept in.
-        const { paths, leftOut } = pendingCheckpoint(root, st.sessionEditedFiles ?? []);
+        // THE SESSION'S OWN PATHS MUST BE REPO-RELATIVE (measured 2026-10-20):
+        // `sessionEditedFiles` holds ABSOLUTE paths, while `git ls-files
+        // --others` answers repo-relative ones, so exact matching never hit —
+        // every file this session CREATED was classified as "not mine", left
+        // out and `git reset` before the commit. It never showed on a tracked
+        // file (those are staged by path), which is why it survived so long;
+        // it made every new module invisible to the reviewer's range.
+        const { paths, leftOut } = pendingCheckpoint(root, (st.sessionEditedFiles ?? []).map((file) => repoRelativeTo(root, file)));
         if (paths.length === 0) {
           return {
             content: [{ type: "text", text: "review-gate: review_checkpoint — nothing to commit (worktree is clean" +

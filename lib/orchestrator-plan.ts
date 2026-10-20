@@ -367,13 +367,12 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
   const cycle = findDependencyCycle(tasks);
   if (cycle) problems.push(`任务依赖成环：${cycle.join(" → ")}`);
 
-  // ONE ACCEPTANCE ROUND PER PLAN (2026-10-20): the last task accepts, and the
-  // round is dispatched there once every other task is done. The rule itself is
-  // lib/repo-pr-policy.ts's `deliveryTaskId`; saying it here only when the plan
-  // has no last task at all is the only shape that can still be wrong.
-  if (tasks.length > 0 && acceptanceTaskIdOf(tasks) === undefined) {
-    problems.push("plan 的最后一个任务必须存在 —— 统一验收由它执行");
-  }
+  // ONE ACCEPTANCE ROUND PER PLAN (2026-10-20): the LAST task accepts, and the
+  // round is dispatched there once every other task is done. The rule's only
+  // home is lib/acceptance-round.ts `acceptanceTaskIdOf`, which reads
+  // lib/repo-pr-policy.ts's `deliveryTaskId` — the "no last task" shape it
+  // would answer `undefined` for is already refused above ("plan.tasks 至少
+  // 要有一个任务"), so there is nothing left for a second check to catch.
 
   const decisions: PlanDecision[] = [];
   const rawDecisions = Array.isArray(obj.decisions) ? obj.decisions : [];
@@ -490,6 +489,12 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
     // file written before the field existed parses to "", and hashing that as
     // a new term would move the hash of every running orchestration and make
     // its approval look forged (quality round P2, 2026-10-20).
+    //
+    // NOT SO FOR `tasks[].stages`: that field was REMOVED, so a plan approved
+    // with it (the old prompt taught exactly that) hashes differently now and
+    // asks the user once more. Carrying the dead field into the hash to spare
+    // that one dialog would mean keeping the removed shape alive in the
+    // canonical text — the trade the whole change is against.
     ...(plan.acceptancePlan ? { acceptancePlan: plan.acceptancePlan } : {}),
     tasks: plan.tasks.map((t) => ({
       id: t.id,

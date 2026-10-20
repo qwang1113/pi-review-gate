@@ -302,9 +302,14 @@ export function createAcceptanceHost(
     const dispatched = st.childContext;
     const checklist = dispatchedChecklist(dispatched);
     const goalText = acceptanceGoalText(root, st);
-    const declared = dispatched !== undefined || goalText === undefined
-      ? undefined
-      : parseNoAcceptanceDeclaration(goalText);
+    // THE PLAN MAY DECLARE THERE IS NOTHING TO ACCEPT (quality round P1,
+    // 2026-10-20): the skeleton, `parsePlan`'s refusal and the plan audit all
+    // tell the manager it may write 「本轮无真实验收（理由）」 — so the dispatched
+    // checklist goes through the SAME parser. Skipping it would hand a judge a
+    // "checklist" that is really an exemption sentence.
+    const declared = dispatched !== undefined
+      ? parseNoAcceptanceDeclaration(dispatched.acceptancePlan)
+      : (goalText === undefined ? undefined : parseNoAcceptanceDeclaration(goalText));
     const plan = checklist !== undefined
       ? checklist.plan
       : (goalText === undefined ? undefined : extractAcceptancePlan(goalText));
@@ -337,9 +342,6 @@ export function createAcceptanceHost(
       ...(st.acceptance === undefined ? {} : { record: st.acceptance }),
       roundAlive: acceptanceRoundAlive(root),
     });
-    if (checklist?.problem !== undefined) {
-      return { problems: [label + checklist.problem], armed: false };
-    }
     if (decision.action === "pass") return undefined;
     if (decision.action === "skip") {
       // RECORDED, never silent — the same rule the quality round's SKIP
@@ -393,6 +395,13 @@ export function createAcceptanceHost(
         progress.step?.("真实验收（跳过）");
       }
       return undefined;
+    }
+    // AN EMPTY CHECKLIST BLOCKS ONLY FOR THE SESSION THAT OWES THE ROUND
+    // (quality round P2, 2026-10-20). Checked AFTER the skip/pass decisions: an
+    // implementation task whose stage is off never runs the round, and it is in
+    // no position to fix the plan — holding it there would be a dead end.
+    if (checklist?.problem !== undefined) {
+      return { problems: [label + checklist.problem], armed: false };
     }
     if (decision.action === "wait" || decision.action === "block") {
       // The projection, not a second reading of the decision: what declares

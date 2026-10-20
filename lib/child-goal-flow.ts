@@ -50,9 +50,12 @@ export const CHILD_GOAL_REMINDER_TEXT =
 export function childGoalEditBlock(repoRoot?: string): string {
   return buildRejection({
     what: "edit/write 被拦 —— 这个仓库的 loop goal 未获批" + (repoRoot ? ` (repo: ${repoRoot})` : ""),
-    why: "L8 只在「goal 环节开着、且 goal 未获批」时拦；编排子会话的 goal 环节由门禁关掉，不该走到这里。",
+    why: "L8 只在「goal 环节开着、且 goal 未获批」时拦；编排子会话的 goal 环节由门禁在派发时关掉，" +
+      "所以正常不会走到这里 —— 走到了说明它的派发记录没落到 sidecar（旧版项目经理派的子会话，或文件被删）。",
     by: "agent",
-    next: CHILD_GOAL_FLOW,
+    next: "不要自己再去协商 goal（子会话的两条 goal 路径都会被门禁拒）。先看 " +
+      "`.pi/review-gate-state.<你的 variant>.json` 在不在、里面有没有 `stages`；确实没有就把情况报给项目经理" +
+      "（`ask_user` 会经通道转交给他），由他重开这个任务。",
   });
 }
 

@@ -1324,10 +1324,15 @@ test("a recovered child is handed its station ceiling again (2026-09-15)", async
   assert.equal(world.panes.get(before.paneId)!.env[STATION_CAP_ENV], "commit");
   assert.equal(world.panes.get(before.paneId)!.env[ACCEPTANCE_GATE_ENV], "off:t2",
     "t1 is not the plan's last task: t2 runs the one acceptance round");
+  const recordPath = `/repo/.pi/review-gate-state.${childId}.json`;
+  const recordBefore = world.scratch.get(recordPath);
+  assert.ok(recordBefore, "the dispatch record exists after spawn");
 
   world.panes.get(before.paneId)!.alive = false;
   const recovered = await world.call("orchestrator_recover", { childId, reason: "机器睡眠" });
   assert.equal(recovered.isError, undefined, replyText(recovered));
+  assert.equal(world.scratch.get(recordPath), recordBefore,
+    "recover keeps the SAME variant, so its dispatch record is neither rewritten nor lost");
   const after = world.runtime().children[0]!;
   assert.notEqual(after.paneId, before.paneId);
   assert.equal(world.panes.get(after.paneId)!.env[STATION_CAP_ENV], "commit",

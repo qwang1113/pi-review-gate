@@ -766,8 +766,11 @@ test("the no-acceptance declaration is only read from a goal that is in force", 
   assert.match(guard, /return undefined/, "…and anything else is no contract (fail-closed)");
   const at = ACCEPTANCE_HOST_SRC.indexOf("const declared = ");
   assert.ok(at > 0, "armAcceptanceRound reads the declaration");
-  const read = ACCEPTANCE_HOST_SRC.slice(at - 300, at + 400);
+  const read = ACCEPTANCE_HOST_SRC.slice(Math.max(0, at - 1200), at + 600);
   assert.match(read, /acceptanceGoalText\(root, st\)/, "…through that one read");
+  // A dispatched child has no goal: its checklist is the plan's own text, and
+  // the SAME declaration parser reads it (2026-10-20).
+  assert.match(read, /parseNoAcceptanceDeclaration\(dispatched\.acceptancePlan\)/);
   assert.match(read, /parseNoAcceptanceDeclaration\(goalText\)/);
   assert.match(read, /extractAcceptancePlan\(goalText\)/, "the plan comes from the same text");
   const dispatchAt = ACCEPTANCE_HOST_SRC.indexOf("async function dispatchAcceptanceRound(");

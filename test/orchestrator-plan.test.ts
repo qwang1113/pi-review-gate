@@ -556,6 +556,19 @@ test("D25: a one-task plan marks no delivery task, and the mark follows the plan
   assert.match(pr.split("\n").find((l) => l.startsWith("- [pending] a"))!, /PR 开出来/);
 });
 
+test("a plan written BEFORE acceptancePlan existed keeps its hash — the field is only hashed when present", () => {
+  const legacy = parsePlan({
+    title: "t", intent: "i",
+    tasks: [{ id: "a", title: "A", repo: "/repo" }],
+  }, NOW).plan!;
+  assert.equal(legacy.acceptancePlan, "", "the read path is lenient");
+  assert.doesNotMatch(canonicalPlanText(legacy), /acceptancePlan/,
+    "an empty checklist adds no term, so a running orchestration's approval still matches");
+  const modern = { ...legacy, acceptancePlan: "起服务 → 调接口" };
+  assert.match(canonicalPlanText(modern), /"acceptancePlan":"起服务/, "…and a real one IS hashed");
+  assert.notEqual(planHash(modern), planHash(legacy));
+});
+
 test("the canonical text is order-independent for sets", () => {
   const a = planOf({ tasks: [{ id: "a", title: "t", dependsOn: ["x", "y"] }, { id: "x", title: "x" }, { id: "y", title: "y" }] });
   const b = planOf({ tasks: [{ id: "a", title: "t", dependsOn: ["y", "x"] }, { id: "x", title: "x" }, { id: "y", title: "y" }] });
