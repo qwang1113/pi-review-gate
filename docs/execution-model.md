@@ -461,8 +461,11 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
   `U`=签名者不在其中，两者都拒绝）；agent 的 `git commit` 在**提交之前**被拦
   ——显式不签（`--no-gpg-sign` / `-c commit.gpgsign=false`）或这个仓库根本签不了
   （`commit.gpgsign` 非真，或 `gpg.format=ssh` 却没有 `user.signingkey`）；
-  `git push` / `gh pr create` 只验**本次新增**的 commit（`<remote>..<local>`，新
-  分支用 `--not --remotes` 定下界，存量历史不追补、不 rewrite）。身份一律来自
+  `git push` / `gh pr create` 只验**本次新增**的 commit（tracked 分支
+  `<upstream>..<local>`、新分支用 `--not --remotes` 定下界、PR 用自身
+  `--base/--head` 的 `base..head`，存量历史不追补、不 rewrite）；**git log 读不出
+  来是拒绝而不是放行**。`-S` / `--no-gpg-sign` 这类开关**只从 argv 读**（commit
+  message 是数据，里面出现 `-S` 不能当作显式签名请求）。身份一律来自
   仓库自己的 git 配置（用户侧的 `includeIf` 决定 OneKeyHQ 用工作身份、
   其余用个人身份），门禁只判「签没签、能不能验」。钩子侧同一规则在
   `scripts/commit-signing.cjs`，由 `hooks/pre-push` **在 verified-branches 快

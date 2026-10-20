@@ -27,7 +27,7 @@
  * Both orderings are pinned mechanically in test/extension-structure.test.ts.
  */
 
-import { formatUnsignedCommits, signOptOut } from "./commit-signing.ts";
+import { explicitSignFlag, formatUnsignedCommits, signOptOut } from "./commit-signing.ts";
 import { COMMIT_MSG_FORBIDDEN, requiresFullPrecommit, type ShipCommandKind } from "./constants.ts";
 import {
   detectShipCommands,
@@ -292,18 +292,26 @@ export async function evaluateShipCommand(
         }
         // An explicit `-S` / `--gpg-sign` produces a signature even when the
         // repo's own `commit.gpgsign` is off, so the config gap is not a
-        // refusal for it.
-        if (/(^|\s)(-S|--gpg-sign)(\s|=|$)/.test(s.segment)) continue;
+        // refusal for it. Read from the FLAGS, never from the whole segment: a
+        // commit message that happens to contain " -S " must not disable this
+        // check (round-1 reviewer P2).
+        if (explicitSignFlag(s.segment)) continue;
         const gap = deps.signingGap(root);
         if (gap !== undefined) {
           signatureProblems.push(label + gap +
             " —— 每个 commit 都必须签名：设 `commit.gpgsign=true` 并配好 `user.signingkey`（`gpg.format=ssh` 时还要 `gpg.ssh.allowedSignersFile`），或显式 `git commit -S`。");
         }
       } else if (s.kind === "push" || s.kind === "pr-create") {
-        const unsigned = deps.unsignedCommitsForShip(root, s.segment);
-        if (unsigned.length > 0) {
+        const scan = deps.signatureScanForShip(root, s.segment, s.kind);
+        if (scan.error !== undefined) {
+          // AN UNREADABLE HISTORY IS A REFUSAL, NOT A PASS (round-1 reviewer
+          // P1: an unsanitized refspec made `git log` exit 128, the failure was
+          // read as "nothing unsigned", and a force push went through).
           signatureProblems.push(label +
-            `${unsigned.length} 个要发布的 commit 没有有效签名：${formatUnsignedCommits(unsigned)} —— ` +
+            `无法验证这条命令要发布哪些 commit 的签名（${scan.error}）—— 拒绝放行，先把要推的 commit 单独列出来再推。`);
+        } else if (scan.unsigned.length > 0) {
+          signatureProblems.push(label +
+            `${scan.unsigned.length} 个要发布的 commit 没有有效签名：${formatUnsignedCommits(scan.unsigned)} —— ` +
             "用 `git rebase --exec 'git commit --amend --no-edit -S' <base>` 重签后再发布。");
         }
       }

@@ -79,7 +79,7 @@ function makeDeps(over: Partial<ShipGateHookDeps> & { taskMode?: () => TaskMode 
     // always sign and nothing it publishes is unsigned. The signature rules
     // have their own tests (test/commit-signing*.test.ts).
     signingGap: () => undefined,
-    unsignedCommitsForShip: () => [],
+    signatureScanForShip: () => ({ unsigned: [] }),
     loopGoalConfirmed: () => true,
     precommitLaneRunning: () => false,
     waitForQuietLane: async () => {},
@@ -839,10 +839,21 @@ test("an explicit -S signs even when the repo's own config is off", async () => 
   assert.notEqual(out?.block, true, out?.reason ?? "");
 });
 
+test("an UNREADABLE history is a refusal, not a clean scan (round-1 P1)", async () => {
+  // The fail-open this pins: a refspec operator made `git log` exit 128, the
+  // failure was read as "nothing unsigned", and a force push went through.
+  const { out } = await shipAt("pr", PUSH_CMD, {
+    signatureScanForShip: () => ({ unsigned: [], error: "fatal: ambiguous argument '+work'" }),
+  });
+  assert.equal(out?.block, true);
+  assert.match(out!.reason, /无法验证/);
+  assert.match(out!.reason, /ambiguous argument/);
+});
+
 test("a push carrying an unsigned commit is refused, and the commit is named", async () => {
   const sha = "a".repeat(40);
   const { out } = await shipAt("pr", PUSH_CMD, {
-    unsignedCommitsForShip: () => [{ sha, verdict: "absent", signer: "", key: "" }],
+    signatureScanForShip: () => ({ unsigned: [{ sha, verdict: "absent" as const, signer: "", key: "" }] }),
   });
   assert.equal(out?.block, true);
   assert.match(out!.reason, /aaaaaaaaaaaa/);
@@ -857,7 +868,7 @@ test("the signature rule holds on a CLEAN worktree too", async () => {
   const { out } = await shipAt(undefined, PUSH_CMD, {
     enforcementStateFor: () => clean,
     stateForRepo: () => clean,
-    unsignedCommitsForShip: () => [{ sha: "b".repeat(40), verdict: "untrusted", signer: "x", key: "y" }],
+    signatureScanForShip: () => ({ unsigned: [{ sha: "b".repeat(40), verdict: "untrusted" as const, signer: "x", key: "y" }] }),
   });
   assert.equal(out?.block, true, "an unsigned push is not excused by a clean worktree");
   assert.match(out!.reason, /bbbbbbbbbbbb/);

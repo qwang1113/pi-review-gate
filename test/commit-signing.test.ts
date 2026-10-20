@@ -29,9 +29,15 @@ import {
   parsePushRefs,
   parseSignatureLog,
   pushRefTarget,
+  commandTokens,
+  explicitSignFlag,
+  prTargetsForSegment,
   pushRefspecs,
+  pushTargetsForSegment,
   readSignatures,
   readSigningConfig,
+  refspecSource,
+  scanSignatures,
   signOptOut,
   signatureAccepted,
   signatureLogArgs,
@@ -39,7 +45,6 @@ import {
   signatureVerdict,
   signingGap,
   unsignedCommits,
-  unsignedForPushSegment,
 } from "../lib/commit-signing.ts";
 import { git, neutraliseHostGitConfig } from "./helpers/git.ts";
 
@@ -116,6 +121,22 @@ test("a repo has to be able to sign before the gate lets a commit through", () =
   // gpg.format=ssh without a key fails outright, which is the expensive one to
   // discover halfway through a round.
   assert.match(String(signingGap({ gpgsign: "true", format: "ssh", signingKey: "" })), /user\.signingkey/);
+});
+
+test("flags are read as FLAGS — a commit message is data (round-1 P2)", () => {
+  // Both directions of this were wrong when the whole segment was scanned:
+  // a message mentioning --no-gpg-sign refused a legitimate commit, and a
+  // message mentioning -S disabled the "this repo cannot sign" check, so the
+  // commit landed unsigned.
+  const messageWithNoSign = "git commit -m 'feat: explain why --no-gpg-sign is banned'";
+  assert.equal(signOptOut(messageWithNoSign), undefined, "a message is not an opt-out");
+  assert.equal(explicitSignFlag(messageWithNoSign), false);
+  assert.equal(explicitSignFlag("git commit -m 'feat: pass -S through'"), false,
+    "a message must not look like an explicit signature request");
+  assert.equal(explicitSignFlag("git commit -S -m 'feat: x'"), true);
+  assert.equal(explicitSignFlag("git commit --gpg-sign=ABC -m x"), true);
+  assert.equal(explicitSignFlag("git commit -am 'fix: x'"), false, "-am is -a plus a message");
+  assert.deepEqual(commandTokens("git commit -am 'feat: x' -S"), ["git", "commit", "-am", "-S"]);
 });
 
 test("only EXPLICIT refusals are read as an opt-out", () => {
@@ -222,12 +243,69 @@ test("readSigningConfig answers with the repo's own layers", () => {
 test("a push reports exactly the commits it would add that are unsigned", () => {
   const { dir } = makeRepo();
   commitFile(dir, "a.txt", "one\n");
-  assert.deepEqual(unsignedForPushSegment(dir, "git push origin main"), [], "signed history publishes clean");
+  assert.deepEqual(scanSignatures(dir, pushTargetsForSegment(dir, "git push origin main")).unsigned, [],
+    "signed history publishes clean");
 
   uncheckedCommit(dir, "b.txt", "two\n");
-  const unsigned = unsignedForPushSegment(dir, "git push origin main");
+  const unsigned = scanSignatures(dir, pushTargetsForSegment(dir, "git push origin main")).unsigned;
   assert.equal(unsigned.length, 1, "only the unsigned commit is named");
   assert.equal(unsigned[0]!.verdict, "absent");
+});
+
+test("a FORCE push refspec is not fed to git as a rev (round-1 P1)", () => {
+  // `git log +branch` exits 128. The scan used to swallow that into an empty
+  // list, which read as "nothing unsigned" — an unsigned force push shipped.
+  assert.equal(refspecSource("+work"), "work");
+  assert.equal(refspecSource("work:other"), "work");
+  assert.equal(refspecSource(":gone"), undefined, "a delete publishes nothing");
+  assert.equal(refspecSource("^exclude"), undefined, "an exclusion is not a source");
+
+  const { dir } = makeRepo();
+  uncheckedCommit(dir, "a.txt", "one\n");
+  const targets = pushTargetsForSegment(dir, "git push --force origin +main");
+  assert.deepEqual(targets, [{ kind: "unpushed", sha: "main" }]);
+  const scan = scanSignatures(dir, targets);
+  assert.equal(scan.error, undefined, "the sanitized rev is readable");
+  assert.equal(scan.unsigned.length, 1, "the unsigned commit is still named");
+});
+
+test("an unreadable history is a refusal, not a clean scan", () => {
+  const { dir } = makeRepo();
+  commitFile(dir, "a.txt", "one\n");
+  const scan = scanSignatures(dir, [{ kind: "unpushed", sha: "+main" }]);
+  assert.notEqual(scan.error, undefined, "git refuses the operator, and the caller must hear it");
+  assert.deepEqual(scan.unsigned, []);
+});
+
+test("a tracked branch is verified as upstream..local, not as the whole unpushed set", () => {
+  const { dir } = makeRepo();
+  const first = commitFile(dir, "a.txt", "one\n");
+  // A REAL remote-tracking setup: without the fetch refspec git refuses to call
+  // refs/heads/work's upstream a remote-tracking branch at all.
+  git(dir, ["config", "remote.origin.url", "https://example.invalid/x.git"]);
+  git(dir, ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+  git(dir, ["update-ref", "refs/remotes/origin/work", first]);
+  git(dir, ["config", "branch.work.remote", "origin"]);
+  git(dir, ["config", "branch.work.merge", "refs/heads/work"]);
+  git(dir, ["checkout", "-q", "-b", "work"]);
+  const second = uncheckedCommit(dir, "b.txt", "two\n");
+  // The upstream comes back as the full ref — unambiguous, and valid as a rev.
+  assert.deepEqual(pushTargetsForSegment(dir, "git push origin work"), [
+    { kind: "range", range: "refs/remotes/origin/work..work" },
+  ]);
+  const scan = scanSignatures(dir, pushTargetsForSegment(dir, "git push origin work"));
+  assert.deepEqual(scan.unsigned.map((c) => c.sha), [second], "only the added commit is judged");
+});
+
+test("gh pr create is verified as base..head from its own flags", () => {
+  const { dir } = makeRepo();
+  const first = commitFile(dir, "a.txt", "one\n");
+  git(dir, ["update-ref", "refs/remotes/origin/main", first]);
+  git(dir, ["branch", "-m", "work"]);
+  uncheckedCommit(dir, "b.txt", "two\n");
+  assert.deepEqual(prTargetsForSegment(dir, "gh pr create --base main --head work --title x"), [
+    { kind: "range", range: "origin/main..work" },
+  ]);
 });
 
 test("a range target sees only the commits inside it", () => {

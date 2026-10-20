@@ -128,20 +128,26 @@ function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
 }
 
-/** The offending commits among the ones the given targets cover. */
+/**
+ * The offending commits among the ones the given targets cover, and whether the
+ * scan could run at all.
+ *
+ * The two are different answers: a history git cannot read is a REFUSAL, never
+ * "nothing unsigned here" (round-1 reviewer P1 — the gate side had exactly that
+ * fail-open through an unsanitized refspec).
+ */
 function unsignedForTargets(cwd, targets) {
-  if (targets.length === 0) return [];
+  if (targets.length === 0) return { unsigned: [] };
   const args = signatureLogArgs(targets);
-  if (args.length <= 2) return [];
+  if (args.length <= 2) return { unsigned: [] };
   let raw;
   try {
     raw = git(cwd, args);
-  } catch {
-    // Unreadable history is NOT evidence of a signature. git's own refusal is
-    // reported by the hook's other checks; here there is simply nothing to say.
-    return [];
+  } catch (error) {
+    const line = String((error && error.stderr) || (error && error.message) || "git log failed").trim().split("\n")[0];
+    return { unsigned: [], error: line };
   }
-  return parseSignatureLog(raw).filter((c) => !signatureAccepted(c.verdict));
+  return { unsigned: parseSignatureLog(raw).filter((c) => !signatureAccepted(c.verdict)) };
 }
 
 function formatUnsigned(commits, limit) {
@@ -157,7 +163,14 @@ function formatUnsigned(commits, limit) {
 /** The refusal text for a push, or undefined when every published commit is signed. */
 function problemsFor(cwd, stdin) {
   const targets = pushTargets(parsePushRefs(stdin));
-  const unsigned = unsignedForTargets(cwd, targets);
+  if (targets.length === 0) return undefined;
+  const { unsigned, error } = unsignedForTargets(cwd, targets);
+  if (error !== undefined) {
+    return (
+      "[review-gate] push rejected: the signatures of the commits being published could NOT be verified (" + error + ").\n" +
+      "[review-gate] An unreadable history is not evidence of a signature — refusing to publish it."
+    );
+  }
   if (unsigned.length === 0) return undefined;
   return (
     "[review-gate] push rejected: " + unsigned.length + " commit(s) being published carry no valid signature — " +

@@ -5,7 +5,7 @@
  * the extension supplies them through lib/ship-gate-hook.ts's `ShipGateHookDeps`.
  */
 
-import type { CommitSignature } from "./commit-signing.ts";
+import type { SignatureScan } from "./commit-signing.ts";
 import type { GateState } from "./gate-state.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
 import type { ArbitrableAction, BypassToken, TokenBindings } from "./arbitration.ts";
@@ -118,13 +118,15 @@ export interface ShipGateBashDeps {
   signingGap(root: string): string | undefined;
   /**
    * The commits a `push` / `pr-create` segment would publish that carry no
-   * valid signature (lib/commit-signing.ts `unsignedForPushSegment`).
+   * valid signature, plus whether the scan could run at all
+   * (lib/commit-signing.ts `signatureScanForShip`).
    *
    * Only the commits being ADDED are asked about — a repo's older unsigned
    * history was explicitly put out of scope by the user's decision (rewriting
-   * published history is worse than the unsigned commit).
+   * published history is worse than the unsigned commit). The `error` half is
+   * not optional decoration: an unreadable history refuses, it does not pass.
    */
-  unsignedCommitsForShip(root: string, segment: string): CommitSignature[];
+  signatureScanForShip(root: string, segment: string, kind: "push" | "pr-create"): SignatureScan;
   /** "your READY is on another repo" — the cross-repo hint for a block. */
   crossRepoVerdictHint(blockedRoots: string[]): string;
   /** The flash classifier the three LLM guards run on. */

@@ -56,7 +56,7 @@ function deps(root: string, station: DeliveryStation | undefined): ShipGateBashD
     unreviewedTreesSince: () => [],
     // Signatures are not what this fixture measures (see test/commit-signing*.test.ts).
     signingGap: () => undefined,
-    unsignedCommitsForShip: () => [],
+    signatureScanForShip: () => ({ unsigned: [] }),
     loopGoalConfirmed: () => true,
     precommitLaneRunning: () => false,
     waitForQuietLane: async () => {},

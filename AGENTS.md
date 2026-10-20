@@ -352,10 +352,17 @@ commit 都必须签名".
   `user.signingkey`) — refused BEFORE the commit exists, so the agent learns
   what to configure instead of discovering a git error halfway through a round.
 - **`git push` / `gh pr create`** are refused while any commit they would ADD
-  has no valid signature. Only the commits being added: the repo's older
-  unsigned history is explicitly out of scope (rewriting published history is
-  worse than an unsigned commit), and a brand-new branch is bounded by
-  `--not --remotes` rather than by an empty range.
+  has no valid signature. Only the commits being added: a tracked branch is
+  `upstream..local`, a brand-new one is bounded by `--not --remotes` (never by
+  an empty range), and a PR is `base..head` from its own flags. The repo's
+  older unsigned history is explicitly out of scope — rewriting published
+  history is worse than an unsigned commit. **An unreadable history is a
+  refusal, never a clean scan**: `git log` failing (an unsanitized `+branch`
+  exited 128 once) used to read as "nothing unsigned here".
+- **Flags are read as flags.** `-S`, `--no-gpg-sign` and `-c commit.gpgsign=…`
+  are taken from argv only, never from a commit message: a message that
+  mentions `-S` must not look like an explicit signature request, and one that
+  mentions `--no-gpg-sign` must not refuse a legitimate commit.
 - **`hooks/pre-push`** asks the same question for a push from a plain
   terminal, and it does so **before** the verified-branches fast path — that
   path exits 0 for a reviewed tree, so a check placed after it would be skipped

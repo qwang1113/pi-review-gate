@@ -22,7 +22,7 @@
  * together so they cannot drift.
  */
 
-import { gitOrNull, gitText } from "./git-exec.ts";
+import { gitFailureText, gitOrNull, gitText } from "./git-exec.ts";
 
 /* ------------------------------------------------------------------ *
  * 1. WHAT GIT SAYS ABOUT ONE COMMIT (`%G?`)
@@ -281,8 +281,52 @@ export function signingGap(cfg: SigningConfig): string | undefined {
 }
 
 /* ------------------------------------------------------------------ *
- * 5. "DO NOT SIGN THIS ONE" — the explicit opt-out
+ * 5. "DO NOT SIGN THIS ONE" — flags, read as FLAGS
  * ------------------------------------------------------------------ */
+
+/**
+ * Split a git segment into tokens, dropping the PAYLOAD of message flags.
+ *
+ * The distinction is not cosmetic: a commit message that mentions `-S` used to
+ * be read as the flag itself (measured: `git commit -m 'feat: pass -S through'`
+ * in a repo with `commit.gpgsign=false` skipped the "this repo cannot sign"
+ * refusal and produced an unsigned commit), and a message that mentions
+ * `--no-gpg-sign` refused a legitimate commit. A message is DATA; only argv is
+ * instructions.
+ *
+ * Quoting is handled for the shapes a shell produces after pi hands the
+ * command over: single and double quotes group, and the payload of
+ * `-m`/`--message`/`-F`/`--file` is skipped.
+ */
+export function commandTokens(segment: string): string[] {
+  const raw: string[] = [];
+  let current = "";
+  let quote: string | undefined;
+  for (const ch of segment ?? "") {
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined;
+      else current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (/\s/.test(ch)) {
+      if (current !== "") { raw.push(current); current = ""; }
+      continue;
+    }
+    current += ch;
+  }
+  if (current !== "") raw.push(current);
+
+  const out: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const tok = raw[i] as string;
+    out.push(tok);
+    // Flags whose NEXT token is a message/payload, never a flag. The combined
+    // short forms (-am, -sm) end in the message letter.
+    if (/^(--message|--file|-F)$/.test(tok) || /^-[a-zA-Z]*[mF]$/.test(tok)) i++;
+  }
+  return out;
+}
 
 /**
  * The opt-out a command carries, or `undefined`.
@@ -293,14 +337,32 @@ export function signingGap(cfg: SigningConfig): string | undefined {
  * an agent "you asked not to sign" when it did not is worse than silence.
  */
 export function signOptOut(segment: string): string | undefined {
-  const text = segment ?? "";
-  if (/--no-gpg-sign\b/.test(text)) return "`--no-gpg-sign` asks for an UNSIGNED commit";
-  if (/-c\s+["']?commit\.gpgsign=(false|no|off|0)\b/i.test(text)) {
-    return "`-c commit.gpgsign=false` asks for an UNSIGNED commit";
+  const tokens = commandTokens(segment);
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i] as string;
+    if (tok === "--no-gpg-sign") return "`--no-gpg-sign` asks for an UNSIGNED commit";
+    if (tok === "-c" && /^"?commit\.gpgsign=(false|no|off|0)"?$/i.test(tokens[i + 1] ?? "")) {
+      return "`-c commit.gpgsign=false` asks for an UNSIGNED commit";
+    }
+    if (/^-c"?commit\.gpgsign=(false|no|off|0)"?$/i.test(tok)) {
+      return "`-c commit.gpgsign=false` asks for an UNSIGNED commit";
+    }
+    if (/^GIT_CONFIG_[A-Z0-9_]*=/.test(tok)) return "a git config override asks for an UNSIGNED commit";
   }
-  if (/GIT_CONFIG_[A-Z_]*gpgsign/i.test(text)) return "a git config override asks for an UNSIGNED commit";
   return undefined;
 }
+
+/**
+ * Did the command ask git for a signature explicitly?
+ *
+ * `-S` / `--gpg-sign` produce one even when `commit.gpgsign` is off, so the
+ * repo's config gap is not a refusal for them. Read from the FLAGS only — see
+ * `commandTokens`.
+ */
+export function explicitSignFlag(segment: string): boolean {
+  return commandTokens(segment).some((tok) => /^-S/.test(tok) || /^--gpg-sign(=|$)/.test(tok));
+}
+
 
 /* ------------------------------------------------------------------ *
  * 6. THE GIT EXECUTING HALF (thin, always through lib/git-exec.ts)
@@ -326,16 +388,46 @@ export function signingGapFor(root: string): string | undefined {
 }
 
 /**
- * Read the signature of every commit a set of targets covers.
+ * WHAT ONE SCAN FOUND: the offending commits, and — separately — whether the
+ * scan could run at all.
  *
- * A git failure yields an empty list — the caller then has no evidence a
- * commit is signed, and every caller treats "no evidence" as a refusal.
+ * The two are NOT the same answer, and the first cut of this module conflated
+ * them (round-1 reviewer P1): `git log +branch --not --remotes` exits 128 on a
+ * refspec operator, the failure was swallowed into an empty list, and a force
+ * push of an unsigned branch sailed through. "Could not read the history" is a
+ * refusal, never a pass.
  */
-export function readSignatures(root: string, targets: readonly VerifyTarget[]): CommitSignature[] {
+export interface SignatureScan {
+  unsigned: CommitSignature[];
+  /** Set when git itself failed — the caller must refuse, not count zero. */
+  error?: string;
+}
+
+/** Read every commit a set of targets covers, and say whether the read worked. */
+function logCommits(root: string, targets: readonly VerifyTarget[]): { commits: CommitSignature[]; error?: string } {
   const args = signatureLogArgs(targets);
-  if (args.length <= 2) return [];
-  const raw = gitOrNull(root, args);
-  return raw === null ? [] : parseSignatureLog(raw);
+  if (args.length <= 2) return { commits: [] };
+  try {
+    return { commits: parseSignatureLog(gitText(root, args)) };
+  } catch (error) {
+    return { commits: [], error: gitFailureText(error).split("\n")[0] ?? "git log failed" };
+  }
+}
+
+/**
+ * The offending commits among the ones a set of targets covers.
+ *
+ * `error` is set when git could not read the history at all — the caller must
+ * treat that as a refusal, never as "nothing unsigned here".
+ */
+export function scanSignatures(root: string, targets: readonly VerifyTarget[]): SignatureScan {
+  const { commits, error } = logCommits(root, targets);
+  return error === undefined ? { unsigned: unsignedCommits(commits) } : { unsigned: [], error };
+}
+
+/** Every commit the targets cover, signed or not (diagnostics and tests). */
+export function readSignatures(root: string, targets: readonly VerifyTarget[]): CommitSignature[] {
+  return logCommits(root, targets).commits;
 }
 
 /** The signature of ONE commit (an empty list when git cannot read it). */
@@ -372,22 +464,86 @@ export function assertCommitSigned(root: string, sha: string): CommitSignature {
 }
 
 /**
- * The commits a `git push` segment would publish that are NOT signed.
+ * The LOCAL side of a refspec, with git's operators removed.
+ *
+ * `+branch` (force) and `branch:other` both publish `branch`; `:other` is a
+ * DELETE and publishes nothing; `^negative` is an exclusion, not a source. An
+ * operator left in the rev argument makes `git log` exit 128 — which is how the
+ * force-push hole above was found.
+ */
+export function refspecSource(refspec: string): string | undefined {
+  const src = (refspec.split(":")[0] ?? "").replace(/^\+/, "");
+  if (src === "" || src.startsWith("^")) return undefined;
+  return src;
+}
+
+/** The commit range a ref would publish: the commits on top of its upstream. */
+function targetForRef(root: string, ref: string): VerifyTarget {
+  // `for-each-ref` answers "no upstream" with an empty line and exit 0, which
+  // is a real answer; `rev-parse @{upstream}` fails, and a failure must never
+  // be confused with the answer.
+  const upstream = gitOrNull(root, ["for-each-ref", "--format=%(upstream)", "refs/heads/" + ref])?.trim() ?? "";
+  if (upstream !== "") return { kind: "range", range: upstream + ".." + ref };
+  // No tracking branch: everything on this ref that no remote has yet.
+  return { kind: "unpushed", sha: ref };
+}
+
+/** The value of a `--flag value` / `--flag=value` pair, from the FLAGS only. */
+export function flagValue(segment: string, flag: string): string | undefined {
+  const tokens = commandTokens(segment);
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i] as string;
+    if (tok === flag) return tokens[i + 1];
+    if (tok.startsWith(flag + "=")) return tok.slice(flag.length + 1);
+  }
+  return undefined;
+}
+
+/** A remote branch name git can resolve, or `undefined`. */
+function resolveRemoteRef(root: string, name: string): string | undefined {
+  for (const candidate of [name, "origin/" + name]) {
+    if (gitOrNull(root, ["rev-parse", "--verify", "--quiet", candidate]) !== null) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * The commits a `git push` segment would ADD.
  *
  * `undefined` refspecs (`--all` / `--mirror` / `--tags`) verify every local
  * branch — the conservative reading of "ship everything".
  */
-export function unsignedForPushSegment(root: string, segment: string): CommitSignature[] {
+export function pushTargetsForSegment(root: string, segment: string): VerifyTarget[] {
   const refspecs = pushRefspecs(segment);
-  const targets: VerifyTarget[] =
-    refspecs === undefined
-      ? [{ kind: "unpushed", sha: "--branches" }]
-      : refspecs.length === 0
-        ? [{ kind: "unpushed", sha: "HEAD" }]
-        : refspecs
-          // "<src>:<dst>" publishes <src>; ":<dst>" is a delete and ships nothing.
-          .map((r) => r.split(":")[0] ?? "")
-          .filter((src) => src !== "")
-          .map((src) => ({ kind: "unpushed" as const, sha: src }));
-  return unsignedCommits(readSignatures(root, targets));
+  if (refspecs === undefined) return [{ kind: "unpushed", sha: "--branches" }];
+  const sources = refspecs
+    .map(refspecSource)
+    .filter((src): src is string => src !== undefined);
+  if (sources.length === 0) return [targetForRef(root, "HEAD")];
+  return sources.map((src) => targetForRef(root, src));
+}
+
+/**
+ * The commits a `gh pr create` segment would ADD: `base..head`.
+ *
+ * The base is `--base` when given, else the remote's default branch; the head
+ * is `--head` when given, else HEAD. Both sides are resolved before use — an
+ * unresolvable base falls back to "everything not on a remote yet", which is
+ * the fail-closed direction.
+ */
+export function prTargetsForSegment(root: string, segment: string): VerifyTarget[] {
+  const head = flagValue(segment, "--head") ?? "HEAD";
+  const baseFlag = flagValue(segment, "--base");
+  const base = baseFlag === undefined
+    ? resolveRemoteRef(root, "origin/HEAD") ?? resolveRemoteRef(root, "main") ?? resolveRemoteRef(root, "master")
+    : resolveRemoteRef(root, baseFlag);
+  if (base !== undefined && gitOrNull(root, ["rev-parse", "--verify", "--quiet", head]) !== null) {
+    return [{ kind: "range", range: base + ".." + head }];
+  }
+  return [{ kind: "unpushed", sha: head }];
+}
+
+/** The signature scan for one ship segment — the L1 gate's single entry point. */
+export function signatureScanForShip(root: string, segment: string, kind: "push" | "pr-create"): SignatureScan {
+  return scanSignatures(root, kind === "push" ? pushTargetsForSegment(root, segment) : prTargetsForSegment(root, segment));
 }
