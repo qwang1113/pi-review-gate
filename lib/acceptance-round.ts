@@ -387,7 +387,11 @@ export function acceptanceDecision(input: AcceptanceDecisionInput): AcceptanceDe
     return {
       action: "skip",
       status: "SKIPPED",
-      reason: `goal 声明「本轮无真实验收」：${input.goalSkipsAcceptance}（该声明是用户在批准 goal 时拍板的，验收 agent 无权自行豁免）—— 跳过真实验收。`,
+      // NEUTRAL WORDING (reviewer Nit, 2026-10-20): the declaration can come
+      // from a goal OR from a dispatched plan, and the user approved whichever
+      // one it was — saying "goal" to a child that has none is a false fact.
+      reason: `方案声明「本轮无真实验收」：${input.goalSkipsAcceptance}` +
+        "（该声明是用户在批准方案时拍板的，验收 agent 无权自行豁免）—— 跳过真实验收。",
     };
   }
   if (!input.hasCodeChange) {

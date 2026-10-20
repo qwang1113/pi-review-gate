@@ -1,3 +1,12 @@
+/** A path in its physical spelling, or unchanged when it cannot be read. */
+function realpathOf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
 /**
  * THE SESSION'S REPOS — the per-repo gate state, how a repo is named in a
  * message, which repo a tool targets, and the review-scope facts of each.
@@ -10,6 +19,7 @@
  * repo's is loaded lazily into `cells.repoStateCache`.
  */
 
+import { realpathSync } from "node:fs";
 import { join as pathJoin, resolve as pathResolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { acceptanceStatusLine } from "./acceptance-round.ts";
@@ -320,8 +330,20 @@ export function createSessionRepos(cells: SessionCells, deps: SessionReposDeps) 
    */
   function repoRelative(p: string): string {
     const abs = p.startsWith("/") ? p : pathJoin(cells.cwd, p);
-    const root = cells.primaryRepoRoot;
-    return abs.startsWith(root + "/") ? abs.slice(root.length + 1) : abs;
+    const root = realpathOf(cells.primaryRepoRoot);
+    // TWO SPELLINGS OF ONE CHECKOUT (2026-10-20, measured): the session's repo
+    // root can be the LOGICAL path (`/tmp/...`) while git reports the PHYSICAL
+    // one (`/private/tmp/...`). A plain string prefix then misses, every path
+    // this session wrote is recorded ABSOLUTE, and the checkpoint's
+    // "did this session write it" test — which compares against git's
+    // repo-relative paths — leaves every NEW file out of its own commit. The
+    // read side normalizes too (lib/checkpoint-tool.ts `repoRelativeTo`); the
+    // two together are what make the record usable by both spellings.
+    for (const candidate of new Set([cells.primaryRepoRoot, root])) {
+      if (abs.startsWith(candidate + "/")) return abs.slice(candidate.length + 1);
+    }
+    const physical = realpathOf(abs);
+    return physical.startsWith(root + "/") ? physical.slice(root.length + 1) : abs;
   }
 
   /**

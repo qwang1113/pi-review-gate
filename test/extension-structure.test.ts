@@ -7386,11 +7386,16 @@ test("F3: every path the edit tools wrote is recorded, code or not", () => {
   // new file out of its own checkpoint — and an in-repo file outside that cwd
   // was recorded absolute, which `lib/out-of-repo-paths.ts` reads as a
   // violation.
+  // …AND THE SAME FILE UNDER TWO SPELLINGS IS ONE PATH (2026-10-20): the repo
+  // root can be logical (`/tmp/…`) while git answers physical
+  // (`/private/tmp/…`), and a plain prefix test then recorded every path
+  // ABSOLUTE — which the checkpoint's exact match reads as "not mine".
   assert.match(
     SRC,
-    /const root = cells\.primaryRepoRoot;\n\s*return abs\.startsWith\(root \+ "\/"\) \? abs\.slice\(root\.length \+ 1\) : abs;/,
-    "recorded paths are REPO-root-relative, never cwd-relative",
+    /for \(const candidate of new Set\(\[cells\.primaryRepoRoot, root\]\)\) \{\n\s*if \(abs\.startsWith\(candidate \+ "\/"\)\) return abs\.slice\(candidate\.length \+ 1\);/,
+    "recorded paths are REPO-root-relative (both spellings), never cwd-relative",
   );
+  assert.match(SRC, /const physical = realpathOf\(abs\);/, "the physical spelling is tried too");
 });
 
 test("F4: the round's receipt names the checkpoint and the files in it", () => {
