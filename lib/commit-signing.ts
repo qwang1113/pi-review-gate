@@ -23,6 +23,7 @@
  */
 
 import { gitFailureText, gitOrNull, gitText } from "./git-exec.ts";
+import { lexSegmentTokens } from "./shell-lex.ts";
 
 /* ------------------------------------------------------------------ *
  * 1. WHAT GIT SAYS ABOUT ONE COMMIT (`%G?`)
@@ -222,26 +223,40 @@ export function signatureLogArgs(targets: readonly VerifyTarget[]): string[] {
  * command pushes "everything" (`--all` / `--mirror` / `--tags`): there is no
  * explicit refspec then, and the caller verifies every local branch.
  */
-export function pushRefspecs(segment: string): string[] | undefined {
-  // Strip quoting and split: a refspec never contains whitespace.
-  const tokens = (segment ?? "").replace(/["']/g, "").split(/\s+/).filter((t) => t !== "");
+/** One `git push` command, read as a command rather than as text. */
+export interface PushCommand {
+  /** The refspecs, or `undefined` when the command pushes everything. */
+  refspecs: string[] | undefined;
+  /** `--delete` / `-d`: every refspec names a branch to REMOVE. */
+  deleteAll: boolean;
+}
+
+/** Options whose NEXT token is their value, never a refspec. */
+const PUSH_VALUE_FLAGS = new Set(["--repo", "-o", "--push-option", "--receive-pack", "--exec"]);
+
+export function parsePushCommand(segment: string): PushCommand {
+  const tokens = commandTokens(segment);
   const at = tokens.indexOf("push");
-  if (at < 0) return [];
+  if (at < 0) return { refspecs: [], deleteAll: false };
   const rest = tokens.slice(at + 1);
   const refspecs: string[] = [];
+  let deleteAll = false;
   let sawRemote = false;
   for (let i = 0; i < rest.length; i++) {
     const tok = rest[i] as string;
     if (tok.startsWith("-")) {
-      if (tok === "--all" || tok === "--mirror" || tok === "--tags") return undefined;
-      // Options that take a value: skip the value too, or it reads as a ref.
-      if (tok === "--repo" || tok === "-o" || tok === "--push-option" || tok === "--receive-pack" || tok === "--exec") i++;
+      if (tok === "--all" || tok === "--mirror" || tok === "--tags") return { refspecs: undefined, deleteAll };
+      if (tok === "--delete" || tok === "-d") { deleteAll = true; continue; }
+      // Options that take a value: skip the value too, or it reads as a ref —
+      // which is how a push option whose value happened to be `-d` turned into
+      // "everything is a delete, verify nothing" (round-3 quality P2).
+      if (PUSH_VALUE_FLAGS.has(tok)) i++;
       continue;
     }
     if (!sawRemote) { sawRemote = true; continue; }
     refspecs.push(tok);
   }
-  return refspecs;
+  return { refspecs, deleteAll };
 }
 
 /* ------------------------------------------------------------------ *
@@ -299,27 +314,14 @@ export function signingGap(cfg: SigningConfig): string | undefined {
  * `-m`/`--message`/`-F`/`--file` is skipped.
  */
 export function commandTokens(segment: string): string[] {
-  const raw: string[] = [];
-  let current = "";
-  let quote: string | undefined;
-  for (const ch of segment ?? "") {
-    if (quote !== undefined) {
-      if (ch === quote) quote = undefined;
-      else current += ch;
-      continue;
-    }
-    if (ch === "'" || ch === '"') { quote = ch; continue; }
-    if (/\s/.test(ch)) {
-      if (current !== "") { raw.push(current); current = ""; }
-      continue;
-    }
-    current += ch;
-  }
-  if (current !== "") raw.push(current);
-
+  // THE SAME LEXER THE SHIP GATE ALREADY USES (philosophy three): the segment
+  // this function receives was cut by lib/shell-lex.ts (lib/ship-detect.ts), so
+  // a second quote-aware tokenizer here would be a parallel implementation that
+  // eventually disagrees with the one that produced the input.
+  const tokens = lexSegmentTokens(segment ?? "").flat();
   const out: string[] = [];
-  for (let i = 0; i < raw.length; i++) {
-    const tok = raw[i] as string;
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i] as string;
     out.push(tok);
     // Flags whose NEXT token is a message/payload, never a flag. The combined
     // short forms (-am, -sm) end in the message letter.
@@ -357,6 +359,11 @@ export function signOptOut(segment: string): string | undefined {
       if (value !== undefined && /=(false|no|off|0)$/i.test(value)) {
         return "a git config override asks for an UNSIGNED commit";
       }
+    }
+    // The OTHER spelling of the same injection (lib/git-exec.ts lists both):
+    // `GIT_CONFIG_PARAMETERS='commit.gpgsign'='false'`.
+    if (/^GIT_CONFIG_PARAMETERS=.*commit\.gpgsign['"]?\s*=\s*['"]?(false|no|off|0)\b/i.test(tok)) {
+      return "a git config override asks for an UNSIGNED commit";
     }
   }
   return undefined;
@@ -521,9 +528,11 @@ export function flagValue(segment: string, flag: string): string | undefined {
  * A branch name resolved WITH THE REMOTE FIRST, or `undefined`.
  *
  * The order matters (round-2 reviewer P2): `gh pr create --base main` is about
- * the REMOTE main. Resolving the local one first drags commits the remote
- * already has into the range when the local branch is ahead, and hides the ones
- * the PR really adds when it is behind.
+ * the REMOTE main, and resolving the local one first is wrong in BOTH
+ * directions — when the local base is BEHIND the remote, `local..head` drags
+ * commits the remote already has into the range (they would be refused as if
+ * the PR republished history), and when it is AHEAD it HIDES the commits the PR
+ * really adds (a fail-open).
  */
 function resolveRemoteRef(root: string, name: string): string | undefined {
   const candidates = name.includes("/") ? [name] : ["origin/" + name, name];
@@ -540,16 +549,25 @@ function resolveRemoteRef(root: string, name: string): string | undefined {
  * branch — the conservative reading of "ship everything".
  */
 export function pushTargetsForSegment(root: string, segment: string): VerifyTarget[] {
-  const refspecs = pushRefspecs(segment);
+  const { refspecs, deleteAll } = parsePushCommand(segment);
   if (refspecs === undefined) return [{ kind: "unpushed", sha: "--branches" }];
-  // `--delete` / `-d` publishes nothing, whatever the refspec list says.
-  if (commandTokens(segment).some((tok) => tok === "--delete" || tok === "-d")) return [];
+  // A branch REMOVAL publishes no commit, whatever the refspec list says.
+  if (deleteAll) return [];
   // No refspec at all ⇒ push the current branch.
   if (refspecs.length === 0) return [targetForRef(root, "HEAD")].filter(isTarget);
-  // Every refspec was a DELETE (`:gone`): a branch removal publishes no commit.
-  const sources = refspecs.map(refspecSource).filter((src): src is string => src !== undefined);
-  if (sources.length === 0) return [];
-  return sources.map((src) => targetForRef(root, src)).filter(isTarget);
+  const targets: VerifyTarget[] = [];
+  for (const refspec of refspecs) {
+    const src = refspecSource(refspec);
+    // `:gone` — a DELETE of a branch that only lives on the server.
+    if (src === undefined) continue;
+    // A GLOB refspec (`refs/heads/*:refs/heads/*`) publishes whatever matches;
+    // no single rev describes it, so verify every local branch — the
+    // conservative reading, and never "no targets, nothing to check".
+    if (src.includes("*")) { targets.push({ kind: "unpushed", sha: "--branches" }); continue; }
+    const target = targetForRef(root, src);
+    if (target !== undefined) targets.push(target);
+  }
+  return targets;
 }
 
 function isTarget(target: VerifyTarget | undefined): target is VerifyTarget {

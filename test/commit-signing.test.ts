@@ -31,8 +31,8 @@ import {
   pushRefTarget,
   commandTokens,
   explicitSignFlag,
+  parsePushCommand,
   prTargetsForSegment,
-  pushRefspecs,
   pushTargetsForSegment,
   readSignatures,
   readSigningConfig,
@@ -188,12 +188,24 @@ test("a push publishes only what it adds — never the whole history", () => {
 });
 
 test("a push command's refspecs are read, and --all means 'everything'", () => {
-  assert.deepEqual(pushRefspecs("git push"), []);
-  assert.deepEqual(pushRefspecs("git push origin feat/x"), ["feat/x"]);
-  assert.deepEqual(pushRefspecs("git push -u origin feat/x:feat/x"), ["feat/x:feat/x"]);
-  assert.deepEqual(pushRefspecs("git -C /repo push --force-with-lease origin main"), ["main"]);
-  assert.equal(pushRefspecs("git push --all origin"), undefined);
-  assert.equal(pushRefspecs("git push --mirror origin"), undefined);
+  assert.deepEqual(parsePushCommand("git push"), { refspecs: [], deleteAll: false });
+  assert.deepEqual(parsePushCommand("git push origin feat/x"), { refspecs: ["feat/x"], deleteAll: false });
+  assert.deepEqual(parsePushCommand("git push -u origin feat/x:feat/x"), { refspecs: ["feat/x:feat/x"], deleteAll: false });
+  assert.deepEqual(parsePushCommand("git -C /repo push --force-with-lease origin main"), { refspecs: ["main"], deleteAll: false });
+  assert.deepEqual(parsePushCommand("git push --all origin"), { refspecs: undefined, deleteAll: false });
+  assert.deepEqual(parsePushCommand("git push --mirror origin"), { refspecs: undefined, deleteAll: false });
+  assert.deepEqual(parsePushCommand("git push -d origin gone"), { refspecs: ["gone"], deleteAll: true });
+  // A push OPTION whose value happens to be -d is a value, not a delete flag
+  // (round-3 quality P2: it used to empty the whole target list).
+  assert.deepEqual(parsePushCommand("git push -o -d origin feat/x"), { refspecs: ["feat/x"], deleteAll: false });
+});
+
+test("a GLOB refspec verifies every local branch instead of nothing (round-3 quality P2)", () => {
+  const { dir } = makeRepo();
+  commitFile(dir, "a.txt", "one");
+  assert.deepEqual(pushTargetsForSegment(dir, "git push origin 'refs/heads/*:refs/heads/*'"), [
+    { kind: "unpushed", sha: "--branches" },
+  ]);
 });
 
 test("the log parser keeps a signer principal with spaces intact", () => {

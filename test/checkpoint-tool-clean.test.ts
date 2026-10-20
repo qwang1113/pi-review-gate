@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { registerCheckpointTool, type CheckpointToolDeps } from "../lib/checkpoint-tool.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { DEFAULT_MAX_ROUNDS } from "../lib/constants.ts";
-import { git, neutraliseHostGitConfig } from "./helpers/git.ts";
+import { configureTestSigning, git, neutraliseHostGitConfig } from "./helpers/git.ts";
 
 neutraliseHostGitConfig();
 
@@ -29,7 +29,10 @@ function setup(opts: { own?: string[]; precommit?: "PASS" | "NOT_RUN"; peeks?: b
   // The product's git strips GIT_CONFIG_*: identity and signing live in the repo.
   git(root, ["config", "user.name", "t"]);
   git(root, ["config", "user.email", "t@t"]);
-  git(root, ["config", "commit.gpgsign", "false"]);
+  // The checkpoint SIGNS its commit and verifies it (2026-10-20, user decision),
+  // so the fixture has to be able to sign — a repo pinned to
+  // `commit.gpgsign=false` could never produce the commit this file asserts.
+  configureTestSigning(root);
   writeFileSync(join(root, "a.ts"), "export const a = 1;\n");
   git(root, ["add", "-A"]);
   git(root, ["commit", "-q", "-m", "chore: init"]);

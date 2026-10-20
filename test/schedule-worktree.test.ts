@@ -31,7 +31,7 @@ import {
   type ScheduleWorktreeOwner,
 } from "../lib/schedule-worktree.ts";
 import { gateWorktreeRoot } from "../lib/worktree-root.ts";
-import { git } from "./helpers/git.ts";
+import { configureTestSigning, git } from "./helpers/git.ts";
 
 /** A real repository with one commit, on `main`, and NO host hooks of its own. */
 function gitRepo(): string {
@@ -39,6 +39,10 @@ function gitRepo(): string {
   git(dir, ["init", "-q", "-b", "main"]);
   git(dir, ["config", "user.email", "gate-test@example.invalid"]);
   git(dir, ["config", "user.name", "gate test"]);
+  // A scheduled run's leftovers are committed with -S and then verified
+  // (2026-10-20, user decision): the fixture must be able to sign, like a real
+  // checkout is.
+  configureTestSigning(dir);
   // THE HOST'S HOOKS DO NOT BELONG IN A FIXTURE: this machine installs a global
   // pre-commit hook (the gate's own), and a fixture that inherits it would be
   // testing that hook instead of this module. The one test that WANTS a hook
