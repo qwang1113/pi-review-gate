@@ -147,7 +147,20 @@ export function createLoopGoalHost(
    * that repo's own sidecar confirmation, so a session editing several repos
    * cannot satisfy one repo's goal and then write into another.
    */
-  function loopGoalConfirmed(root: string = cells.primaryRepoRoot, st: GateState = cells.state): boolean {
+  /**
+   * ONE REPO'S STATE — the file the answer comes from, resolved the SAME way
+   * the stage record is (2026-10-20, reviewer P1).
+   *
+   * `root` and the state must agree. Defaulting the state to the PRIMARY's
+   * while `root` named another repo compared that repo's goal FILE against the
+   * primary's approval RECORD — which is always "not approved", so every
+   * per-repo wiring was silently false.
+   */
+  function stateOf(root: string): GateState {
+    return root === cells.primaryRepoRoot ? cells.state : deps.stateForRepo(root);
+  }
+
+  function loopGoalConfirmed(root: string = cells.primaryRepoRoot, st: GateState = stateOf(root)): boolean {
     const goal = readSessionLoopGoal(root);
     if (!goal.present || !st.loopGoal) return false;
     let raw: string;
@@ -208,8 +221,33 @@ export function createLoopGoalHost(
    * second question positively without inventing an approval the user never
    * gave.
    */
-  function goalStageSatisfied(root: string = cells.primaryRepoRoot, st: GateState = cells.state): boolean {
+  function goalStageSatisfied(root: string = cells.primaryRepoRoot, st: GateState = stateOf(root)): boolean {
     return !stageIsOn("goal", root) || loopGoalConfirmed(root, st);
+  }
+
+  /**
+   * THE SESSION-LEVEL ANSWER: is the goal contract satisfied for the work this
+   * round actually did? (2026-10-20, reviewer P1)
+   *
+   * A goal binds to ONE repo, so a session whose work lives in another checkout
+   * — a `git worktree` beside the repo, a sibling repository — had its approval
+   * in that checkout's sidecar and none in the primary's. Asking the primary
+   * told it "no approved goal" while the repo it did touch was approved, which
+   * refused both `declare_done` and every push.
+   *
+   * The rule, in ONE place for every reader (declare_done, the ship gate's
+   * fallback, L2's completion list, the per-turn directive, the strip): every
+   * repo this round CHANGED must satisfy the contract, and a round that changed
+   * nothing falls back to the primary — which is exactly the old behaviour for
+   * a single-repo session.
+   */
+  function goalSatisfiedForWork(): boolean {
+    const targets = [...cells.sessionRepos].filter((root) => {
+      const st = stateOf(root);
+      return st.hasCodeChange || st.hasDocChange;
+    });
+    const scope = targets.length > 0 ? targets : [cells.primaryRepoRoot];
+    return scope.every((root) => goalStageSatisfied(root));
   }
 
   /**
@@ -416,6 +454,7 @@ export function createLoopGoalHost(
     stageIsOn,
     laneVerificationWaived,
     goalStageSatisfied,
+    goalSatisfiedForWork,
     loopGoalDirectiveText,
     loopStageDeps,
     ensureLoopStagesFor,

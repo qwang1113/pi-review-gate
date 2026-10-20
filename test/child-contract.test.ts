@@ -19,7 +19,12 @@ import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 
 neutraliseGateEnv();
 
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { createLoopGoalHost } from "../lib/loop-goal-host.ts";
+import { goalTextHash } from "../lib/loop-goal.ts";
 import { emptyState } from "../lib/gate-state.ts";
 import { childStagesRecord } from "../lib/loop-stages.ts";
 import { ORCHESTRATION_ID_ENV } from "../lib/orchestration-id.ts";
@@ -92,5 +97,66 @@ test("…and a session that is NOT an orchestration child keeps the old reading"
       "a standalone loop session with the goal stage off has no contract at all");
   } finally {
     delete process.env[STATION_CAP_ENV];
+  }
+});
+
+/* ───────────── the goal question is per repo (2026-10-20) ───────────── */
+
+test("a goal approved in ANOTHER checkout satisfies the session — the primary's empty answer is not the answer", () => {
+  // The measured case: work (and the approved goal) live in a `git worktree`
+  // beside the repo; the primary checkout changed nothing and has no goal.
+  const primary = mkdtempSync(join(tmpdir(), "rg-goal-primary-"));
+  const secondary = mkdtempSync(join(tmpdir(), "rg-goal-work-"));
+  try {
+    const text = "# 任务\n意图：把 worktree 里的改动做完";
+    mkdirSync(join(primary, ".pi"), { recursive: true });
+    mkdirSync(join(secondary, ".pi"), { recursive: true });
+    writeFileSync(join(secondary, ".pi", "loop-goal.md"), text);
+
+    const primaryState = emptyState("s", 10);
+    const workState = emptyState("s", 10);
+    workState.hasCodeChange = true;
+    workState.loopGoal = { hash: goalTextHash(text), at: AT, station: "pr" };
+
+    const cells = {
+      state: primaryState,
+      primaryRepoRoot: primary,
+      cwd: primary,
+      sessionInGit: true,
+      repoStateCache: new Map([[secondary, workState]]),
+      sessionRepos: new Set([primary, secondary]),
+    } as unknown as SessionCells;
+    const h = createLoopGoalHost(cells, {
+      stateForRepo: (root) => (root === secondary ? workState : primaryState),
+      persistRepo: () => {},
+      persist: () => {},
+      knownRepoRoots: () => [primary, secondary],
+      isJudgePane: () => false,
+      askMultiChoice: async () => undefined,
+      log: () => {},
+    });
+
+    assert.equal(h.loopGoalConfirmed(primary), false, "the primary never approved a goal");
+    assert.equal(h.loopGoalConfirmed(secondary), true, "…and the checkout that did, did");
+    assert.equal(h.goalStageSatisfied(secondary), true, "the state is resolved FROM the root, not taken from the primary");
+    assert.equal(h.goalSatisfiedForWork(), true,
+      "the session-level answer is about the repos this round CHANGED — the question declare_done and the ship gate ask");
+
+    // Nothing changed anywhere ⇒ the primary's own answer, exactly as before.
+    const idle = { ...workState, hasCodeChange: false, hasDocChange: false };
+    const idleCells = { ...cells, repoStateCache: new Map([[secondary, idle]]) } as unknown as SessionCells;
+    const idleHost = createLoopGoalHost(idleCells, {
+      stateForRepo: (root) => (root === secondary ? idle : primaryState),
+      persistRepo: () => {},
+      persist: () => {},
+      knownRepoRoots: () => [primary, secondary],
+      isJudgePane: () => false,
+      askMultiChoice: async () => undefined,
+      log: () => {},
+    });
+    assert.equal(idleHost.goalSatisfiedForWork(), false, "with no work anywhere the primary's (missing) goal decides");
+  } finally {
+    rmSync(primary, { recursive: true, force: true });
+    rmSync(secondary, { recursive: true, force: true });
   }
 });

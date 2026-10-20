@@ -2055,7 +2055,12 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   assert.match(body, /isEnforcedMode\(state\.taskMode\) && goalSatisfied/,
     "the station is only known once the user approved a goal that carries one — or switched the goal stage off; " +
     "the loop question is isEnforcedMode's, so an UNDECIDED session is judged too (real-session P1, 2026-09-22)");
-  assert.match(body, /goalTargets\.every\(\(root\) => deps\.goalStageSatisfied\(root\)\)/,
+  // …and that answer is per repo under the hood: lib/loop-goal-host.ts's
+  // `goalSatisfiedForWork` (the one implementation every reader shares).
+  const hostSrc = readFileSync(join(ROOT, "lib", "loop-goal-host.ts"), "utf8");
+  assert.match(hostSrc, /function goalSatisfiedForWork\(\): boolean \{/,
+    "the session-level answer is one function, not a per-reader rule");
+  assert.match(hostSrc, /scope\.every\(\(root\) => goalStageSatisfied\(root\)\)/,
     "…asked of the repos that actually changed");
   assert.match(body, /changedFiles\(root\)/, "committed-ness is measured, not asserted by the agent");
   assert.match(body, /st\.shippedKinds\?\.includes\("pr-create"\)/,
@@ -4209,7 +4214,10 @@ test("completion arrives as a channel report consumed by the wait — no process
 test("SECURITY: the goal approval binds to CONTENT, so a later edit drops it", () => {
   // If the check were "a confirmation exists", the agent could approve a
   // one-line goal and then rewrite the file into whatever it wanted to ship.
-  assert.match(SRC, /function loopGoalConfirmed\(root: string = cells\.primaryRepoRoot, st: GateState = cells\.state\)/);
+  // The state must be resolved FROM the root (2026-10-20): defaulting it to the
+  // primary compared another repo's goal FILE against the primary's approval
+  // RECORD, which is always "not approved" — silently.
+  assert.match(SRC, /function loopGoalConfirmed\(root: string = cells\.primaryRepoRoot, st: GateState = stateOf\(root\)\)/);
   assert.match(SRC, /isLoopGoalConfirmed\(goal, st\.loopGoal, raw\)/);
   assert.match(SRC, /return false; \/\/ unreadable/, "an unreadable goal file must fail closed");
 });

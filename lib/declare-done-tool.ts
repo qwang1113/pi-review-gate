@@ -232,17 +232,12 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
       const completionProblems: string[] = [];
       if (!orchestratorMode) {
         completionProblems.push(...deps.copilotProblemsAcrossRepos());
-        // THE REPOS THIS ROUND ACTUALLY CHANGED (2026-10-20) — a goal binds to
-        // a repo, so a session working in another checkout was told "no goal"
-        // about a repo it never touched, while the one it DID touch was
-        // approved.
-        const goalTargets = [...cells.sessionRepos].filter((root) => {
-          const repoState = deps.stateForRepo(root);
-          return repoState.hasCodeChange || repoState.hasDocChange;
-        });
-        const goalSatisfied = goalTargets.length === 0
-          ? deps.goalStageSatisfied()
-          : goalTargets.every((root) => deps.goalStageSatisfied(root));
+        // THE SESSION-LEVEL ANSWER, per repo under the hood (2026-10-20): a goal
+        // binds to a repo, so the question is answered for the repos this round
+        // actually changed — lib/loop-goal-host.ts `goalSatisfiedForWork`, the
+        // ONE implementation every reader (this one, the ship gate, L2, the
+        // per-turn directive, the strip) shares.
+        const goalSatisfied = deps.goalStageSatisfied();
         if (isEnforcedMode(state.taskMode) && !goalSatisfied) {
           completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
         }

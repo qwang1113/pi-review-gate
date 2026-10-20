@@ -466,13 +466,13 @@ export default function reviewGate(pi: ExtensionAPI) {
     log,
   });
   const {
-    loopGoalConfirmed, stageIsOn, laneVerificationWaived, goalStageSatisfied,
+    loopGoalConfirmed, stageIsOn, laneVerificationWaived, goalStageSatisfied, goalSatisfiedForWork,
     ensureLoopStagesFor, deliveryStationFor, loopGoalEditBlockFor, goalTextForReviewers,
   } = loopGoal;
 
   // ---- TUI widgets (display-only; never throw, never block the gate) ----
   const { contractReadout, updateWidget, armUiRefreshTimer, disarmUiRefreshTimer } = createStatusStrip(host, {
-    goalStageSatisfied: () => goalStageSatisfied(),
+    goalStageSatisfied: () => goalSatisfiedForWork(),
     goalStageOn: () => stageIsOn("goal"),
     isJudgePane,
     judgeTaskRound: () => cells.judgeTaskRound,
@@ -810,7 +810,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     lastRunAborted: () => cells.lastRunAborted,
     arbitrationPaused: () => cells.arbitrationPaused,
     updateWidget: (ctx) => updateWidget(ctx),
-    goalStageSatisfied: () => goalStageSatisfied(),
+    goalStageSatisfied: () => goalSatisfiedForWork(),
     copilotProblemsFor: (st) => repos.copilotProblemsFor(st),
     repoLabel,
     projectConfig: () => cells.projectConfig,
@@ -888,7 +888,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     settleFinishedRounds: (ctx) => settleFinishedRounds(ctx),
     runtime: () => ({ handedOff, orchestratorSettled, startRevivalTimer, wakeProgressKey }),
     wakes,
-    goalStageSatisfied: () => goalStageSatisfied(),
+    goalStageSatisfied: () => goalSatisfiedForWork(),
     copilotProblemsAcrossRepos: repos.copilotProblemsAcrossRepos,
     updateWidget: (ctx) => updateWidget(ctx),
     persist,
@@ -999,7 +999,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     isJudgePane,
     judgeCurrentRound: () => judgeCurrentRound(),
     judgeOwnPaths: judgeSelf.judgeOwnPaths,
-    goalStageSatisfied: () => goalStageSatisfied(),
+    goalStageSatisfied: () => goalSatisfiedForWork(),
     stateForRepo,
     persistRepo,
     onEditResult: createEditTracking(cells, { stateForRepo, persist, persistRepo, repoRelative: repos.repoRelative, log }),
@@ -1245,7 +1245,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     repoLabel,
     repoDirFor,
     copilotProblemsAcrossRepos: repos.copilotProblemsAcrossRepos,
-    goalStageSatisfied: () => goalStageSatisfied(),
+    goalStageSatisfied: () => goalSatisfiedForWork(),
     deliveryStationFor,
     orchestrationDoneProblems,
     resetOrchestratorContinuations,
@@ -1520,7 +1520,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     orchestrationDoneProblems,
     loopStagesRecord: () => loopGoal.loopStagesRecord(),
     stageIsOn: (stage) => stageIsOn(stage),
-    goalStageSatisfied: () => goalStageSatisfied(),
+    goalStageSatisfied: () => goalSatisfiedForWork(),
     loopGoalDirectiveText: loopGoal.loopGoalDirectiveText,
     isOrchestrationChild,
     reviewScopeFor,
