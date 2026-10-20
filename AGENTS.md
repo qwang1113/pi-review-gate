@@ -333,6 +333,51 @@ Exception: skip the main update **only** when the user explicitly says not
 to update main; in that case, honestly confirm that local main may be
 behind the remote.
 
+### Commits must be SIGNED (2026-10-20, user decision)
+
+Every commit **this gate produces** carries a valid signature, and every
+commit this session **publishes** is checked for one before it leaves the
+machine. The rule is the user's: "所有通过 pi + 门禁插件产出的内容, git
+commit 都必须签名".
+
+- **The gate's own commits** — the review checkpoint, a scheduled run's
+  output, an orchestration reclaim's leftovers — are made with `-S` and then
+  **verified** (`git log --format=%G?`): the commit is read back, not assumed
+  signed. A signature that cannot be verified blocks the round instead of
+  passing silently (SSH without `gpg.ssh.allowedSignersFile` reports `N`, and
+  a key outside that file reports `U` — both refuse).
+- **The agent's own `git commit`** is refused at L1 when it asks NOT to sign
+  (`--no-gpg-sign`, `-c commit.gpgsign=false`) or when the repo cannot sign at
+  all (`commit.gpgsign` not true, or `gpg.format=ssh` with no
+  `user.signingkey`) — refused BEFORE the commit exists, so the agent learns
+  what to configure instead of discovering a git error halfway through a round.
+- **`git push` / `gh pr create`** are refused while any commit they would ADD
+  has no valid signature. Only the commits being added: a tracked branch is
+  `upstream..local`, a brand-new one is bounded by `--not --remotes` (never by
+  an empty range), and a PR is `base..head` from its own flags. The repo's
+  older unsigned history is explicitly out of scope — rewriting published
+  history is worse than an unsigned commit. **An unreadable history is a
+  refusal, never a clean scan**: `git log` failing (an unsanitized `+branch`
+  exited 128 once) used to read as "nothing unsigned here".
+- **Flags are read as flags.** `-S`, `--no-gpg-sign` and `-c commit.gpgsign=…`
+  are taken from argv only, never from a commit message: a message that
+  mentions `-S` must not look like an explicit signature request, and one that
+  mentions `--no-gpg-sign` must not refuse a legitimate commit.
+- **`hooks/pre-push`** asks the same question for a push from a plain
+  terminal, and it does so **before** the verified-branches fast path — that
+  path exits 0 for a reviewed tree, so a check placed after it would be skipped
+  exactly when it matters.
+
+**The identity is never hard-coded** — the gate reads the repo's own config, so
+the user's `includeIf` layers decide: OneKeyHQ checkouts sign with the work
+identity and work GPG key, everything else with the personal identity and its
+SSH signing key. The gate's job is to refuse what cannot be signed and to
+verify what was; it never picks the user's identity.
+
+One implementation, two runtimes: `lib/commit-signing.ts` holds the decisions
+(pure, unit-tested) and `scripts/commit-signing.cjs` mirrors them for the
+hooks, with `test/commit-signing-parity.test.ts` pinning the two together.
+
 ### Commit messages: Conventional Commits + English
 
 - Format: `<type>(<scope>): <subject>` (scope optional). Full spec:

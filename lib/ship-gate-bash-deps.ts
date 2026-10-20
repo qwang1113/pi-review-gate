@@ -5,6 +5,7 @@
  * the extension supplies them through lib/ship-gate-hook.ts's `ShipGateHookDeps`.
  */
 
+import type { SignatureScan } from "./commit-signing.ts";
 import type { GateState } from "./gate-state.ts";
 import type { DeliveryStation } from "./delivery-station.ts";
 import type { ArbitrableAction, BypassToken, TokenBindings } from "./arbitration.ts";
@@ -106,6 +107,26 @@ export interface ShipGateBashDeps {
    */
   deliveryStation(root: string): DeliveryStation | undefined;
 
+  /**
+   * Why this repo cannot produce a SIGNED commit, or `undefined` when it can
+   * (lib/commit-signing.ts `signingGap`).
+   *
+   * The identity is never the gate's business: this reads whatever `git config`
+   * resolves for that repo, so the user's own `includeIf` layers choose the
+   * work identity for OneKeyHQ checkouts and the personal one everywhere else.
+   */
+  signingGap(root: string): string | undefined;
+  /**
+   * The commits a `push` / `pr-create` segment would publish that carry no
+   * valid signature, plus whether the scan could run at all
+   * (lib/commit-signing.ts `signatureScanForShip`).
+   *
+   * Only the commits being ADDED are asked about — a repo's older unsigned
+   * history was explicitly put out of scope by the user's decision (rewriting
+   * published history is worse than the unsigned commit). The `error` half is
+   * not optional decoration: an unreadable history refuses, it does not pass.
+   */
+  signatureScanForShip(root: string, segment: string, kind: "push" | "pr-create"): SignatureScan;
   /** "your READY is on another repo" — the cross-repo hint for a block. */
   crossRepoVerdictHint(blockedRoots: string[]): string;
   /** The flash classifier the three LLM guards run on. */

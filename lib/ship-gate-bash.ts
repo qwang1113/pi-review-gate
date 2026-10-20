@@ -27,6 +27,7 @@
  * Both orderings are pinned mechanically in test/extension-structure.test.ts.
  */
 
+import { explicitSignFlag, formatUnsignedCommits, signOptOut } from "./commit-signing.ts";
 import { COMMIT_MSG_FORBIDDEN, requiresFullPrecommit, type ShipCommandKind } from "./constants.ts";
 import {
   detectShipCommands,
@@ -263,9 +264,63 @@ export async function evaluateShipCommand(
   // sidecar-less repo with uncommitted work still fails closed in the per-repo
   // check below — it counts as a change above.) The STATION still applies
   // (N5): an unchanged worktree is not a licence to travel further.
+  // COMMIT SIGNATURES (2026-10-20, user decision) — every commit this session
+  // produces must carry a valid signature, and every commit it PUBLISHES must
+  // still carry one. Three questions, all asked per repo:
+  //
+  //   - an explicit opt-out (`--no-gpg-sign`, `-c commit.gpgsign=false`) is
+  //     refused outright: the user's rule is that these commits are signed;
+  //   - a repo that cannot sign at all is refused BEFORE the commit exists —
+  //     discovering it as a `git commit` failure halfway through a round tells
+  //     the agent nothing about what to do;
+  //   - a push / `gh pr create` is refused while any commit it would add has no
+  //     readable, valid signature.
+  //
+  // It runs ABOVE the "nothing changed" short-circuit for the same reason the
+  // station does: a clean worktree after a READY is exactly when an already
+  // made, unsigned commit gets pushed.
+  const signatureProblems: string[] = [];
+  const signatureLabel = checkRoots.size > 1;
+  for (const root of checkRoots) {
+    for (const s of ships) {
+      const label = signatureLabel ? `[${deps.repoLabel(root)}] ` : "";
+      if (s.kind === "commit") {
+        const optOut = signOptOut(s.segment);
+        if (optOut !== undefined) {
+          signatureProblems.push(label + optOut + " —— 门禁只放行带签名的 commit（去掉该参数，它会用仓库配置的签名 key 提交）。");
+          continue;
+        }
+        // An explicit `-S` / `--gpg-sign` produces a signature even when the
+        // repo's own `commit.gpgsign` is off, so the config gap is not a
+        // refusal for it. Read from the FLAGS, never from the whole segment: a
+        // commit message that happens to contain " -S " must not disable this
+        // check (round-1 reviewer P2).
+        if (explicitSignFlag(s.segment)) continue;
+        const gap = deps.signingGap(root);
+        if (gap !== undefined) {
+          signatureProblems.push(label + gap +
+            " —— 每个 commit 都必须签名：设 `commit.gpgsign=true` 并配好 `user.signingkey`（`gpg.format=ssh` 时还要 `gpg.ssh.allowedSignersFile`），或显式 `git commit -S`。");
+        }
+      } else if (s.kind === "push" || s.kind === "pr-create") {
+        const scan = deps.signatureScanForShip(root, s.segment, s.kind);
+        if (scan.error !== undefined) {
+          // AN UNREADABLE HISTORY IS A REFUSAL, NOT A PASS (round-1 reviewer
+          // P1: an unsanitized refspec made `git log` exit 128, the failure was
+          // read as "nothing unsigned", and a force push went through).
+          signatureProblems.push(label +
+            `无法验证这条命令要发布哪些 commit 的签名（${scan.error}）—— 拒绝放行，先把要推的 commit 单独列出来再推。`);
+        } else if (scan.unsigned.length > 0) {
+          signatureProblems.push(label +
+            `${scan.unsigned.length} 个要发布的 commit 没有有效签名：${formatUnsignedCommits(scan.unsigned)} —— ` +
+            "用 `git rebase --exec 'git commit --amend --no-edit -S' <base>` 重签后再发布。");
+        }
+      }
+    }
+  }
+
   if (!anyChange) {
-    if (stationProblems.length === 0) return undefined;
-    return refuseShip(deps, { command, ships, problems: [], stationProblems, blockedUnreviewed: [] });
+    if (stationProblems.length === 0 && signatureProblems.length === 0) return undefined;
+    return refuseShip(deps, { command, ships, problems: signatureProblems, stationProblems, blockedUnreviewed: [] });
   }
 
   // AI attribution (HARD) + English-language (L5, HARD) checks on commit
@@ -376,7 +431,7 @@ export async function evaluateShipCommand(
   // P-multi: check every repo this command ships FROM (checkRoots was
   // already resolved above, before the short-circuits). Each ship segment's
   // repo is checked with ITS OWN sidecar + fingerprint.
-  const problems: string[] = [];
+  const problems: string[] = [...signatureProblems];
   // Label EVERY problem line once more than one repo is in play. An
   // unlabelled "code review gate is PENDING" from the primary repo is what
   // a real multi-repo session read as being about the repo it had just

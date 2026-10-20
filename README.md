@@ -110,7 +110,10 @@ L2  Auto-continuation     agent_settled → if gates unmet, inject
                           contract: ONE reviewer per round, no exceptions
                           (one reviewer, one commit range, one verdict)
 L3  Git hooks             pre-commit / pre-push / commit-msg verify the gate
-                          sidecar even for commits made outside Pi
+                          sidecar even for commits made outside Pi; pre-push
+                          ALSO refuses to publish a commit that is not signed
+                          (scripts/commit-signing.cjs, before the
+                          verified-branches fast path)
 L4  Output-language gate  before_agent_start → UNCONDITIONALLY inject a
                           strict Simplified-Chinese directive every turn
                           (thinking in Chinese too; protocol English tokens
@@ -1004,6 +1007,16 @@ Per repo, idempotent, chains existing hooks, supports worktrees:
 ```bash
 ~/workspace/pi-review-gate/scripts/install-git-hooks.sh
 ```
+
+**Signatures (2026-10-20, user decision).** Every commit this gate produces is
+signed (`-S`) and then verified; every commit a ship would publish is verified
+too. The identity is whatever the repo's own git config resolves — the user's
+`includeIf` layers pick the work identity for OneKeyHQ checkouts and the
+personal one everywhere else — so nothing about who the user is lives in this
+repo. `hooks/pre-push` runs `scripts/commit-signing.cjs` **before** the
+verified-branches release, because that release exits 0 for a reviewed tree and
+would otherwise skip the check. Only the commits being ADDED are judged: an
+older unsigned commit is not a reason to rewrite published history.
 
 ## The daemon — a resident service, the web panel and the menu bar app (2026-10-01)
 

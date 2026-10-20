@@ -455,6 +455,21 @@ BLOCKED），READY 绑定审核 commit 的 **tree**（内容绑定，squash 重�
 - ship 授权（unmetRequirements）：READY 与 precommit PASS 均绑定
   commit tree；push/PR 时验证 HEAD commit tree 与绑定 tree 一致且自
   基线以来无未审核 commit。
+- **签名（2026-10-20 用户决定，`lib/commit-signing.ts`）**：门禁自建的
+  commit（checkpoint / 定时任务产出 / 编排 reclaim）一律 `-S` 并**读回验签**
+  （`git log --format=%G?` 必须是 `G`；SSH 下 `N`=`allowedSignersFile` 没配、
+  `U`=签名者不在其中，两者都拒绝）；agent 的 `git commit` 在**提交之前**被拦
+  ——显式不签（`--no-gpg-sign` / `-c commit.gpgsign=false`）或这个仓库根本签不了
+  （`commit.gpgsign` 非真，或 `gpg.format=ssh` 却没有 `user.signingkey`）；
+  `git push` / `gh pr create` 只验**本次新增**的 commit（tracked 分支
+  `<upstream>..<local>`、新分支用 `--not --remotes` 定下界、PR 用自身
+  `--base/--head` 的 `base..head`，存量历史不追补、不 rewrite）；**git log 读不出
+  来是拒绝而不是放行**。`-S` / `--no-gpg-sign` 这类开关**只从 argv 读**（commit
+  message 是数据，里面出现 `-S` 不能当作显式签名请求）。身份一律来自
+  仓库自己的 git 配置（用户侧的 `includeIf` 决定 OneKeyHQ 用工作身份、
+  其余用个人身份），门禁只判「签没签、能不能验」。钩子侧同一规则在
+  `scripts/commit-signing.cjs`，由 `hooks/pre-push` **在 verified-branches 快
+  路径之前**调用。
 - **只改 message 不改 tree 的改写**（2026-08-29，`lib/git-rewrite.ts`）：
   `git commit --amend` / `git rebase -i` reword 产出的 commit 与被替换的
   commit **tree 相同**（且 index 无暂存改动——`--amend` 发布的是 index），

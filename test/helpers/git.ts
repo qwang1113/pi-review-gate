@@ -26,6 +26,9 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 /** The two variables that disable the host's global and system git config. */
 export const HERMETIC_GIT_CONFIG_ENV: Readonly<Record<string, string>> = Object.freeze({
@@ -54,6 +57,58 @@ export function hermeticGitEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv
  */
 export function neutraliseHostGitConfig(): void {
   Object.assign(process.env, HERMETIC_GIT_CONFIG_ENV);
+}
+
+
+/**
+ * A REAL SIGNING KEY FOR FIXTURES (2026-10-20, user decision on signature
+ * enforcement).
+ *
+ * The gate now signs the commits it creates and refuses a commit it cannot
+ * sign, so a fixture repository that the gate commits into has to be able to
+ * sign — exactly as a real checkout is. One ed25519 key per test PROCESS
+ * (generated on first use, ~50ms) is enough: the identity is the repo's own
+ * `user.email`, which is what an SSH allowed-signers line matches against.
+ *
+ * Files live OUTSIDE the fixture repo on purpose: several fixtures assert a
+ * clean worktree, and an untracked key file would make them lie.
+ */
+let signingKeyPath: string | undefined;
+
+function signingKey(): string {
+  if (signingKeyPath === undefined) {
+    const dir = mkdtempSync(join(tmpdir(), "rg-test-signing-"));
+    const key = join(dir, "id_ed25519");
+    execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "test-fixture", "-f", key]);
+    process.on("exit", () => {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    });
+    signingKeyPath = key;
+  }
+  return signingKeyPath;
+}
+
+/**
+ * Make this fixture repository sign its commits, with the key above.
+ *
+ * Repo-LOCAL config, so it also reaches git processes the gate spawns: the
+ * product's `gitBaseEnv()` strips GIT_CONFIG_* (the hermetic layer this helper
+ * is called next to), but local config is read whatever the environment says.
+ */
+export function configureTestSigning(repo: string): void {
+  const key = signingKey();
+  const email = git(repo, ["config", "--get", "user.email"]);
+  if (email === "") {
+    throw new Error("configureTestSigning: the fixture must set user.email first — it becomes the allowed-signers principal");
+  }
+  const allowed = join(dirname(key), "allowed_" + email.replace(/[^A-Za-z0-9]/g, "_"));
+  if (!existsSync(allowed)) {
+    writeFileSync(allowed, email + " " + readFileSync(key + ".pub", "utf8").trim() + "\n");
+  }
+  git(repo, ["config", "gpg.format", "ssh"]);
+  git(repo, ["config", "user.signingkey", key + ".pub"]);
+  git(repo, ["config", "gpg.ssh.allowedSignersFile", allowed]);
+  git(repo, ["config", "commit.gpgsign", "true"]);
 }
 
 /**
