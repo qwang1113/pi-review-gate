@@ -956,7 +956,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     headCommitTree,
     hasStagedChanges,
     unreviewedTreesSince,
-    loopGoalConfirmed: () => goalStageSatisfied(),
+    loopGoalConfirmed: (root) => goalStageSatisfied(root),
     precommitLaneRunning: (root) => precommitLaneRunning(root),
     waitForQuietLane: (root) => waitForQuietLane(root),
     runFullLane: (root, ctx) => runFullLane(root, ctx),

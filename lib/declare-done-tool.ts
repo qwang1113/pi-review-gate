@@ -46,7 +46,8 @@ export interface DeclareDoneToolDeps {
   repoLabel(root: string): string;
   repoDirFor(root: string): string;
   copilotProblemsAcrossRepos(): string[];
-  goalStageSatisfied(): boolean;
+  /** Per repo (2026-10-20): the goal binds to the repo the work landed in. */
+  goalStageSatisfied(root?: string): boolean;
   deliveryStationFor(root: string): DeliveryStation | undefined;
   orchestrationDoneProblems(): string[];
   resetOrchestratorContinuations(): void;
@@ -231,7 +232,18 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
       const completionProblems: string[] = [];
       if (!orchestratorMode) {
         completionProblems.push(...deps.copilotProblemsAcrossRepos());
-        if (isEnforcedMode(state.taskMode) && !deps.goalStageSatisfied()) {
+        // THE REPOS THIS ROUND ACTUALLY CHANGED (2026-10-20) — a goal binds to
+        // a repo, so a session working in another checkout was told "no goal"
+        // about a repo it never touched, while the one it DID touch was
+        // approved.
+        const goalTargets = [...cells.sessionRepos].filter((root) => {
+          const repoState = deps.stateForRepo(root);
+          return repoState.hasCodeChange || repoState.hasDocChange;
+        });
+        const goalSatisfied = goalTargets.length === 0
+          ? deps.goalStageSatisfied()
+          : goalTargets.every((root) => deps.goalStageSatisfied(root));
+        if (isEnforcedMode(state.taskMode) && !goalSatisfied) {
           completionProblems.push(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK);
         }
         // DID THIS ROUND ARRIVE AT ITS STATION (2026-09-06)? LOOP MODE ONLY —
@@ -239,7 +251,7 @@ export function registerDeclareDoneTool(host: ToolHost, cells: SessionCells, dep
         // `orchestrationDoneProblems`. Every fact is the gate's OWN; the GitHub
         // question runs ONLY when the free local facts cannot prove arrival.
         // PER REPO, not once for the session (round-1 reviewer P2).
-        if (isEnforcedMode(state.taskMode) && deps.goalStageSatisfied()) {
+        if (isEnforcedMode(state.taskMode) && goalSatisfied) {
           for (const root of cells.sessionRepos) {
             const station = deps.deliveryStationFor(root);
             if (station === undefined) continue; // no contract for that repo

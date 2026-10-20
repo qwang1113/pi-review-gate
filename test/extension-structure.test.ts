@@ -2049,9 +2049,14 @@ test("declare_done asks whether the round ARRIVED at its delivery station", () =
   assert.equal(calls, 1, "exactly one call site — a second reading would be a second contract");
   const body = toolBodyOf("declare_done");
   assert.match(body, /stationArrivalProblems\(/, "…and it is inside declare_done");
-  assert.match(body, /isEnforcedMode\(state\.taskMode\) && deps\.goalStageSatisfied\(\)/,
+  // PER REPO since 2026-10-20: a goal binds to the repo the work landed in, so
+  // the answer is `goalSatisfied`, computed over the repos this round changed
+  // (the primary's own confirmation is the no-work fallback).
+  assert.match(body, /isEnforcedMode\(state\.taskMode\) && goalSatisfied/,
     "the station is only known once the user approved a goal that carries one — or switched the goal stage off; " +
     "the loop question is isEnforcedMode's, so an UNDECIDED session is judged too (real-session P1, 2026-09-22)");
+  assert.match(body, /goalTargets\.every\(\(root\) => deps\.goalStageSatisfied\(root\)\)/,
+    "…asked of the repos that actually changed");
   assert.match(body, /changedFiles\(root\)/, "committed-ness is measured, not asserted by the agent");
   assert.match(body, /st\.shippedKinds\?\.includes\("pr-create"\)/,
     "a `pr` round arrives on a `gh pr create` the GATE watched succeed — not on a claim");

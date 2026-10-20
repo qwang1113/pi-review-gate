@@ -640,8 +640,8 @@ const CANCEL_SRC = libSrc("round-cancel-host.ts");
 test("the goal stage releases the edit gate and the ship block through goalStageSatisfied", () => {
   assert.match(SRC, /goalConfirmed: goalStageSatisfied\(goalRoot, goalSt\)/,
     "the L8 edit gate asks the stage-aware question");
-  assert.match(SRC, /loopGoalConfirmed: \(\) => goalStageSatisfied\(\)/,
-    "the L1 ship gate asks the stage-aware question");
+  assert.match(SRC, /loopGoalConfirmed: \(root\) => goalStageSatisfied\(root\)/,
+    "the L1 ship gate asks the stage-aware question, per repo (2026-10-20)");
   assert.match(SRC, /if \(!deps\.goalStageSatisfied\(\)\) completion\.push\(LOOP_GOAL_UNCONFIRMED_SHIP_BLOCK\)/,
     "the completion/continuation path asks the stage-aware question");
   assert.match(SRC, /if \(!stageIsOn\("goal", root\)\) return isOrchestrationChildEnv\(\) \? stationCapFromEnv\(\) : undefined;/,
