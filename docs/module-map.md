@@ -230,7 +230,7 @@ L1 是扩展里最大的一块，现在住在 `lib/`，扩展只留一行接线
 | --- | --- | --- | --- |
 | **L1** ship gate（硬拦） | 未过门禁前拦下 `git commit` / `git push` / `gh pr create` / `gh pr edit` | `lib/ship-gate-hook.ts`（`evaluateToolCall`），扩展只留一行 `pi.on("tool_call", …)` 接线 | `lib/ship-gate-bash.ts`（ship 臂）、`lib/ship-gate-edit-guard.ts`（edit 臂）、`lib/ship-detect.ts`、`lib/shell-lex.ts`、`lib/constants.ts`、`lib/repo-resolve.ts`、`lib/fingerprint.ts` |
 | **L2** 自动续跑 | 门禁未满足时重新触发一轮；事件链断掉时由存活不变量兜底；所有空闲时的主动唤醒共用一个限流器（2026-09-29） | `lib/l2-continuation.ts` 的 `onAgentSettled`（扩展只留一行 `agent_settled` 接线）+ `lib/session-revival.ts` 驱动的独立定时器 | `lib/gate-state-requirements.ts`（未满足项）、`lib/loop-stall.ts`（断路器，只管事件注入路径）、`lib/session-revival.ts`（兜底唤醒，尊重人的叫停）、`lib/wake-governor.ts`（空闲唤醒的唯一限流：同一事实最多 5 次） |
-| **L3** git 钩子 | 离开 pi 也有效的纵深防御 | `hooks/pre-commit`（薄壳，2026-09-08 起单次 exec）、`hooks/pre-push`、`hooks/commit-msg` | `scripts/pre-commit-check.cjs`（全链单进程：schema/bypass → L6 → divergence+fingerprint → verdict）、`scripts/pre-push-verified.cjs`（2026-09-28：被推 ref 的 tip tree 全部命中主仓库 `.pi/verified-branches.json` 就放行 push，否则交回原检查）、`scripts/compute-fingerprint.cjs`、`scripts/check-staged-divergence.cjs`（钩子不依赖 TypeScript） |
+| **L3** git 钩子 | 离开 pi 也有效的纵深防御 | `hooks/pre-commit`（薄壳，2026-09-08 起单次 exec）、`hooks/pre-push`（**先验签再放行 verified-branches**，2026-10-20）、`hooks/commit-msg` | `scripts/commit-signing.cjs`（被推 commit 的签名，纯 JS，钩子不依赖 TypeScript）、`scripts/pre-commit-check.cjs`（全链单进程：schema/bypass → L6 → divergence+fingerprint → verdict）、`scripts/pre-push-verified.cjs`（2026-09-28：被推 ref 的 tip tree 全部命中主仓库 `.pi/verified-branches.json` 就放行 push，否则交回原检查）、`scripts/compute-fingerprint.cjs`、`scripts/check-staged-divergence.cjs`（钩子不依赖 TypeScript） |
 | **L4** 输出语言 | 每轮无条件注入简体中文指令 | `lib/turn-directive.ts` 的 `onBeforeAgentStart`（扩展只留一行 `before_agent_start` 接线） | `lib/constants.ts` 的 `LANGUAGE_DIRECTIVE` |
 | **L5** commit/PR 英文 | 命令行传的文案由工具层判；编辑器里写的由钩子判 | `lib/ship-gate-bash.ts`（ship 命令上的 commit message / PR 文案）+ 扩展的 checkpoint 路径 + `hooks/commit-msg` | `lib/lang-detect.ts`（唯一实现）、`lib/llm-classify.ts`（只能加拦）、`lib/text-appeal.ts`（申诉） |
 | **L6** 测试标签英文 | 暂存内容里**相对 HEAD 新增或改过的** `it/test/describe` 标签必须英文（非拉丁字母 > 80% 才拦） | `hooks/pre-commit` → `scripts/pre-commit-check.cjs` → 进程内 `scripts/scan-test-labels.cjs`；扩展侧在编辑时预检 | `lib/edit-projection.ts`（投影改后全文，避免只看片段漏判） |
@@ -562,7 +562,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 
 ---
 
-## 五、`lib/` 全量速查表（288 个模块）
+## 五、`lib/` 全量速查表（289 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -811,7 +811,8 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `ship-detect.ts` | 判断一条命令行是否含 ship 操作（git commit/push、gh pr create/edit）；另有 `observedShipKinds`——**证据侧唯一入口**：同一份检测既用来拦（过匹配安全）又被交付站点用来放行（过匹配就是白给一张 PR 通行证），所以证据只认「不含 heredoc（`containsHeredoc`）+ ship 动词就在该段命令头」的命令：读引号感知词法器的 token（引号里的脚本整体是一个 token），只跨过环境变量赋值与重定向，**不做 `normalizedTokens` 的 wrapper 前扫**（`sudo`/`env`/`timeout` 前扫对「拦」是 fail-closed、对「放行」却是 fail-open，实测 `timeout 60 node -e '…'` 会白给一张 pr-create）；代价是 `sudo git push` 不算证据，重跑一次不带 wrapper 即可。检测器本身**绝不**放松（那才是真绕过） |
 | `ship-gate-hook.ts` | **L1 `tool_call` 钩子的入口**：`evaluateToolCall` 分派到两条臂，`ShipGateHookDeps` 汇总两条臂的 deps |
 | `ship-gate-edit-guard.ts` | L1 的 **edit/write 臂**：敏感文件安全底线（`sensitiveEditBlock`，`normal` 模式也生效）、gate-owned 豁免、L8 目标门、orchestrator 写限制、L6 标签检查；检查次序即契约 |
-| `ship-gate-bash.ts` | L1 的 **bash 臂 = ship gate 本体**：tmux backstop、`/gate-bypass`、ship 识别、L5/AI 署名、message-only rewrite 豁免、逐 repo 门禁、**交付站点放行**（既有拦截全过之后再判这条命令是否在站点内，站点由 deps 注入、多 repo 取最严；message-only rewrite 同样豁免；站点拦截不吃仲裁令牌）、一次性仲裁令牌；依赖面（`ShipGateBashDeps` / `BlockedShipRecord`）在 `ship-gate-bash-deps.ts`，文案在 `ship-gate-copy.ts` |
+| `commit-signing.ts` | **签名规则**（2026-10-20 用户决定）：`signatureVerdict` / `signatureAccepted`（只有 `%G?`=`G` 放行 —— `U` 在 SSH 下表示签名者不在 `gpg.ssh.allowedSignersFile` 里）、`parseSignatureLog` / `unsignedCommits`（读回 `git log --format=%G?`）、`signingGap`（这个仓库根本签不了的原因）、`signOptOut`（`--no-gpg-sign` / `-c commit.gpgsign=false`）、`pushRefTarget` / `pushRefspecs` / `unsignedForPushSegment`（只查**本次新增**的 commit）、`assertCommitSigned`（门禁自建 commit 的验签）。纯判定在同一文件里可单测；`scripts/commit-signing.cjs` 是它给钩子的无依赖镜像，`test/commit-signing-parity.test.ts` 钉住两侧一致 |
+| `ship-gate-bash.ts` | L1 的 **bash 臂 = ship gate 本体**：tmux backstop、`/gate-bypass`、ship 识别、L5/AI 署名、**签名**（commit 前：显式不签 / 仓库签不了；push 与 `gh pr create` 前：待推 commit 逐个验签）、message-only rewrite 豁免、逐 repo 门禁、**交付站点放行**（既有拦截全过之后再判这条命令是否在站点内，站点由 deps 注入、多 repo 取最严；message-only rewrite 同样豁免；站点拦截不吃仲裁令牌）、一次性仲裁令牌；依赖面（`ShipGateBashDeps` / `BlockedShipRecord`）在 `ship-gate-bash-deps.ts`，文案在 `ship-gate-copy.ts` |
 | `ship-gate-bash-deps.ts` | L1 bash 臂注入的依赖面 `ShipGateBashDeps` 与 `request_arbitration` 申诉的拦截记录 `BlockedShipRecord` |
 | `ship-gate-copy.ts` | L1 ship 门禁说出口的话（纯文本）：拦截文案（`describeShips` / `buildShipBlockReason`，站点与质量两半各带各的下一步）与唯一一条**只提示不拦截**的探测 `detectHandRolledWaitPolling`（`sleep ≥30s` + 读通道/findings 流 ⇒ 提示改用 `judge_wait`，经 deps 的 `hint` seam 投递、每会话去重） |
 

@@ -7,6 +7,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { assertCommitSigned } from "./commit-signing.ts";
 import { gitText } from "./git-exec.ts";
 import {
   childWorktreeBranch,
@@ -120,7 +121,20 @@ export function createWorktreeSettlement(
     const reclamation: string[] = [];
     for (const step of steps) {
       const result = run(step);
-      if (result.ok) continue;
+      if (result.ok) {
+        // THE LEFTOVERS COMMIT IS THE GATE'S OWN COMMIT (2026-10-20, user
+        // decision): `-S` asked git to sign it, and this reads the result back.
+        // Verification happens HERE, before the reclamation step below removes
+        // the checkout — after that the evidence is gone with the directory.
+        if (step[2] === "commit") {
+          try {
+            assertCommitSigned(worktreePath, gitText(worktreePath, ["rev-parse", "HEAD"]));
+          } catch (error) {
+            return { ok: false, text: `worktree 结算失败（签名）：${(error as Error).message}` };
+          }
+        }
+        continue;
+      }
       const sub = step[2];
       if (sub === "commit" && /nothing to commit|no changes added/i.test(result.output)) continue;
       if (settlement === "merge" && sub === "merge" && looksLikeMergeConflict(result.output)) {

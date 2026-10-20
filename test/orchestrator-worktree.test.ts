@@ -58,13 +58,15 @@ test("reclaim (the default) saves the leftovers onto the branch, then removes ON
   const plan = planSettlement("reclaim", REPO, CHILD, "t13", childWorktreeBranch(CHILD));
   assert.deepEqual(plan.steps.map((a) => [...a]), [
     ["-C", childWorktreePath(REPO, CHILD), "add", "-A"],
-    ["-C", childWorktreePath(REPO, CHILD), "commit", "-m", "chore(child): save leftovers of t13"],
+    // -S: every commit this gate creates is SIGNED (2026-10-20, user decision).
+    ["-C", childWorktreePath(REPO, CHILD), "commit", "-S", "-m", "chore(child): save leftovers of t13"],
     [...reclaimWorktreeArgv(REPO, CHILD)],
   ], "commit first: a failed commit stops the sequence before the removal");
   assert.ok(!plan.steps.some((s) => s.includes("-D")), "the branch is the only copy left — never deleted here");
   // `keep` is gone (2026-09-28, user decision): every settlement reclaims the directory.
   assert.deepEqual([...WORKTREE_SETTLEMENTS], ["reclaim", "merge", "discard"]);
-  assert.match(String(plan.steps[1]![4]), CONVENTIONAL_ASCII);
+  // The message is the LAST argument now that "-S" sits between the flag and it.
+  assert.match(String(plan.steps[1]![5]), CONVENTIONAL_ASCII);
 });
 
 test("merge covers ALL the leftovers, merges without committing, and RECLAIMS the checkout last", () => {
@@ -73,7 +75,7 @@ test("merge covers ALL the leftovers, merges without committing, and RECLAIMS th
   // MODIFIED/DELETED tracked files, so every file the child CREATED would have
   // been left behind while the receipt said its changes were merged.
   assert.deepEqual([...plan.steps[0]!], ["-C", childWorktreePath(REPO, CHILD), "add", "-A"]);
-  assert.deepEqual([...plan.steps[1]!], ["-C", childWorktreePath(REPO, CHILD), "commit", "-m", "chore(child): save leftovers of t13"]);
+  assert.deepEqual([...plan.steps[1]!], ["-C", childWorktreePath(REPO, CHILD), "commit", "-S", "-m", "chore(child): save leftovers of t13"]);
   // `--no-commit --no-ff`, NOT `--squash` (round-5 P1): a squash never writes
   // MERGE_HEAD, so `git merge --abort` cannot undo one — the promised rollback
   // was impossible. This form can be aborted, and the result is still STAGED.

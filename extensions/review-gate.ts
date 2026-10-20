@@ -148,6 +148,7 @@ import {
   unreviewedTreesSince,
   worktreeTree,
 } from "../lib/repo-facts.ts";
+import { signingGapFor, unsignedForPushSegment } from "../lib/commit-signing.ts";
 import type { ToolUpdate } from "../lib/progress-stream.ts";
 import { readJsonIfExists } from "../lib/json-file.ts";
 import { createLlmClassifier, type LlmClassifier } from "../lib/llm-classify.ts";
@@ -956,6 +957,11 @@ export default function reviewGate(pi: ExtensionAPI) {
     headCommitTree,
     hasStagedChanges,
     unreviewedTreesSince,
+    // COMMIT SIGNATURES (2026-10-20, user decision): both answers are read from
+    // the repo's OWN git config (the user's includeIf layers pick the identity),
+    // and both live in lib/commit-signing.ts — this is only the wiring.
+    signingGap: (root) => signingGapFor(root),
+    unsignedCommitsForShip: (root, segment) => unsignedForPushSegment(root, segment),
     loopGoalConfirmed: (root) => goalStageSatisfied(root),
     precommitLaneRunning: (root) => precommitLaneRunning(root),
     waitForQuietLane: (root) => waitForQuietLane(root),

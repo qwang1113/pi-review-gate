@@ -16,6 +16,21 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # every pushed tip is such a tree, this checkout's own gate state (another
 # session's verdict) is not the question. Anything else falls through.
 PUSHED_REFS="$(cat)"
+# SIGNATURES FIRST (2026-10-20, user decision). A push publishes commits, so
+# every commit it adds must carry a valid signature. This has to sit ABOVE the
+# verified-branches fast path below: that path exits 0 for a tree the gate
+# already reviewed, and skipping it would skip signing too.
+SIGN_SCRIPT="${HOOK_DIR}/../scripts/commit-signing.cjs"
+if [[ -f "$SIGN_SCRIPT" ]]; then
+  command -v node >/dev/null 2>&1 || {
+    echo "[review-gate] node not found; cannot verify commit signatures — failing closed." >&2
+    exit 1
+  }
+  printf '%s\n' "$PUSHED_REFS" | node "$SIGN_SCRIPT" || exit 1
+else
+  echo "[review-gate] commit-signature checker MISSING ($SIGN_SCRIPT) — failing closed." >&2
+  exit 1
+fi
 VERIFIED_SCRIPT="${HOOK_DIR}/../scripts/pre-push-verified.cjs"
 if [[ -f "$VERIFIED_SCRIPT" ]] && command -v node >/dev/null 2>&1 &&
    printf '%s\n' "$PUSHED_REFS" | node "$VERIFIED_SCRIPT"; then

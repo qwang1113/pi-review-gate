@@ -118,7 +118,9 @@ export type WorktreeSettlement = (typeof WORKTREE_SETTLEMENTS)[number];
 export function commitLeftoversArgv(worktreePath: string, taskId: string): WorktreeArgv[] {
   return [
     ["-C", worktreePath, "add", "-A"],
-    ["-C", worktreePath, "commit", "-m", `chore(child): save leftovers of ${taskId}`],
+    // `-S`: every commit this gate creates is signed (2026-10-20, user
+    // decision). The host verifies the tip right after the step lands.
+    ["-C", worktreePath, "commit", "-S", "-m", `chore(child): save leftovers of ${taskId}`],
   ];
 }
 

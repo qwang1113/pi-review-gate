@@ -46,6 +46,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import { assertCommitSigned } from "./commit-signing.ts";
 import { gitFailureText, gitOrNull, gitRawOrNull, gitText } from "./git-exec.ts";
 import { GATE_EXCLUDE_DIRS } from "./fingerprint.ts";
 import { ensureGateWorktreeRoot, gateWorktreeRoot } from "./worktree-root.ts";
@@ -344,7 +345,11 @@ function commitLeftovers(path: string, runId: string): string | undefined {
     // gate does not get to route around its own gate. A refusal is not a
     // failure — it is the answer that says "keep the checkout for a human",
     // which is exactly what the caller does with a non-empty return.
-    gitText(path, ["commit", "-m", `chore(schedule): keep the output of ${runId}`]);
+    // SIGNED (2026-10-20, user decision): this commit is produced by the gate
+    // in a launchd-driven run, i.e. with nobody watching, so a signature is
+    // verified here rather than assumed from the repo's config.
+    gitText(path, ["commit", "-S", "-m", `chore(schedule): keep the output of ${runId}`]);
+    assertCommitSigned(path, gitText(path, ["rev-parse", "HEAD"]));
     return undefined;
   } catch (error) {
     return gitFailureText(error);

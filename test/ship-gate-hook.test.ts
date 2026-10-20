@@ -75,6 +75,11 @@ function makeDeps(over: Partial<ShipGateHookDeps> & { taskMode?: () => TaskMode 
     headCommitTree: () => "t",
     hasStagedChanges: () => false,
     unreviewedTreesSince: () => undefined,
+    // Signatures: these fixtures are about the other gates, so the repo can
+    // always sign and nothing it publishes is unsigned. The signature rules
+    // have their own tests (test/commit-signing*.test.ts).
+    signingGap: () => undefined,
+    unsignedCommitsForShip: () => [],
     loopGoalConfirmed: () => true,
     precommitLaneRunning: () => false,
     waitForQuietLane: async () => {},
@@ -802,5 +807,59 @@ test("a station refusal is RECORDED as such, so the appeal route can refuse it f
     assert.equal(records[1]!.stationBlocked, undefined,
       "a pure quality block must stay arbitrable exactly as before");
   })();
+});
+
+// ---------------------------------------------------------------------------
+// COMMIT SIGNATURES (2026-10-20, user decision): every commit this session
+// produces is signed, and nothing unsigned is published. The pure rules and the
+// real git fixtures live in test/commit-signing.test.ts; these four pin the L1
+// wiring — that the gate actually ASKS, at the moment it matters.
+
+test("a repo that cannot sign is refused BEFORE the commit exists", async () => {
+  const { out } = await shipAt("pr", COMMIT_CMD, {
+    signingGap: () => "commit signing is off in this repo (commit.gpgsign=false)",
+  });
+  assert.equal(out?.block, true);
+  assert.match(out!.reason, /commit signing is off/);
+  assert.match(out!.reason, /user\.signingkey/, "the refusal says how to fix it");
+});
+
+test("an explicit --no-gpg-sign is refused, and the way out is spelled", async () => {
+  const { out } = await shipAt("pr", "git commit --no-gpg-sign -m 'feat: x'");
+  assert.equal(out?.block, true);
+  assert.match(out!.reason, /--no-gpg-sign/);
+});
+
+test("an explicit -S signs even when the repo's own config is off", async () => {
+  // The config gap is about the DEFAULT path; asking git for a signature
+  // explicitly is the thing the rule wants, whatever the config says.
+  const { out } = await shipAt("pr", "git commit -S -m 'feat: x'", {
+    signingGap: () => "commit signing is off in this repo",
+  });
+  assert.notEqual(out?.block, true, out?.reason ?? "");
+});
+
+test("a push carrying an unsigned commit is refused, and the commit is named", async () => {
+  const sha = "a".repeat(40);
+  const { out } = await shipAt("pr", PUSH_CMD, {
+    unsignedCommitsForShip: () => [{ sha, verdict: "absent", signer: "", key: "" }],
+  });
+  assert.equal(out?.block, true);
+  assert.match(out!.reason, /aaaaaaaaaaaa/);
+  assert.match(out!.reason, /没有有效签名/);
+});
+
+test("the signature rule holds on a CLEAN worktree too", async () => {
+  // A clean tree after a READY is exactly when an already-made unsigned commit
+  // gets pushed, so the check sits ABOVE the "nothing changed" short-circuit —
+  // like the delivery station does.
+  const clean = emptyState("s1", DEFAULT_MAX_ROUNDS);
+  const { out } = await shipAt(undefined, PUSH_CMD, {
+    enforcementStateFor: () => clean,
+    stateForRepo: () => clean,
+    unsignedCommitsForShip: () => [{ sha: "b".repeat(40), verdict: "untrusted", signer: "x", key: "y" }],
+  });
+  assert.equal(out?.block, true, "an unsigned push is not excused by a clean worktree");
+  assert.match(out!.reason, /bbbbbbbbbbbb/);
 });
 

@@ -11,6 +11,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { firstBaseContaining, isNewInWorktree, readChangeBaseRefs } from "./change-baseline.ts";
 import { pendingCheckpoint } from "./checkpoint-sweep.ts";
+import { assertCommitSigned } from "./commit-signing.ts";
 import { COMMIT_MSG_FORBIDDEN, isSensitiveFile } from "./constants.ts";
 import {
   dependencyJustificationVerdict,
@@ -387,11 +388,18 @@ export function registerCheckpointTool(host: ToolHost, cells: SessionCells, deps
           gitText(root, ["reset", "-q", "--", ...leftOut]);
         }
         // No timeout: the commit runs the repo's own hooks.
-        gitText(root, ["commit", "-m", message], {
+        // SIGNED, ALWAYS (2026-10-20, user decision). `-S` rather than trusting
+        // the repo's own `commit.gpgsign`: this commit is the review unit, and a
+        // checkpoint nobody signed is exactly what the signature rule forbids.
+        // The assertion below is the second half — git reporting a signature is
+        // not the same as it verifying, and an unverifiable one (`%G?` = E, e.g.
+        // SSH without `gpg.ssh.allowedSignersFile`) blocks the round.
+        gitText(root, ["commit", "-S", "-m", message], {
           timeout: 0,
           env: { ...gitBaseEnv(), REVIEW_GATE_BYPASS: "1" },
         });
         const sha = gitText(root, ["rev-parse", "HEAD"]);
+        assertCommitSigned(root, sha);
         // THE COMMITTED FILES, READ FROM THE COMMIT (drill F4): the receipt
         // reports what the commit actually carries, not the worktree.
         const sweptIn = gitRaw(root, ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--root", sha])

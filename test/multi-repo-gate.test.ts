@@ -8,7 +8,7 @@ import {
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { hermeticGitEnv } from "./helpers/git.ts";
+import { configureTestSigning, hermeticGitEnv } from "./helpers/git.ts";
 import { neutraliseGateEnv } from "./helpers/gate-env.ts";
 import { FINGERPRINT_VERSION } from "../lib/fingerprint.ts";
 
@@ -76,6 +76,10 @@ function makeRepo(parent: string, name: string): string {
   git(parent, "init", "-b", "main", name);
   git(root, "config", "user.email", "test@example.com");
   git(root, "config", "user.name", "Gate Test");
+  // The gate SIGNS the commits it creates (2026-10-20, user decision); a clean
+  // fixture repo a command would commit in has to be able to sign, exactly like
+  // a real checkout.
+  configureTestSigning(root);
   writeFileSync(join(root, "a.ts"), "export const a = 1;\n");
   git(root, "add", "a.ts");
   git(root, "commit", "-m", "init");
