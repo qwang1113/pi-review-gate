@@ -171,13 +171,19 @@ export async function doProposeLoopGoal(
   // approval dialog — so this short-circuits ahead of every other step and
   // renders nothing.
   if (!stageOpen(deps.stateFor(deps.primaryRepoRoot()).stages, "goal")) {
+    // WHO threw the switch changes the sentence (2026-10-20): for an
+    // orchestration child the DISPATCHER did, and telling it to "ask the user
+    // to re-tick the box" sends it at a box it would be refused anyway
+    // (`choose_loop_stages` refuses a child).
+    const text = deps.isOrchestrationChild?.() === true
+      ? "review-gate: 编排子会话没有 goal 环节（门禁在派发时就关掉了）—— 不协商 loop goal、" +
+        "不跑 goal 审计、也不弹批准框。\n你的合同是任务书：门禁写进 `.pi/tasks/`，agent 不可编辑，" +
+        "直接照它开工即可。"
+      : "review-gate: goal 环节已关闭（用户设定的环节开关）—— 本轮不协商 loop goal，" +
+        "不跑 goal 审计，也不弹批准框。\n直接开工即可：编辑与 ship 不会被「无已批准 goal」拦住。" +
+        "要恢复 goal 环节，让用户重开开关（再调一次 `choose_loop_stages`）。";
     return {
-      content: [{
-        type: "text",
-        text: "review-gate: goal 环节已关闭（用户设定的环节开关）—— 本轮不协商 loop goal，" +
-          "不跑 goal 审计，也不弹批准框。\n直接开工即可：编辑与 ship 不会被「无已批准 goal」拦住。" +
-          "要恢复 goal 环节，让用户重开开关（再调一次 `choose_loop_stages`）。",
-      }],
+      content: [{ type: "text", text }],
       details: { approved: false, goalStageOff: true },
     };
   }

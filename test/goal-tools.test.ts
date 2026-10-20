@@ -474,6 +474,18 @@ test("round 4: an ORCHESTRATION CHILD needs no restatement and no audit — stra
   assert.equal(f.st.loopGoal?.station, "commit", "no restatement to carry a station: the plan's cap is the default");
 });
 
+test("a CHILD's propose_loop_goal refusal points at the task book, not at a checkbox it cannot use (2026-10-20)", async () => {
+  const f = fake();
+  f.st.stages = { stages: { goal: false, review: true, quality: true, acceptance: true, precommit: true }, at: "2026-10-20T00:00:00.000Z" };
+  f.deps.isOrchestrationChild = () => true;
+  const out = await doProposeLoopGoal(f.deps, { goal: GOAL }, uiCtx(f), undefined);
+  assert.equal(out.details?.goalStageOff, true);
+  const text = out.content[0]!.text;
+  assert.match(text, /任务书/);
+  assert.doesNotMatch(text, /choose_loop_stages/, "a child may not open that box");
+  assert.equal(f.auditRuns, 0);
+});
+
 test("round 4: a STANDALONE loop session is unchanged — no restatement is refused, and the audit still runs", async () => {
   const refused = fake();
   refused.st.taskMode = "loop";

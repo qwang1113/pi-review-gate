@@ -109,6 +109,19 @@ export interface PlanTask {
   note?: string;
 }
 
+/**
+ * The shape a plan's acceptance checklist is written in — quoted by the refusal
+ * a manager reads when `submit` finds none (2026-10-20), so the fix is a copy
+ * rather than a guess.
+ */
+export const ACCEPTANCE_PLAN_SKELETON = [
+  "## 真实验收方案骨架（照抄这个骨架填即可）",
+  "- 正向真实调用：<起什么、调什么、期望返回什么>",
+  "- 反向验证：<改完后要再确认哪些原本正确的行为没被破坏>",
+  "- 环境前提：<要真实跑起来需要什么>",
+  "确实没有可真实验收的东西就写「本轮无真实验收（理由）」。",
+].join("\n");
+
 /** A question only the human can settle (constraint 11 / constraint 14). */
 export interface PlanDecision {
   id: string;
@@ -315,11 +328,13 @@ export function parsePlan(raw: unknown, now: string = new Date().toISOString(), 
     }
 
     // THE PER-TASK STAGE SWITCH IS GONE (2026-10-20, user decision): one plan
-    // runs ONE acceptance round, owned by its last task. A plan that still
-    // carries the field is REFUSED rather than silently ignored — an ignored
-    // switch would approve a plan whose text says one thing and whose behaviour
-    // is another.
-    if (t.stages !== undefined) {
+    // runs ONE acceptance round, owned by its last task. A plan being WRITTEN
+    // or SUBMITTED with the field is REFUSED rather than silently ignored — an
+    // ignored switch would approve a plan whose text says one thing and whose
+    // behaviour is another. The READ path stays lenient for the same reason
+    // `repo` does: a plan file written before the field was removed must still
+    // load, or a running orchestration is stranded on a payload nobody can edit.
+    if (strictRepo && t.stages !== undefined) {
       problems.push(
         `${label}.stages 已删除 —— 验收只由 plan 的最后一个任务统一做（2026-10-20）。` +
         "把这一项去掉：实现任务与收尾任务不必再写 stages，最后一个任务请写成独立验收任务。",
@@ -471,8 +486,11 @@ export function canonicalPlanText(plan: OrchestratorPlan): string {
     // signed; the order they happen to be written in grants nothing.
     allowMultiplePrs: [...plan.allowMultiplePrs].sort(),
     // The checklist the acceptance judge is held to: approved content, so it
-    // is hashed and any change asks the user again.
-    acceptancePlan: plan.acceptancePlan,
+    // is hashed and any change asks the user again. ONLY WHEN PRESENT — a plan
+    // file written before the field existed parses to "", and hashing that as
+    // a new term would move the hash of every running orchestration and make
+    // its approval look forged (quality round P2, 2026-10-20).
+    ...(plan.acceptancePlan ? { acceptancePlan: plan.acceptancePlan } : {}),
     tasks: plan.tasks.map((t) => ({
       id: t.id,
       title: t.title,

@@ -683,6 +683,17 @@ test("submit runs the audit FIRST, and a failed audit opens no dialog at all", a
   assert.equal(world.runtime().approvedPlanHash, undefined, "nothing was approved");
 });
 
+test("submit refuses a plan with no acceptance checklist — before any audit or dialog (2026-10-20)", async () => {
+  const world = makeFakeWorld({ plan: { ...twoTaskPlan(), acceptancePlan: "" } });
+  const reply = await world.call("orchestrator_plan", { action: "submit" });
+  assert.equal(reply.isError, true);
+  assert.match(replyText(reply), /真实验收方案/);
+  assert.match(replyText(reply), /正向真实调用/, "the refusal carries the shape to copy");
+  assert.equal(world.planAudits(), 0, "no minutes-long audit is spent on a plan that cannot be approved");
+  assert.equal(world.confirmAnswers.length, 0, "and no dialog is shown");
+  assert.equal(world.runtime().approvedPlanHash, undefined);
+});
+
 test("a passing audit is followed by the dialog, and approval records the snapshot", async () => {
   const world = makeFakeWorld({ plan: twoTaskPlan() });
   world.confirmAnswers.push(true);

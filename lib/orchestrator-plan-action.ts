@@ -17,6 +17,7 @@ import {
   buildPlanTranscriptMessage,
 } from "./orchestrator-plan-messages.ts";
 import {
+  ACCEPTANCE_PLAN_SKELETON,
   formatPlanSummary,
   parsePlan,
   planHash,
@@ -400,6 +401,20 @@ export async function handlePlanAction(
     // No dialog is rendered — same shape as a failed audit.
     if (!restatementConfirmed(deps.restatement())) {
       return fail(buildRestatementMissingRefusal("orchestrator_plan"), { approved: false, restated: false });
+    }
+
+    // THE ACCEPTANCE CHECKLIST MUST EXIST BEFORE THE USER IS ASKED (2026-10-20).
+    // The READ path stays lenient so an old plan file still loads; this is the
+    // gate that keeps "a plan the user approved has a checklist" true, and it
+    // costs no dialog: a plan without one has nothing for its last task's
+    // acceptance round to verify.
+    if (plan.acceptancePlan.trim() === "") {
+      return fail(
+        "review-gate: plan 还缺「真实验收方案」（`acceptancePlan`）—— plan 的最后一个任务是统一验收任务，" +
+        "验收轮就照这段清单执行。用 `orchestrator_plan({action:\"write\"})` 补上再 submit。\n\n" +
+        ACCEPTANCE_PLAN_SKELETON,
+        { approved: false },
+      );
     }
 
     // THE AUDIT RUNS INSIDE SUBMIT, and it runs FIRST (user requirement,

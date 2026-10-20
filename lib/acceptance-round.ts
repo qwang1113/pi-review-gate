@@ -97,6 +97,33 @@ export function acceptanceDelegates(env: Readonly<Record<string, string | undefi
   return at < 0 ? [] : raw.slice(at + 1).split(",").map((id) => id.trim()).filter(Boolean);
 }
 
+/**
+ * WHAT A DISPATCHED PLAN'S CHECKLIST MEANS FOR THE ROUND (2026-10-20).
+ *
+ * An orchestration child has no goal, so its checklist is the plan's own
+ * `acceptancePlan` — plain prose with no 「真实验收方案」 heading to parse. This
+ * is the ONE reading of it, and it answers with the PLAN or with the problem,
+ * never with a silent nothing: an empty checklist means the plan shipped
+ * without the criteria the round is supposed to verify, which the manager has
+ * to fix rather than the round being skipped (reviewer P1, 2026-10-20).
+ *
+ * `undefined` = this session was not dispatched from a plan (standalone loop
+ * session): the goal parsers decide instead.
+ */
+export function dispatchedChecklist(
+  ctx: { acceptancePlan: string } | undefined,
+): { plan?: string; problem?: string } | undefined {
+  if (ctx === undefined) return undefined;
+  const text = ctx.acceptancePlan.trim();
+  if (text === "") {
+    return {
+      problem: "统一验收清单是空的（plan 的 `acceptancePlan` 没写）—— 验收轮没有可执行的依据，" +
+        "门禁不会静默跳过它。由项目经理补上 plan 的「真实验收方案」段并重新批准后再 declare_done。",
+    };
+  }
+  return { plan: ctx.acceptancePlan };
+}
+
 /** The slice of a plan the acceptance switch reads: the tasks, in plan order. */
 export interface AcceptanceTaskShape {
   id: string;
@@ -634,6 +661,13 @@ export interface AcceptanceTaskInput {
   repoRoot: string;
   /** The FULL approved goal text (the acceptance plan is extracted from it). */
   goalText: string;
+  /**
+   * The checklist, when the caller already HAS it: a dispatched orchestration
+   * plan carries it as plain prose, so there is no section to parse — running
+   * the parser over it answered undefined and skipped the plan's one round
+   * (reviewer P1, 2026-10-20).
+   */
+  planText?: string;
   /** The immutable range this round's content lives in (`baseline..HEAD`). */
   range?: string;
   /** The files the round changed, when the gate knows them. */
@@ -655,7 +689,7 @@ export interface AcceptanceTaskInput {
  * because this judge verifies by RUNNING, and "what to run" lives in the goal.
  */
 export function buildAcceptanceTask(input: AcceptanceTaskInput): string {
-  const plan = extractAcceptancePlan(input.goalText);
+  const plan = input.planText !== undefined ? input.planText : extractAcceptancePlan(input.goalText);
   const range = input.range?.trim();
   const files = (input.files ?? []).filter((f) => f.trim() !== "");
   const since = input.sinceAccepted;

@@ -94,7 +94,7 @@ export function isGateIntegrityPath(filePath: string): boolean {
     // (2026-10-20). Written by fs calls in lib/orchestrator-wiring.ts, never by
     // a tool, so a human can still edit one by hand.
     /(^|\/)\.pi\/tasks\//i.test(filePath) ||
-    /(^|\/)\.pi\/(review-gate-state\.json(\.blocked)?|precommit-cache\.json|verified-branches\.json)$/i.test(filePath);
+    /(^|\/)\.pi\/(review-gate-state(\.[A-Za-z0-9._-]+)?\.json(\.blocked)?|precommit-cache\.json|verified-branches\.json)$/i.test(filePath);
 }
 
 /** The live grant for `absPath`, or undefined when there is none / it expired. */

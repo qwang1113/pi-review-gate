@@ -36,12 +36,9 @@ export const CHILD_TASK_BOOK_DIRECTIVE =
   "对它理解有偏差就用 `orchestrator_instruct` 之外的常规方式问项目经理（`ask_user` 会把问题经通道交给他）。";
 
 /** The escalated form, once too many turns went by without a goal. */
-export function buildChildTaskBookDirective(opts: { taskFile?: string }): string {
-  return (
-    CHILD_TASK_BOOK_DIRECTIVE +
-    (opts.taskFile === undefined ? "" : `\n你的任务书文件：${opts.taskFile}`) +
-    "\n现在就可以开始：读代码、改代码、`judge_submit` 送审，全部按任务书来。"
-  );
+export function buildChildTaskBookDirective(): string {
+  return CHILD_TASK_BOOK_DIRECTIVE +
+    "\n现在就可以开始：读代码、改代码、`judge_submit` 送审，全部按任务书来。";
 }
 
 /** Appended to a read-only result: the child owes no goal, and says so once. */

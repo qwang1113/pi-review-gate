@@ -225,7 +225,7 @@ export function createLoopGoalHost(
     // A child has NO goal stage at all (2026-10-20): its contract is the task
     // book, so neither the missing-goal text nor the stage-off text (both send
     // a session to negotiate or to re-tick a box) is right for it.
-    if (isOrchestrationChildEnv()) return buildChildTaskBookDirective({});
+    if (isOrchestrationChildEnv()) return buildChildTaskBookDirective();
     if (!stageIsOn("goal")) return buildGoalStageOffDirective();
     const confirmed = goalStageSatisfied();
     return buildLoopGoalDirective(readSessionLoopGoal(cells.primaryRepoRoot), confirmed);

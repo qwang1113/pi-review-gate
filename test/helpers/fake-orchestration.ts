@@ -40,6 +40,8 @@ import { registerOrchestratorSessionTools } from "../../lib/orchestrator-session
 import type { OrchestratorDeps, ToolHost, ToolReply } from "../../lib/orchestrator-deps.ts";
 import { parsePlan, planHash, type OrchestratorPlan } from "../../lib/orchestrator-plan.ts";
 import { beginApprovalLineage, snapshotApprovedPlan } from "../../lib/orchestrator-plan-approval.ts";
+import { deliveryTaskId } from "../../lib/repo-pr-policy.ts";
+import { childStagesRecord } from "../../lib/loop-stages.ts";
 import { restatementHash, type RestatementRecord } from "../../lib/restatement.ts";
 import type { DeliveryStation } from "../../lib/delivery-station.ts";
 
@@ -503,9 +505,12 @@ export function makeFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
       // back exactly what the child's gate would see.
       const path = `${input.repo}/.pi/review-gate-state.${input.variant}.json`;
       scratch.set(path, JSON.stringify({
-        stages: { goal: false, review: true, quality: true,
-          acceptance: input.plan.tasks.length > 0 && input.taskId === input.plan.tasks[input.plan.tasks.length - 1]!.id,
-          precommit: true },
+        // The real record carries the child's OWN session id (its restore path
+        // adopts a sidecar only on an exact match), so the fake does too.
+        sessionId: `rg-child-${input.variant}`,
+        // Same rule and same constructor as production: the plan's LAST task
+        // accepts, and every other switch is the dispatcher's default.
+        stages: childStagesRecord({ accepts: input.taskId === deliveryTaskId(input.plan), at: input.at }).stages,
         childContext: {
           planIntent: input.plan.intent,
           acceptancePlan: input.plan.acceptancePlan,
@@ -894,9 +899,10 @@ function completePlanPayload(name: string, params: Record<string, unknown>): Rec
   const filled = {
     ...payload,
     // A fixture built by `parsePlan` off the WRITE path carries "" (the read
-    // path is lenient); the write path requires a checklist, so fill it only
-    // when it is missing or empty — a test that means to send a broken one
-    // still can.
+    // path is lenient), so the fake supplies the default checklist the way it
+    // supplies a repo and a clock. NOTE: this also fills an EMPTY string, so a
+    // test that wants the refusal must call `parsePlan` / `handlePlanAction`
+    // directly rather than going through the fake's tool dispatch.
     acceptancePlan: typeof given === "string" && given.trim() !== "" ? given : TEST_ACCEPTANCE_PLAN,
   };
   return { ...params, plan: filled };

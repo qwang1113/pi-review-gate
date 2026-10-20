@@ -17,6 +17,7 @@ import {
   acceptanceGateOpen,
   acceptanceProblems,
   buildAcceptanceTask,
+  dispatchedChecklist,
   extractAcceptancePlan,
   parseNoAcceptanceDeclaration,
   type AcceptanceDecision,
@@ -130,6 +131,8 @@ export function createAcceptanceHost(
     root: string,
     fingerprint: string,
     goalText: string,
+    /** The checklist, when it arrived ALREADY extracted (a dispatched plan). */
+    planText?: string,
     sinceAccepted?: { head: string; files: readonly string[] },
   ): Promise<{ ok: true; judgeId: string } | { ok: false; error: string }> {
     const head = gitOrNull(root, ["rev-parse", "HEAD"])?.trim() || undefined;
@@ -140,6 +143,7 @@ export function createAcceptanceHost(
     const task = `${buildAcceptanceTask({
       repoRoot: root,
       goalText,
+      ...(planText === undefined ? {} : { planText }),
       ...(target === undefined
         ? {}
         : { range: `${target.baseline.slice(0, 12)}..${target.head.slice(0, 12)}` }),
@@ -288,9 +292,22 @@ export function createAcceptanceHost(
     // an unapproved draft or a leftover `.pi/loop-goal.md` could exempt this
     // round; read the other way, the same file could hand the judge a checklist
     // that was never approved for this round. See `acceptanceGoalText`.
+    // THE CHILD'S CHECKLIST ARRIVES ALREADY EXTRACTED (reviewer P1, 2026-10-20).
+    // A dispatched plan carries the checklist as plain prose — there is no
+    // 「真实验收方案」 heading to parse, because the section IS the plan's own
+    // field — so running `extractAcceptancePlan` over it answered undefined and
+    // the plan's ONE unified acceptance round was silently SKIPPED. An empty
+    // checklist is not a skip either: it is a plan defect the manager has to
+    // fix, so it blocks (below) instead of releasing the round.
+    const dispatched = st.childContext;
+    const checklist = dispatchedChecklist(dispatched);
     const goalText = acceptanceGoalText(root, st);
-    const declared = goalText === undefined ? undefined : parseNoAcceptanceDeclaration(goalText);
-    const plan = goalText === undefined ? undefined : extractAcceptancePlan(goalText);
+    const declared = dispatched !== undefined || goalText === undefined
+      ? undefined
+      : parseNoAcceptanceDeclaration(goalText);
+    const plan = checklist !== undefined
+      ? checklist.plan
+      : (goalText === undefined ? undefined : extractAcceptancePlan(goalText));
     const fp = computeFingerprint(root);
     const fingerprint = fp.unavailable ? "" : fp.digest;
     // THE SCOPE: since the last accepted HEAD, else since the branch base.
@@ -311,11 +328,18 @@ export function createAcceptanceHost(
       // round P2, 2026-09-22): a judge told to work a checklist it does not
       // have can only answer BLOCKED, and no action of the agent could resolve
       // that. The module's reason names both ways out.
-      ...(plan === undefined ? { hasPlan: false } : {}),
+      //
+      // FOR A DISPATCHED CHILD AN EMPTY CHECKLIST IS A BLOCK, NOT A SKIP
+      // (reviewer P1, 2026-10-20): the plan shipped without one, and skipping
+      // would let the plan's one acceptance round evaporate silently.
+      ...(plan === undefined && dispatched === undefined ? { hasPlan: false } : {}),
       fingerprint,
       ...(st.acceptance === undefined ? {} : { record: st.acceptance }),
       roundAlive: acceptanceRoundAlive(root),
     });
+    if (checklist?.problem !== undefined) {
+      return { problems: [label + checklist.problem], armed: false };
+    }
     if (decision.action === "pass") return undefined;
     if (decision.action === "skip") {
       // RECORDED, never silent — the same rule the quality round's SKIP
@@ -379,17 +403,17 @@ export function createAcceptanceHost(
     // instead (see `acceptanceDecision`'s no-fingerprint rule, lib/acceptance-round.ts),
     // so this call is only reachable with one. A second judgement here would be
     // the drift that rule exists to prevent.
-    const dispatched = await dispatchAcceptanceRound(
-      ctx, root, fingerprint, goalText ?? "",
+    const round = await dispatchAcceptanceRound(
+      ctx, root, fingerprint, goalText ?? "", plan,
       acceptedHead !== undefined && scopeFiles !== undefined ? { head: acceptedHead, files: scopeFiles } : undefined,
     );
-    if (!dispatched.ok) {
+    if (!round.ok) {
       return {
-        problems: [`${label}验收轮派不出去（${dispatched.error}）—— 门禁不会静默跳过它；修好之后再 declare_done。`],
+        problems: [`${label}验收轮派不出去（${round.error}）—— 门禁不会静默跳过它；修好之后再 declare_done。`],
         armed: false,
       };
     }
-    return { problems: [], armed: true, judgeId: dispatched.judgeId };
+    return { problems: [], armed: true, judgeId: round.judgeId };
   }
 
   return { armAcceptanceRound };

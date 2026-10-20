@@ -443,9 +443,12 @@ test("a spawn writes the child's OWN gate record: goal off, acceptance by positi
   const raw = world.scratch.get(path);
   assert.ok(raw, `the dispatcher writes the child's sidecar (looked for ${path})`);
   const record = JSON.parse(raw!) as {
+    sessionId: string;
     stages: Record<string, boolean>;
     childContext: { planIntent: string; acceptancePlan: string; taskBrief: string };
   };
+  assert.equal(record.sessionId, `rg-child-${childId}`,
+    "the record belongs to the child's OWN session id — a null there is reset on its first boot");
   assert.deepEqual(record.stages, { goal: false, review: true, quality: true, acceptance: false, precommit: true },
     "goal off for every child; acceptance off for everyone but the plan's LAST task");
   assert.equal(record.childContext.planIntent, "子会话的合同是任务书");

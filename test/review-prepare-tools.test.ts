@@ -104,7 +104,10 @@ function fake(overrides: Partial<Fake> = {}): Fake {
         state.capturedGoal = undefined;
         return undefined;
       }
-      state.capturedGoal = state.st.childContext?.taskBrief ?? state.goal.text;
+      // Same shape the real host produces for a child: intent + task book.
+      state.capturedGoal = state.st.childContext === undefined
+        ? state.goal.text
+        : `## 本轮所属 plan 的意图\n${state.st.childContext.planIntent}\n\n## 本任务书（门禁派发时写入，agent 不可编辑）\n${state.st.childContext.taskBrief}`;
       return { text: state.capturedGoal, truncated: state.goal.truncated };
     },
     loopGoalPath: (r) => join(r, ".pi", "loop-goal.md"),
@@ -234,6 +237,9 @@ test("an orchestration child is judged against its TASK BOOK, with no goal on re
   f.goal = { confirmed: false, text: "", truncated: false };
   const reply = await call(f, { task: "改分页" });
   assert.equal(reply.isError, undefined, reply.content[0]?.text ?? "");
+  assert.match(f.capturedGoal ?? "", /本轮所属 plan 的意图/, "the plan's intent frames the round");
+  assert.match(f.capturedGoal ?? "", /把这轮编排的目标做完/);
+  assert.match(f.capturedGoal ?? "", /本任务书/);
   assert.match(f.capturedGoal ?? "", /把分页做出来/, "the task book is what the reviewer judges against");
   assert.match(f.capturedGoal ?? "", /lib\/pagination\.ts/);
 });

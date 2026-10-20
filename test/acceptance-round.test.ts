@@ -35,6 +35,7 @@ import {
   acceptanceProblems,
   acceptanceStatusLine,
   buildAcceptanceTask,
+  dispatchedChecklist,
   extractAcceptancePlan,
   parseNoAcceptanceDeclaration,
   sanitizeAcceptanceRecord,
@@ -383,6 +384,28 @@ test("extractAcceptancePlan takes the section verbatim and stops at the next hea
 });
 
 /* ──────────────────────────── the dispatched task ────────────────────────── */
+
+test("a dispatched checklist: the plan's prose is the plan, and an EMPTY one is a problem, not a skip", () => {
+  assert.deepEqual(dispatchedChecklist(undefined), undefined, "a standalone session has no dispatch record");
+  assert.deepEqual(dispatchedChecklist({ acceptancePlan: "起服务 → 调接口" }), { plan: "起服务 → 调接口" },
+    "the plan's own checklist is handed over verbatim — there is no heading to parse");
+  const empty = dispatchedChecklist({ acceptancePlan: "   " });
+  assert.equal(empty?.plan, undefined);
+  assert.match(empty?.problem ?? "", /验收清单是空的/);
+});
+
+test("a DISPATCHED checklist reaches the round as-is — no 「真实验收方案」 heading to parse (2026-10-20)", () => {
+  // A dispatched orchestration plan carries the checklist as plain prose: there
+  // is no section heading to parse, and running the parser over it answered
+  // undefined, which silently SKIPPED the plan's one acceptance round.
+  const task = buildAcceptanceTask({
+    repoRoot: "/repo",
+    goalText: "",
+    planText: "起服务 → 调接口 → 比对返回数据 → 再验邻居路径",
+  });
+  assert.match(task, /起服务 → 调接口 → 比对返回数据/, "the plan's own checklist is what the judge works");
+  assert.match(task, /acceptance_plan/, "and it is handed over as the plan of record");
+});
 
 test("buildAcceptanceTask: gate instructions first, the goal's plan and the range as untrusted data", () => {
   const goal = [

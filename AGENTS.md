@@ -132,14 +132,15 @@ reviewer over the WHOLE change:
 
 - **验收轮是完成时刻的第六个 judge，由门禁自己派（2026-09-22，L9）.** 它不是
   `judge_submit` 的产物：本轮有代码改动、有一份**用户批准的**验收方案（goal 的
-  「真实验收方案」段（编排子会话没有 goal：那一份来自 plan 的 `acceptancePlan`，由派发写进
-  它的 sidecar）——goal 环节关闭或 goal 未批准、plan 也没有清单时就跳不成，该轮会被记录成
-  SKIPPED 跳过），且没有绑定当前内容的验收结论时，`declare_done` 内部**自己**派出 `acceptance`
+  「真实验收方案」段；编排子会话没有 goal，那一份来自 plan 的 `acceptancePlan`，由派发写进
+  它的 sidecar），且没有绑定当前内容的验收结论时，`declare_done` 内部**自己**派出 `acceptance`
   （agent 叫不动它 —— `judge_submit`
   不接受这个名字），并把下一步写成 `judge_wait({role:"acceptance"})`；非 READY、
   或那份 READY 绑定的内容已经移动 ⇒ 拒绝完成。它**不进 `unmetRequirements`** ——
   修验收 finding 要 commit，而 commit 又要过 ship 门禁，进了那一层就是自我死锁
-  （理由写在 `lib/acceptance-round.ts` 的 docblock 里）。判据是 goal 的
+  （理由写在 `lib/acceptance-round.ts` 的 docblock 里）。**没有清单不跳**：goal 环节关闭且
+  goal 未批准、或编排子会话的 plan 清单为空 ⇒ 该轮被拒（子会话那条是 BLOCKED，由项目经理补
+  plan 的清单并重批）。判据是 goal 的
   「真实验收方案」段：真起、真调、比返回数据、再验邻居路径；没有真实执行证据不得
   READY，环境确实跑不起来时如实报 BLOCKED 而不是自我豁免。取消矩阵里没有它 ——
   矩阵裁的是同一时刻并行的三方，验收轮是完成时刻单独的一轮。
