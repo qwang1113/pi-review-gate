@@ -14,6 +14,7 @@ import type { ChoiceSpec } from "../lib/choice-dialog.ts";
 import { BACK_ROW, DECLINE_ROW } from "../lib/choice-dialog.ts";
 import { emptyState, type GateState } from "../lib/gate-state.ts";
 import { SENSITIVE_GRANT_TTL_MS, type SensitiveGrant } from "../lib/sensitive-grant.ts";
+import type { StandingTmuxAuthority } from "../lib/tmux-permission.ts";
 import { git, neutraliseHostGitConfig } from "./helpers/git.ts";
 
 /**
@@ -75,6 +76,8 @@ interface Fake {
   cwd: string;
   sessionEdited: string[];
   ahead: number;
+  /** The STANDING tmux permission this fake session holds (lib/tmux-permission.ts), if any. */
+  standing?: StandingTmuxAuthority;
 }
 
 /** A tool context with a UI (the normal, interactive case). */
@@ -152,6 +155,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     commitsAheadOfBase: async () => f.ahead,
     scopeLimitDeclined: () => f.scopeDeclined,
     declineScopeLimit: () => { f.scopeDeclined = true; },
+    standingTmuxAccess: () => f.standing,
     tmuxAccessDeclined: () => f.tmuxDeclined,
     declineTmuxAccess: () => { f.tmuxDeclined = true; },
     sensitiveGrants: () => f.grants,
@@ -322,10 +326,15 @@ test("request_tmux_access: a declined session, no UI, and an unshowable dialog a
   assert.equal(broken.tmuxDeclined, false, "a dialog that never appeared must not burn the lock");
 });
 
-test("request_tmux_access: a project manager with no channel side is no longer refused", async () => {
+test("request_tmux_access: a project manager WITHOUT an approved plan still asks", async () => {
   // The ONE role whose own tmux operations the gate refuses (`split-window` /
   // `send-keys` / `kill-pane` are the tool-replaced tier) used to be refused
   // the REQUEST as well, so its refusal had no way out at all (2026-09-18).
+  //
+  // SINCE 2026-10-21 the manager that holds a plan the USER approved stops
+  // asking (the next test covers that); this one is the OTHER manager — a
+  // fresh orchestrator session, or one whose approval was revoked — and it
+  // still has to reach the dialog, or the role is walled in again.
   //
   // WHAT THIS COVERS, and what it deliberately does not: the request reaches
   // the dialog seam and the grant it returns is the one any session gets.
@@ -349,6 +358,31 @@ test("request_tmux_access: a project manager with no channel side is no longer r
   const noUi = await runWithCtx(headless, "request_tmux_access", { reason: "x" }, { hasUI: false });
   assert.equal(noUi.isError, true);
   assert.match(textOf(noUi), /no interactive UI/);
+});
+
+test("request_tmux_access: a STANDING permission is answered, never asked (2026-10-21)", async () => {
+  // Two roles hold tmux without a dialog (lib/tmux-permission.ts): the
+  // acceptance window, and the project manager whose PLAN THE USER APPROVED.
+  // Raising the box anyway would be a question whose answer is already known —
+  // and for the manager it arrives exactly when the gate itself is broken.
+  const standing: StandingTmuxAuthority = {
+    source: "orchestrator-plan",
+    why: "你是这个编排的项目经理（plan 已由用户批准）",
+    access: { at: "orchestrator-plan", scope: "session" },
+  };
+  const f = fake();
+  f.st.taskMode = "orchestrator";
+  f.standing = standing;
+  const reply = await call(f, "request_tmux_access", { reason: "要去清掉卡住的子会话" });
+  assert.equal(reply.isError, undefined);
+  assert.equal(reply.details?.granted, true);
+  assert.equal(reply.details?.standing, "orchestrator-plan", "the reply names WHY it is already held");
+  assert.match(textOf(reply), /你已经有 tmux 权限/);
+  assert.match(textOf(reply), /plan 已由用户批准/);
+  assert.equal(f.asked.length, 0, "no dialog is raised for an answer that is already known");
+  assert.equal(f.st.tmuxAccess, undefined,
+    "and nothing is persisted — a standing permission is not a grant");
+  assert.equal(f.persists, 0);
 });
 
 // ---------- ask_user ----------

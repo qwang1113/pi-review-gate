@@ -74,7 +74,8 @@ import { selfPaneOwner } from "../lib/orchestrator-pane-decor.ts";
 import { createPaneStateReporter } from "../lib/tmux-pane-state.ts";
 import { closeOwnSessionOnExit } from "../lib/session-scope-exit.ts";
 import { claimGateInstance } from "../lib/session-launch-specs.ts";
-import { judgeMayRunTmux, readJudgeSideEnv } from "../lib/judge-side.ts";
+import { readJudgeSideEnv } from "../lib/judge-side.ts";
+import { resolveTmuxPermission } from "../lib/tmux-permission.ts";
 import { readWorkerSideEnv } from "../lib/worker-side.ts";
 import { createOrchestratorDeps, runTmux as rawTmux } from "../lib/orchestrator-wiring.ts";
 import { sideEffectsEnabled } from "../lib/side-effects.ts";
@@ -922,6 +923,19 @@ export default function reviewGate(pi: ExtensionAPI) {
   const { computeTokenBindings, resolveArbiterModel, appendLesson } = arbitration;
 
   // ---------- L1: tool_call — sensitive files + ship gate (lib/ship-gate-hook.ts) ----------
+  /**
+   * "May this session type tmux, and why?" — lib/tmux-permission.ts owns the
+   * standing table (the acceptance window; the project manager whose PLAN THE
+   * USER APPROVED) and the rule that a standing permission wins over the
+   * sidecar's own grant. This closure only supplies the facts, so the ship
+   * gate and `request_tmux_access` cannot disagree.
+   */
+  const tmuxPermission = () => resolveTmuxPermission({
+    judgeRole: readJudgeSideEnv(process.env)?.role,
+    taskMode: cells.state.taskMode,
+    planApproved: cells.state.orchestrator?.approvedPlanHash !== undefined,
+    granted: cells.state.tmuxAccess,
+  });
   const shipGateHookDeps: ShipGateHookDeps = {
     noteContext: (c) => { cells.latestCtx = c as ExtensionContext; },
     // A HINT, not a refusal — and it rides THE CALL'S OWN RESULT (user
@@ -974,10 +988,9 @@ export default function reviewGate(pi: ExtensionAPI) {
     appendLesson,
     bypassToken: () => cells.bypassToken,
     setBypassToken: (token) => { cells.bypassToken = token; },
-    // The tmux permission is read LIVE off the state (minted mid-session).
-    tmuxAccess: () => judgeMayRunTmux(process.env)
-      ? { at: "acceptance-window", scope: "session" as const }
-      : cells.state.tmuxAccess,
+    // Read LIVE: a grant is minted mid-session, and so is the plan approval
+    // that mints the project manager's standing one.
+    tmuxAccess: () => tmuxPermission().access,
     consumeTmuxAccess: () => {
       // One use, and only a ONE-SHOT is consumed.
       if (cells.state.tmuxAccess?.scope !== "once") return;
@@ -1419,6 +1432,7 @@ export default function reviewGate(pi: ExtensionAPI) {
     commitsAheadOfBase: async () => commitsAheadOfBase(cells.cwd),
     scopeLimitDeclined: () => cells.scopeLimitDeclined,
     declineScopeLimit: () => { cells.scopeLimitDeclined = true; },
+    standingTmuxAccess: () => tmuxPermission().standing,
     tmuxAccessDeclined: () => cells.tmuxAccessDeclined,
     declineTmuxAccess: () => { cells.tmuxAccessDeclined = true; },
     sensitiveGrants: () => cells.sensitiveGrants,

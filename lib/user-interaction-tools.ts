@@ -38,6 +38,7 @@ import { Type } from "typebox";
 
 import type { ToolHost } from "./tool-host.ts";
 import type { GateState } from "./gate-state.ts";
+import type { StandingTmuxAuthority } from "./tmux-permission.ts";
 import type { ChannelDialogOutcome, ChannelDialogRequest, DialogRenderer } from "./orchestrator-child-channel.ts";
 import type { SensitiveGrant } from "./sensitive-grant.ts";
 import type { AskChoiceOpts, ChoiceSpec } from "./choice-dialog.ts";
@@ -152,6 +153,15 @@ export interface UserInteractionToolDeps {
   scopeLimitDeclined(): boolean;
   /** Record that they did — one decline locks the session. */
   declineScopeLimit(): void;
+  /**
+   * The STANDING tmux permission this session holds without asking
+   * (lib/tmux-permission.ts), if any.
+   *
+   * Consumed by `request_tmux_access`: a box whose answer is already known is
+   * not a question, it is a stall. Two rows hold one — the acceptance window,
+   * and the project manager whose plan the USER approved (2026-10-21).
+   */
+  standingTmuxAccess(): StandingTmuxAuthority | undefined;
   /** Did the user already decline tmux access this session? */
   tmuxAccessDeclined(): boolean;
   /** Record that they did — one decline locks the session. */
@@ -176,7 +186,7 @@ export type ConsentToolDeps = Pick<
   UserInteractionToolDeps,
   | "state" | "persist" | "showToUser" | "askChoice" | "cwd" | "repoRoot"
   | "sessionEditedPaths" | "commitsAheadOfBase" | "scopeLimitDeclined"
-  | "declineScopeLimit" | "tmuxAccessDeclined" | "declineTmuxAccess"
+  | "declineScopeLimit" | "standingTmuxAccess" | "tmuxAccessDeclined" | "declineTmuxAccess"
   | "sensitiveGrants" | "storeSensitiveGrants"
   | "sensitiveDeclinedPaths" | "log" | "askEitherSide" | "canChannelDialogs"
 >;

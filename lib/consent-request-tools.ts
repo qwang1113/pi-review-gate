@@ -401,14 +401,28 @@ export async function doRequestTmuxAccess(
   if (state.taskMode === "normal") {
     return { content: [{ type: "text", text: "review-gate: normal mode — the gate is off, nothing refuses tmux here; no authorization needed." }], details: {} };
   }
-  // NO orchestrator self-block here (changed 2026-09-18). The other two consent
-  // tools keep theirs — the manager writes no code, so it has nothing of its
-  // own to ask for — but tmux is the one thing the gate refuses the MANAGER
-  // ITSELF (`split-window` / `send-keys` / `kill-pane` are the tool-replaced
-  // tier). Refusing the request on top of that left the one role whose tmux is
-  // blocked with no way out at all, so it now asks exactly like a standalone
-  // session: with no channel side to ask, `askEitherSide` renders the user's
-  // own dialog.
+  // A STANDING PERMISSION IS ANSWERED, NOT ASKED (2026-10-21). Two roles hold
+  // tmux without a dialog (lib/tmux-permission.ts): the acceptance window, and
+  // the project manager whose PLAN THE USER APPROVED. A box there is a
+  // question whose answer is already known — and for the manager it would
+  // arrive exactly when the gate itself is what broke, which is the moment
+  // nobody wants to be woken up for it.
+  const standing = deps.standingTmuxAccess();
+  if (standing) {
+    return {
+      content: [{
+        type: "text",
+        text: "review-gate: 你已经有 tmux 权限了 —— " + standing.why + "。直接用，不用申请。",
+      }],
+      details: { granted: true, standing: standing.source, scope: standing.access.scope },
+    };
+  }
+  // NO orchestrator self-block here (changed 2026-09-18) — it still matters for
+  // the manager that holds NO approved plan yet (a fresh orchestrator session,
+  // or one whose approval was revoked): it asks exactly like a standalone
+  // session, and with no channel side to ask, `askEitherSide` renders the
+  // user's own dialog. The other two consent tools keep their self-blocks —
+  // the manager writes no code, so it has nothing of its own to ask for.
   if (state.tmuxAccess) {
     return {
       content: [{ type: "text", text: `review-gate: 已经有 tmux 授权了（scope=${state.tmuxAccess.scope}）—— 直接用，不用再问。` }],

@@ -55,14 +55,13 @@ export function readJudgeSideEnv(env: NodeJS.ProcessEnv): JudgeSideConfig | unde
 }
 
 /**
- * THE ACCEPTANCE WINDOW RUNS TMUX WITHOUT ASKING (2026-09-29, user decision):
- * standing up the changed system for real means nested sessions on their own
- * tmux socket, and a permission box there only parked the round (22 minutes,
- * measured). Every other judge, worker and session keeps the tmux gate.
+ * WHO may type tmux without asking moved to lib/tmux-permission.ts
+ * (2026-10-21): the acceptance window's standing grant is one row of a
+ * two-row table now (the other is the project manager whose plan the user
+ * approved), and a table split across modules is a table that drifts.
+ * This module keeps the pane's IDENTITY (readJudgeSideEnv), which is the
+ * fact that table is fed.
  */
-export function judgeMayRunTmux(env: NodeJS.ProcessEnv): boolean {
-  return readJudgeSideEnv(env)?.role === "acceptance";
-}
 
 /**
  * "A judge writes NO gate state" lives in lib/session-exclusivity.ts
