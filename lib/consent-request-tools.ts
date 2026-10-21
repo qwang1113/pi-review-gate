@@ -701,13 +701,17 @@ export function registerConsentRequestTools(host: ToolHost, deps: ConsentToolDep
       "Ask the USER for authorization to run tmux commands from bash. The gate REFUSES an " +
       "unauthorized tmux operation (a destructive one like `kill-server` / `kill-session` / " +
       "`new-session` / `set -g`, or, in project-manager mode, one an orchestration tool already " +
-      "does properly: `split-window` / `send-keys` / `kill-pane`), and this is the ONLY way to " +
-      "lift that. The extension shows the user the gate's dialog; in an orchestration the child " +
-      "asks its project manager through the channel, but the manager may only answer after the " +
-      "USER granted it the `tmux-access` scope (same rule as a sensitive file — `kill-server` " +
-      "would take the user's whole session with it). A project manager asks for its OWN session " +
-      "the way a standalone session does — there is no channel side to ask, so the dialog goes " +
-      "straight to the user. A grant covers THIS session and the " +
+      "does properly: `split-window` / `send-keys` / `kill-pane`). TWO roles never need this " +
+      "call, because the gate already gives them tmux without a dialog: the acceptance window, " +
+      "and a project manager whose plan the USER approved (lib/tmux-permission.ts). Every other " +
+      "session lifts the refusal here, and this tool then shows the user the gate's dialog; in " +
+      "an orchestration the child asks its project manager through the channel, but the manager " +
+      "may only answer after the USER granted it the `tmux-access` scope (same rule as a " +
+      "sensitive file — `kill-server` would take the user's whole session with it). A project " +
+      "manager whose plan is NOT approved yet asks for its OWN session the way a standalone " +
+      "session does — there is no channel side to ask, so the dialog goes straight to the user. " +
+      "Calling this with a standing permission already held just answers that, rather than " +
+      "raising a box. A grant covers THIS session and the " +
       "`session_handoff` successor it names, so " +
       "a long piece of work does not re-ask after a handover; 'once' is consumed by the next tmux " +
       "command. An `orchestrator_attach` takeover inherits nothing. Read-only tmux commands " +
