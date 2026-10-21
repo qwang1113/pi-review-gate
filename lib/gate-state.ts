@@ -23,6 +23,8 @@ import type { AcceptanceRecord } from "./acceptance-round.ts";
 import type { LoopStagesRecord } from "./loop-stages.ts";
 import type { RestatementRecord } from "./restatement.ts";
 import type { ShipCommandKind } from "./constants.ts";
+// The permission's SHAPE lives with the rule that mints it (one definition).
+import type { TmuxAccess } from "./tmux-permission.ts";
 
 import type { GoalPrereviewRecord, LoopGoalConfirmation } from "./loop-goal.ts";
 import type { QualityRecord } from "./quality-round.ts";
@@ -347,7 +349,7 @@ export interface GateState {
    * taking over an address, not a continuation of this one's judgement, and
    * the same line already governs the plan approval and the goal contract.
    */
-  tmuxAccess?: { at: string; scope: "session" | "once" };
+  tmuxAccess?: TmuxAccess;
   /**
    * THE ONE TMUX SESSION THIS SESSION CREATED FOR ITS CHILDREN (2026-09-25).
    *

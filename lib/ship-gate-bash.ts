@@ -112,6 +112,11 @@ export async function evaluateShipCommand(
   // changed is not the detection but who holds it: the blast radius of an
   // improvised tmux command is the USER'S working environment, and the
   // permission for that comes from them, not from the agent's judgement.
+  //
+  // "AUTHORIZED" IS NOT ONLY THE USER'S DIALOG (2026-10-21):
+  // lib/tmux-permission.ts also mints STANDING permissions — the acceptance
+  // window, and the project manager whose plan the user approved — and
+  // `deps.tmuxAccess()` merges them, so this arm never branches on the source.
   const tmuxHit = detectForbiddenTmux(command, {
     orchestratorMode: deps.taskMode() === "orchestrator",
   });
