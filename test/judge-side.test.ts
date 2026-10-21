@@ -11,7 +11,6 @@ import {
 } from "../lib/channel-io.ts";
 import {
   judgeDeniedReason,
-  judgeMayRunTmux,
   judgeSideBinding,
   readJudgeSideEnv,
 } from "../lib/judge-side.ts";
@@ -38,15 +37,10 @@ test("judge identity comes from the environment, or not at all", () => {
   );
 });
 
-test("only the acceptance window runs tmux without asking", () => {
-  const judge = (role: string) => ({ RG_JUDGE_OPENER: "o1", RG_JUDGE_ID: "j1", RG_JUDGE_ROLE: role });
-  assert.equal(judgeMayRunTmux(judge("acceptance")), true);
-  for (const role of ["reviewer", "quality-auditor", "goal-auditor", "adviser", "arbiter"]) {
-    assert.equal(judgeMayRunTmux(judge(role)), false, role);
-  }
-  assert.equal(judgeMayRunTmux({ RG_JUDGE_ROLE: "acceptance" }), false, "a role alone is not a judge window");
-  assert.equal(judgeMayRunTmux({}), false);
-});
+// WHO may run tmux without asking is no longer this module's question: the
+// acceptance window's standing grant moved to lib/tmux-permission.ts
+// (2026-10-21), where it sits next to the project manager's. Its tests moved
+// with it (test/tmux-permission.test.ts).
 
 test("the judge binding talks through the opener's file for its judge", () => {
   const io = memoryIO();

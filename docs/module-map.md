@@ -405,7 +405,8 @@ brief，`session-dir.ts` 保证 transcript 指针的编码与 pi 逐字节一致
   是通道记录与子会话回执）、`user-notify.ts`（桌面通知：三种事件 + 节流 +
   `terminal-notifier` 的 argv 与点击回 pane —— 第三类「停下来等你回答」有两个入口：
   对话框弹出、以及 plan 决策登记）、`orchestrator-guard.ts`（tmux 权限门：
-  未授权拦，授权走 `request_tmux_access`）。
+  未授权拦；「谁算已授权」由 `tmux-permission.ts` 的恒定权限表回答 ——
+  用户的 `request_tmux_access`、验收窗口、以及 **plan 获批后的项目经理**）。
 - **工具与接线**：`orchestrator-tools.ts`（plan 工具注册）、`orchestrator-plan-action.ts`
   （plan 各 action 的实现）、`orchestrator-plan-messages.ts`（plan 批准框文案）、
   `orchestrator-session-tools.ts`（spawn / instruct / wait / close 的
@@ -562,7 +563,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 
 ---
 
-## 五、`lib/` 全量速查表（289 个模块）
+## 五、`lib/` 全量速查表（290 个模块）
 
 **维护指令（现在有机械约束了）**：在 `lib/` 下**新增或删除**一个模块时，
 **同一轮改动里**顺手加/删这里的一行。忘了会红——`test/module-map.test.ts`
@@ -823,6 +824,7 @@ agent 目录里其他 .md 不算门禁角色），`gate-doctor.ts` 是 `/gate-do
 | `interrupt-delivery.ts` | **interrupt 投递的两步时序 + 本轮沉默的读数**（2026-09-21）。**第一件**：interrupt 的时序（实测缺陷：judge pane 正在跑时收到下一轮派发，正文进 steering 队列后永不 drain，两个审核卡死 552s）：`abort()` → 等 `isIdle()`（`INTERRUPT_IDLE_WAIT_MS = 3_000`，`INTERRUPT_POLL_MS = 50`）→ **不带 `deliverAs`** 投递（pi 的契约：非 streaming 时裸调用才会「立即发送并开启新 turn」）；**等不到 idle 就什么都不发**（返回 `deferred`，正文留在通道里由下一次 drain 重试）—— 退回 `steer` 排队**正是同一个死锁换顶帽子**。**第二件**：`roundLooksUnstarted` + `ROUND_SILENT_MS = 180_000` —— transcript 沉默超过阈值且本轮无 report 时报出的**读数**（不是结论）：judge_wait 的回执里点名 pane、阀值与三种可能，建议再等一等、确认没动静才 `judge_submit({ fresh: true })`，**门禁从不自动重派**；派发时刻（`JudgeEntry.spawnedAt`）是读数下限，否则复用 lane 上的新轮会被误报；**不去区分「在等人回答」**（试过，三轮审查找出三种让这个谓词永久失效的残留）：回执本来就把它写成三种可能之一。纯逻辑，sleep/时钟全注入 | `test/interrupt-delivery.test.ts` · `"the abort is requested FIRST, and the text waits for the pane to stop"` · `"a pane that never stops is DEFERRED — nothing is queued into the dead queue"` · `"a round that never touched its transcript LOOKS unstarted — and that is only a REPORT"` · `test/judge-session-tools.test.ts` · `"judge_wait reports a silent round as a READING"` | 顺序就是修复本身：先 abort、等到 pane 空闲、再裸调用投递 —— 反序或省掉等待就是那个死锁；等不到空闲**一个字节都不许发**；`deferred` 必须以 `stage: received` 回执；静默检测**只报读数不宣称结论**（长工具调用与等人回答会产生同样的读数），**绝不自动重派**；`extensions/review-gate.ts` 里不得再出现 `pi.sendUserMessage(interruptText, { deliverAs: "steer" })` 的旧形态（源码扫描钉死） |
 | `tmux-exec.ts` | tmux 命令的**唯一 exec 包装**（无 shell、先过 `assertSafeTmuxArgv`、10s 超时、失败返回 `{ok:false,stderr}`）：门禁的 runner（`orchestrator-wiring.ts`）与独立 daemon（`daemon/control.ts`）共用一份。放在这里而不是 `orchestrator-tmux.ts`：后者的模块头自称「纯 argv 构建器，从不 spawn」，一个有 spawn 的东西住进去就是跟自己的文档相反 |
 | `tmux-pane-state.ts` | **本 pane 在做什么**（2026-09-27 s1）：每个 pi 会话（含非 git 目录的）用自己的 5s 定时器（`orchestrator-runtime-host.ts` 的 `startPaneState`，`session_start` 在非 git 短路之前启动，随命名心跳一起停）往本 pane 写 `@rg_sid` / `@rg_repo` / `@rg_kind` / `@rg_state`（`CHILD_STATES` 词表；对话框开着 ⇒ `waiting-input`，计数来自 `gate-dialogs.ts` 的 `dialogsOnScreen`）/ `@rg_state_at`；变化或满 30s 才写，一律 `set -p`，进程退出 `set -pu` 收回 |
+| `tmux-permission.ts` | **谁可以不问就用 tmux**（2026-10-21）：恒定权限表只有两行 —— 验收窗口（2026-09-29，真实验收要起真实系统、可能开嵌套会话）、**plan 已被用户批准的项目经理**（门禁自己出问题、工具拒绝、子会话卡在坏掉的框上时，编排工具正是失效的那些，它要能手动收拾现场）。`resolveTmuxPermission` 给合并结果（恒定权限优先于 sidecar 的 `tmuxAccess`）与来源：ship gate 读 `access`，`request_tmux_access` 读 `standing`（有它就不弹框，直接回「你已有权限」并说明为什么）。**判据是「用户批准过的 plan」，不是 `taskMode` 本身** —— `set_gate_mode` 进 orchestrator 免确认，只看模式等于让任何 loop 会话一次工具调用自取 `kill-server`；plan 未批准或批准被撤销时权限随之消失。纯函数，judge role / 模式 / 批准事实由调用方解析后传入 |
 | `tmux-sidebar-collect.ts` | tmux 侧边栏的**唯一一次读**：`list-panes -a` 的格式与解析（pane 选项 + session 的 `@rg_scope_owner` + window 的 `@rg_session_name` + 侧边栏自己的 `@rg_sidebar` 标记） |
 | `tmux-sidebar-tree.ts` | 侧边栏的树：repo 分组 → pi 会话 → 它派出的子 window（靠子 window 所在 session 的 `@rg_scope_owner` 找开启者，可嵌套）、开启者已不在的孤儿、「其他」栏、`stalled`（`@rg_state_at` 超 90s）与「等你回答」计数。纯函数 |
 | `tmux-sidebar-render.ts` | 侧边栏的屏幕：行文本（宽度按 CJK / emoji 双宽、零宽连接符与变体选择符零宽计）、行 → 跳转目标、选择/滚动/鼠标点击行号映射与着色。纯函数；终端循环在 `scripts/tmux-sidebar.ts` |

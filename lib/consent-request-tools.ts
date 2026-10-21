@@ -401,14 +401,28 @@ export async function doRequestTmuxAccess(
   if (state.taskMode === "normal") {
     return { content: [{ type: "text", text: "review-gate: normal mode — the gate is off, nothing refuses tmux here; no authorization needed." }], details: {} };
   }
-  // NO orchestrator self-block here (changed 2026-09-18). The other two consent
-  // tools keep theirs — the manager writes no code, so it has nothing of its
-  // own to ask for — but tmux is the one thing the gate refuses the MANAGER
-  // ITSELF (`split-window` / `send-keys` / `kill-pane` are the tool-replaced
-  // tier). Refusing the request on top of that left the one role whose tmux is
-  // blocked with no way out at all, so it now asks exactly like a standalone
-  // session: with no channel side to ask, `askEitherSide` renders the user's
-  // own dialog.
+  // A STANDING PERMISSION IS ANSWERED, NOT ASKED (2026-10-21). Two roles hold
+  // tmux without a dialog (lib/tmux-permission.ts): the acceptance window, and
+  // the project manager whose PLAN THE USER APPROVED. A box there is a
+  // question whose answer is already known — and for the manager it would
+  // arrive exactly when the gate itself is what broke, which is the moment
+  // nobody wants to be woken up for it.
+  const standing = deps.standingTmuxAccess();
+  if (standing) {
+    return {
+      content: [{
+        type: "text",
+        text: "review-gate: 你已经有 tmux 权限了 —— " + standing.why + "。直接用，不用申请。",
+      }],
+      details: { granted: true, standing: standing.source, scope: standing.access.scope },
+    };
+  }
+  // NO orchestrator self-block here (changed 2026-09-18) — it still matters for
+  // the manager that holds NO approved plan yet (a fresh orchestrator session,
+  // or one whose approval was revoked): it asks exactly like a standalone
+  // session, and with no channel side to ask, `askEitherSide` renders the
+  // user's own dialog. The other two consent tools keep their self-blocks —
+  // the manager writes no code, so it has nothing of its own to ask for.
   if (state.tmuxAccess) {
     return {
       content: [{ type: "text", text: `review-gate: 已经有 tmux 授权了（scope=${state.tmuxAccess.scope}）—— 直接用，不用再问。` }],
@@ -687,13 +701,17 @@ export function registerConsentRequestTools(host: ToolHost, deps: ConsentToolDep
       "Ask the USER for authorization to run tmux commands from bash. The gate REFUSES an " +
       "unauthorized tmux operation (a destructive one like `kill-server` / `kill-session` / " +
       "`new-session` / `set -g`, or, in project-manager mode, one an orchestration tool already " +
-      "does properly: `split-window` / `send-keys` / `kill-pane`), and this is the ONLY way to " +
-      "lift that. The extension shows the user the gate's dialog; in an orchestration the child " +
-      "asks its project manager through the channel, but the manager may only answer after the " +
-      "USER granted it the `tmux-access` scope (same rule as a sensitive file — `kill-server` " +
-      "would take the user's whole session with it). A project manager asks for its OWN session " +
-      "the way a standalone session does — there is no channel side to ask, so the dialog goes " +
-      "straight to the user. A grant covers THIS session and the " +
+      "does properly: `split-window` / `send-keys` / `kill-pane`). TWO roles never need this " +
+      "call, because the gate already gives them tmux without a dialog: the acceptance window, " +
+      "and a project manager whose plan the USER approved (lib/tmux-permission.ts). Every other " +
+      "session lifts the refusal here, and this tool then shows the user the gate's dialog; in " +
+      "an orchestration the child asks its project manager through the channel, but the manager " +
+      "may only answer after the USER granted it the `tmux-access` scope (same rule as a " +
+      "sensitive file — `kill-server` would take the user's whole session with it). A project " +
+      "manager whose plan is NOT approved yet asks for its OWN session the way a standalone " +
+      "session does — there is no channel side to ask, so the dialog goes straight to the user. " +
+      "Calling this with a standing permission already held just answers that, rather than " +
+      "raising a box. A grant covers THIS session and the " +
       "`session_handoff` successor it names, so " +
       "a long piece of work does not re-ask after a handover; 'once' is consumed by the next tmux " +
       "command. An `orchestrator_attach` takeover inherits nothing. Read-only tmux commands " +

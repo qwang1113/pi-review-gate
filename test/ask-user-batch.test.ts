@@ -203,6 +203,7 @@ function harness(
     commitsAheadOfBase: async () => 0,
     scopeLimitDeclined: () => false,
     declineScopeLimit: () => {},
+    standingTmuxAccess: () => undefined,
     tmuxAccessDeclined: () => false,
     declineTmuxAccess: () => {},
     sensitiveGrants: () => [] as SensitiveGrant[],

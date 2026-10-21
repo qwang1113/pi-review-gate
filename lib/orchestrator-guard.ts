@@ -22,7 +22,11 @@
  *
  * THE AGENT CANNOT GRANT ITSELF ANYTHING. It only asks; the answer comes from
  * the user's dialog (or, for a child session, from its manager), and a
- * dialog that cannot be shown is fail-closed.
+ * dialog that cannot be shown is fail-closed. The two STANDING grants
+ * (lib/tmux-permission.ts) are minted by facts the USER controls — an
+ * orchestration plan they approved, an acceptance round the gate dispatched
+ * — never by the session's own say-so: switching to orchestrator mode buys
+ * nothing on its own (2026-10-21).
  *
  * TWO TIERS, and the difference still matters — it is WHAT THE REFUSAL SAYS:
  *
@@ -40,8 +44,12 @@
  *     the user's grant, and a project manager asks for one the way any other
  *     session does — it used to be refused the REQUEST itself, which left the
  *     one role whose tmux the gate blocks with no way out at all (2026-09-18).
- *     Outside orchestrator mode they are left alone; an ordinary session
- *     running tmux for its own reasons is not this module's business.
+ *     SINCE 2026-10-21 the manager stops asking once the user has approved its
+ *     plan: that standing grant lives in lib/tmux-permission.ts (next to the
+ *     acceptance window's) and lifts BOTH tiers — the refusal path is not
+ *     reached, and the hint below still points at the tool. Outside
+ *     orchestrator mode they are left alone; an ordinary session running tmux
+ *     for its own reasons is not this module's business.
  *
  * QUOTED TEXT IS DATA. Detection runs over the shell lexer's UNQUOTED tokens
  * (lib/shell-lex.ts), so `echo "tmux kill-server"` and a quoted payload inside

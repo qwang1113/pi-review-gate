@@ -14,6 +14,7 @@ import type { SlowNoticeSink } from "./progress-stream.ts";
 import type { ProjectConfig } from "./project-config.ts";
 import type { TaskMode } from "./task-mode.ts";
 import type { AppealKind } from "./text-appeal.ts";
+import type { TmuxAccess } from "./tmux-permission.ts";
 
 /** The record `request_arbitration` contests — a REAL block, never a guess. */
 export interface BlockedShipRecord {
@@ -155,13 +156,18 @@ export interface ShipGateBashDeps {
   hint(message: string): void;
 
   /**
-   * The user's tmux authorization, if any (lib/gate-state.ts `tmuxAccess`).
+   * This session's tmux authorization, if any.
    *
-   * Callbacks rather than values: the grant is minted by a dialog DURING the
-   * session, and a captured snapshot would leave the first command after the
-   * grant still refused.
+   * TWO SOURCES, one answer (lib/tmux-permission.ts): the user's own grant
+   * (lib/gate-state.ts `tmuxAccess`) and the STANDING permissions the gate
+   * mints without a dialog — the acceptance window, and the project manager
+   * whose plan the user approved. The arm below never needs to know which.
+   *
+   * Callbacks rather than values: a grant is minted by a dialog DURING the
+   * session (a plan approval lands mid-session too), so a captured snapshot
+   * would leave the first command after it still refused.
    */
-  tmuxAccess(): { at: string; scope: "session" | "once" } | undefined;
+  tmuxAccess(): TmuxAccess | undefined;
   /** Spend a one-shot grant. Called only once the command is about to run. */
   consumeTmuxAccess(): void;
   /** The standing single-use arbiter bypass token, if one was issued. */

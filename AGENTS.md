@@ -146,7 +146,10 @@ reviewer over the WHOLE change:
   矩阵裁的是同一时刻并行的三方，验收轮是完成时刻单独的一轮。
   **它只看「上次验收 READY 之后」这一段**（2026-09-29，用户决定）：这一段只有文档 / 测试 ⇒
   不派（有 READY 就沿用），有其他文件 ⇒ 增量重验受影响的方案项；它的窗口里 tmux 不再要授权
-  （`lib/acceptance-scope.ts`、`lib/judge-side.ts` 的 `judgeMayRunTmux`）。
+  （`lib/acceptance-scope.ts`、`lib/tmux-permission.ts` 的恒定权限表）。
+  **项目经理的窗口同理**（2026-10-21，用户决定）：plan 被用户批准之后，那份恒定权限表也给它
+  一行 session 级 tmux 权限 —— 门禁自己出问题、工具拒绝、子会话卡住时，它是唯一能手动收拾
+  现场的一方。判据是**用户批准过的 plan**，不是模式本身（见下面「提问任意一方先答即生效」节）。
 
 - **五个环节是用户的开关，默认全开（2026-09-22）.** goal 协商（含需求反述）、功能
   审查、质量审查、真实验收、全量 precommit —— 用户自己在门禁的固定五勾清单里选
@@ -666,7 +669,15 @@ pane）。它是 `loop` **加上**编排约束，所以严格度排在 loop 之�
   改走 `orchestrator_answer`。`request_tmux_access` 相反（2026-09-18 用户决定）：PM 自己的
   tmux 操作**就是**被拦的那一档（`split-window` / `send-keys` / `kill-pane`），把申请也拒掉
   等于给它一个没有出口的拒绝，所以它和 loop 会话走同一条路 —— 无通道侧时框直接弹给用户，
-  批准后手写 tmux 放行（拦截范围与文案顺序不变）。三个授权入口：ask_user 带 `grantScope`
+  批准后手写 tmux 放行（拦截范围与文案顺序不变）。
+  **2026-10-21 起 PM 通常不再申请**（用户决定）：plan 被用户批准之后它自动持有 session 级
+  tmux 权限，与用户亲手批的那一档**完全等价**（含 `kill-server` / `kill-session`，只保留
+  「可以用编排工具」的提醒文案）—— 门禁自己出问题、子会话卡在一个不响应的框上时，编排工具
+  正是失效的那些，只有它能手动收拾现场。`request_tmux_access` 在它那里直接回「你已经有权限」
+  且不弹框。**判据是「用户批准过的 plan」，不是模式本身**：`set_gate_mode` 进 orchestrator 是免确认的升级，只看模式就等于让任何 loop 会话一次工具调用自取 `kill-server`；
+  plan 还没批准（或批准被撤销）的 PM 仍按上面那条老路申请。规则的唯一出处是
+  `lib/tmux-permission.ts`（恒定权限表：验收窗口 + 项目经理），ship gate 与
+  `request_tmux_access` 都从它取值。三个授权入口：ask_user 带 `grantScope`
   的提问、`/gate-grant <scope>` 命令（作用域：`sensitive-edit`、`tmux-access`）、首次代答的三选框。
 - **一次 `ask_user` 的多题整批上送、整批回答**（2026-09-06）：子会话在弹出第一个
   框之前，就把本次采访的全部问题一次性写成 N 条 request 记录（新增可选字段
